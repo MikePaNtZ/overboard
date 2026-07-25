@@ -1,0 +1,16 @@
+[package]
+name = "board-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "board-app"
+path = "src/main.rs"
+
+[dependencies]
+board-types = { workspace = true }
+hal = { workspace = true }
+control-core = { workspace = true }
+safety = { workspace = true }
+sim-backend = { workspace = true }

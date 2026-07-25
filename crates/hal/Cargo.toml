@@ -1,0 +1,8 @@
+[package]
+name = "hal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+board-types = { workspace = true }

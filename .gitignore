@@ -1,0 +1,4 @@
+/target/
+/.venv/
+/sim/out/*
+!/sim/out/.gitkeep

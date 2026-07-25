@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/board-types",
+    "crates/hal",
+    "crates/control-core",
+    "crates/safety",
+    "crates/sim-backend",
+    "crates/board-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+board-types = { path = "crates/board-types" }
+hal = { path = "crates/hal" }
+control-core = { path = "crates/control-core" }
+safety = { path = "crates/safety" }
+sim-backend = { path = "crates/sim-backend" }
+serde = { version = "1", default-features = false, features = ["derive"] }

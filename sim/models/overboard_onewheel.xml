@@ -1,0 +1,52 @@
+<mujoco model="overboard_onewheel">
+  <!--
+    Overboard onewheel checkpoint model.
+
+    A single hub-motor wheel (cylinder) resting on a ground plane, with a
+    mast + rider mass rigidly hinged well above the wheel's center of mass
+    -- a classic inverted pendulum on a wheel, i.e. a onewheel/unicycle.
+
+    Deliberately NO actuator/controller here: the mast_pitch hinge is given
+    a small (5 deg) initial lean so the unstable equilibrium is broken, and
+    with gravity on and nothing balancing it, the rig topples. This is the
+    intended "no controller yet" checkpoint -- see scripts/view_sim.py and
+    scripts/render_fall.py.
+  -->
+  <compiler angle="degree"/>
+
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="RK4"/>
+
+  <default>
+    <geom friction="1 0.005 0.0001"/>
+    <joint damping="0.05"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.6 0.75 0.9" rgb2="0.1 0.1 0.2" width="256" height="256"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.7 0.7 0.7" rgb2="0.85 0.85 0.85" width="256" height="256"/>
+    <material name="grid_mat" texture="grid" texrepeat="8 8" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light name="sun" directional="true" pos="0 0 4" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+
+    <geom name="ground" type="plane" size="5 5 0.1" material="grid_mat"/>
+
+    <body name="wheel" pos="0 0 0.15">
+      <joint name="wheel_free" type="free"/>
+      <geom name="wheel_geom" type="cylinder" size="0.15 0.02" euler="90 0 0"
+            rgba="0.15 0.15 0.15 1" mass="3.0"/>
+
+      <body name="mast" pos="0 0 0" euler="0 5 0">
+        <joint name="mast_pitch" type="hinge" axis="0 1 0" pos="0 0 0"/>
+        <geom name="mast_geom" type="capsule" fromto="0 0 0 0 0 0.55" size="0.02"
+              rgba="0.6 0.3 0.1 1" mass="0.5"/>
+
+        <body name="rider_mass" pos="0 0 0.55">
+          <geom name="rider_geom" type="sphere" size="0.08"
+                rgba="0.85 0.1 0.1 1" mass="8.0"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

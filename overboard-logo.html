@@ -1,0 +1,124 @@
+<style>
+  :root{
+    --paper:#EFF3F2; --ink:#16232E; --muted:#5C6B72;
+    --stage:#F3F6F4; --stage-edge:#DBE4E1;
+    --tire:#23384A; --amber:#F2A24A; --amber2:#E07E22; --mint:#33C6AC; --cloud:#F4F8F7;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --paper:#0F1922; --ink:#EAF1F1; --muted:#8CA0A6;
+           --stage:#16242E; --stage-edge:#263A46; }
+  }
+  :root[data-theme="light"]{ --paper:#EFF3F2; --ink:#16232E; --muted:#5C6B72; --stage:#F3F6F4; --stage-edge:#DBE4E1; }
+  :root[data-theme="dark"]{ --paper:#0F1922; --ink:#EAF1F1; --muted:#8CA0A6; --stage:#16242E; --stage-edge:#263A46; }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font-family:"Helvetica Neue",Arial,system-ui,sans-serif;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    min-height:100vh;gap:6px;padding:48px 20px;}
+  .eyebrow{font-size:11px;letter-spacing:.42em;text-transform:uppercase;color:var(--mint);
+    font-weight:700;margin-bottom:22px;}
+  .stage{background:var(--stage);border:1px solid var(--stage-edge);border-radius:28px;
+    padding:34px 46px 26px;box-shadow:0 24px 60px -32px rgba(0,0,0,.5);}
+  .mark{width:min(360px,74vw);height:auto;display:block}
+  .rider{transform-origin:130px 150px;animation:wob 4.6s ease-in-out infinite}
+  @keyframes wob{0%,100%{transform:rotate(4deg)}50%{transform:rotate(-3deg)}}
+  @media (prefers-reduced-motion:reduce){.rider{animation:none;transform:rotate(2deg)}}
+  .wordmark{font-weight:800;font-size:clamp(38px,9vw,60px);letter-spacing:.02em;
+    margin:26px 0 0;text-align:center;line-height:.9;}
+  .wordmark b{color:var(--amber2)}
+  .rule{width:54px;height:4px;border-radius:3px;background:var(--mint);margin:16px 0 12px}
+  .tag{font-size:13px;letter-spacing:.24em;text-transform:uppercase;color:var(--ink);
+    font-weight:700;text-align:center}
+  .sub{font-size:12px;color:var(--muted);letter-spacing:.06em;margin-top:8px;text-align:center}
+  .variants{display:flex;gap:16px;align-items:center;margin-top:34px}
+  .chip{width:56px;height:56px;border-radius:14px;display:grid;place-items:center;
+    border:1px solid var(--stage-edge);background:var(--stage)}
+  .chip.dark{background:var(--tire);border-color:var(--tire)}
+  .clabel{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);text-align:center;margin-top:7px}
+  .vcol{display:flex;flex-direction:column;align-items:center}
+</style>
+
+<div class="eyebrow">Overboard · visual identity</div>
+
+<div class="stage">
+  <svg class="mark" viewBox="0 0 260 212" role="img" aria-label="Overboard onewheel character logo">
+    <!-- speed dashes -->
+    <g fill="var(--mint)" opacity="0.9">
+      <rect x="6"  y="96"  width="30" height="8" rx="4"/>
+      <rect x="2"  y="116" width="22" height="8" rx="4"/>
+      <rect x="12" y="136" width="16" height="8" rx="4"/>
+    </g>
+    <!-- ground shadow -->
+    <ellipse cx="134" cy="196" rx="74" ry="11" fill="var(--ink)" opacity="0.14"/>
+    <g class="rider">
+      <!-- deck plank (behind wheel) -->
+      <rect x="40" y="120" width="188" height="26" rx="13" fill="var(--amber)"/>
+      <rect x="40" y="120" width="188" height="9"  rx="6"  fill="var(--amber2)" opacity="0.55"/>
+      <!-- grip lines on deck ends -->
+      <g stroke="var(--amber2)" stroke-width="3" stroke-linecap="round" opacity="0.7">
+        <line x1="52" y1="131" x2="52" y2="139"/><line x1="60" y1="131" x2="60" y2="139"/><line x1="68" y1="131" x2="68" y2="139"/>
+        <line x1="200" y1="131" x2="200" y2="139"/><line x1="208" y1="131" x2="208" y2="139"/><line x1="216" y1="131" x2="216" y2="139"/>
+      </g>
+      <!-- tire -->
+      <circle cx="134" cy="133" r="60" fill="var(--tire)"/>
+      <circle cx="134" cy="133" r="60" fill="none" stroke="var(--ink)" stroke-width="2" opacity="0.35"/>
+      <circle cx="134" cy="133" r="48" fill="none" stroke="var(--amber)" stroke-width="2.5" opacity="0.35" stroke-dasharray="2 9"/>
+      <!-- hub = face -->
+      <circle cx="134" cy="133" r="35" fill="var(--amber)"/>
+      <circle cx="134" cy="133" r="35" fill="none" stroke="var(--amber2)" stroke-width="2.5"/>
+      <!-- eyes (looking ahead, eager) -->
+      <ellipse cx="123" cy="127" rx="7.5" ry="9" fill="var(--cloud)"/>
+      <ellipse cx="146" cy="127" rx="7.5" ry="9" fill="var(--cloud)"/>
+      <circle cx="126" cy="126" r="3.6" fill="var(--tire)"/>
+      <circle cx="149" cy="126" r="3.6" fill="var(--tire)"/>
+      <!-- cheeks -->
+      <circle cx="116" cy="141" r="4" fill="var(--mint)" opacity="0.85"/>
+      <circle cx="153" cy="141" r="4" fill="var(--mint)" opacity="0.85"/>
+      <!-- grin -->
+      <path d="M122 141 Q134 153 147 141" fill="none" stroke="var(--tire)" stroke-width="4" stroke-linecap="round"/>
+    </g>
+  </svg>
+</div>
+
+<div class="wordmark">OVER<b>BOARD</b></div>
+<div class="rule"></div>
+<div class="tag">Goes overboard. Stays on board.</div>
+<div class="sub">self-balancing onewheel · sim-first · Rust</div>
+
+<div class="variants">
+  <div class="vcol">
+    <div class="chip">
+      <svg width="40" height="40" viewBox="0 0 100 100" aria-hidden="true">
+        <rect x="8" y="46" width="84" height="12" rx="6" fill="var(--amber)"/>
+        <circle cx="50" cy="52" r="27" fill="var(--tire)"/>
+        <circle cx="50" cy="52" r="16" fill="var(--amber)"/>
+        <circle cx="44" cy="49" r="2.4" fill="var(--tire)"/><circle cx="56" cy="49" r="2.4" fill="var(--tire)"/>
+        <path d="M44 55 Q50 61 56 55" fill="none" stroke="var(--tire)" stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="clabel">app icon</div>
+  </div>
+  <div class="vcol">
+    <div class="chip dark">
+      <svg width="40" height="40" viewBox="0 0 100 100" aria-hidden="true">
+        <rect x="8" y="46" width="84" height="12" rx="6" fill="var(--cloud)"/>
+        <circle cx="50" cy="52" r="27" fill="none" stroke="var(--cloud)" stroke-width="4"/>
+        <circle cx="44" cy="49" r="2.4" fill="var(--cloud)"/><circle cx="56" cy="49" r="2.4" fill="var(--cloud)"/>
+        <path d="M44 55 Q50 61 56 55" fill="none" stroke="var(--cloud)" stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="clabel">1-color</div>
+  </div>
+  <div class="vcol">
+    <div class="chip">
+      <svg width="34" height="34" viewBox="0 0 100 100" aria-hidden="true">
+        <circle cx="50" cy="50" r="30" fill="var(--tire)"/>
+        <circle cx="50" cy="50" r="17" fill="var(--amber)"/>
+        <circle cx="44" cy="47" r="2.6" fill="var(--tire)"/><circle cx="56" cy="47" r="2.6" fill="var(--tire)"/>
+        <path d="M44 53 Q50 59 56 53" fill="none" stroke="var(--tire)" stroke-width="2.6" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="clabel">favicon</div>
+  </div>
+</div>
