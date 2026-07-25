@@ -62,6 +62,8 @@ python scripts/render_fall.py
 - `crates/safety` -- pure safety envelope (stub: arm/disarm passthrough).
 - `crates/sim-backend` -- `hal::BoardIo` backend (stub today; MuJoCo FFI is the next milestone).
 - `crates/board-app` -- the binary that wires it all together.
-- `sim/models` -- MuJoCo MJCF models (the shared physics asset).
+- `sim/models` -- MuJoCo MJCF models (the shared physics asset). The onewheel's
+  visual shells are imported from [Openwheel](https://github.com/bytesizedengineering/Openwheel)
+  by Byte Sized Engineering (MIT license, see `sim/models/meshes/openwheel/NOTICE.md`).
 - `scripts/` -- Python viewer/render scripts for the MuJoCo sim.
 - `docs/` -- Markdown+Mermaid mirrors of the design docs (Notion is the source of truth).

@@ -2,17 +2,33 @@
   <!--
     Overboard onewheel checkpoint model.
 
-    A single hub-motor wheel (cylinder) resting on a ground plane, with a
-    mast + rider mass rigidly hinged well above the wheel's center of mass
-    -- a classic inverted pendulum on a wheel, i.e. a onewheel/unicycle.
+    A single hub-motor wheel (real-dimension tire cylinder) with a deck/shell
+    assembly skinned from the MIT-licensed Openwheel STL shells (see
+    sim/models/meshes/openwheel/NOTICE.md for attribution), hinged well above
+    the tire's center of mass -- a classic inverted pendulum on a wheel, i.e.
+    a onewheel/unicycle. A short mast + rider-proxy mass sits on top of the
+    deck to keep the combined center of mass high (unstable equilibrium).
 
-    Deliberately NO actuator/controller here: the mast_pitch hinge is given
-    a small (5 deg) initial lean so the unstable equilibrium is broken, and
-    with gravity on and nothing balancing it, the rig topples. This is the
-    intended "no controller yet" checkpoint -- see scripts/view_sim.py and
+    Deliberately NO actuator/controller here: the mast_pitch hinge (which
+    carries the whole deck+shell+rider assembly) is given a small (5 deg)
+    initial lean so the unstable equilibrium is broken, and with gravity on
+    and nothing balancing it, the rig topples. This is the intended
+    "no controller yet" checkpoint -- see scripts/view_sim.py and
     scripts/render_fall.py.
+
+    Openwheel meshes are authored in millimeters in a shared assembly frame
+    centered on the wheel axle (verified by inspecting STL bounding boxes:
+    front/rear enclosure + bumper pairs mirror exactly across X=0, and the
+    front/rear gap between the enclosures is ~290mm -- i.e. a ~145mm tire
+    radius, matching the real onewheel tire size used below). Mesh scale is
+    therefore 0.001 (mm -> m) and no rotation is needed: mesh X/Y/Z already
+    line up with the body's fore-aft/lateral/up axes. The one exception is
+    "front_footpad.stl", which (per its raw vertex coordinates) was exported
+    sitting at the *rear* footpad location rather than mirrored to the front;
+    it is placed here with an extra 180 deg yaw (euler "0 0 180") to move it
+    to the front, matching front_enclosure/front_bumper.
   -->
-  <compiler angle="degree"/>
+  <compiler angle="degree" meshdir="meshes/openwheel"/>
 
   <option gravity="0 0 -9.81" timestep="0.002" integrator="RK4"/>
 
@@ -25,6 +41,15 @@
     <texture type="skybox" builtin="gradient" rgb1="0.6 0.75 0.9" rgb2="0.1 0.1 0.2" width="256" height="256"/>
     <texture name="grid" type="2d" builtin="checker" rgb1="0.7 0.7 0.7" rgb2="0.85 0.85 0.85" width="256" height="256"/>
     <material name="grid_mat" texture="grid" texrepeat="8 8" reflectance="0.1"/>
+    <material name="shell_mat" rgba="0.92 0.15 0.1 1"/>
+
+    <mesh name="front_enclosure" file="front_enclosure.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rear_enclosure" file="rear_enclosure.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="front_bumper" file="front_bumper.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rear_bumper" file="rear_bumper.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="front_footpad" file="front_footpad.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rear_footpad" file="rear_footpad.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="electronics_platform" file="electronics_platform.stl" scale="0.001 0.001 0.001"/>
   </asset>
 
   <worldbody>
@@ -32,19 +57,60 @@
 
     <geom name="ground" type="plane" size="5 5 0.1" material="grid_mat"/>
 
-    <body name="wheel" pos="0 0 0.15">
+    <!-- Wheel body: the tire + hub, real onewheel size (11.5in OD x 6in wide). -->
+    <body name="wheel" pos="0 0 0.146">
       <joint name="wheel_free" type="free"/>
-      <geom name="wheel_geom" type="cylinder" size="0.15 0.02" euler="90 0 0"
-            rgba="0.15 0.15 0.15 1" mass="3.0"/>
+      <inertial pos="0 0 0" mass="3.5" diaginertia="0.0252 0.0373 0.0252"/>
+      <geom name="wheel_geom" type="cylinder" size="0.146 0.075" euler="90 0 0"
+            rgba="0.08 0.08 0.08 1"/>
 
+      <!-- Deck/shell assembly: hinged for pitch (the "toppling" DOF), carries
+           the Openwheel shells (visual only), a simple collision footprint
+           box, and the mast + rider-proxy mass that keeps the system's CoM
+           high above the axle (unstable inverted pendulum). -->
       <body name="mast" pos="0 0 0" euler="0 5 0">
         <joint name="mast_pitch" type="hinge" axis="0 1 0" pos="0 0 0"/>
-        <geom name="mast_geom" type="capsule" fromto="0 0 0 0 0 0.55" size="0.02"
-              rgba="0.6 0.3 0.1 1" mass="0.5"/>
+        <inertial pos="0 0 0.03" mass="3.0" diaginertia="0.016 0.1625 0.1735"/>
+
+        <!-- Openwheel shells (visual only, real assembly-frame placement). -->
+        <geom name="front_enclosure_geom" type="mesh" mesh="front_enclosure" material="shell_mat"
+              contype="0" conaffinity="0" group="2"/>
+        <geom name="rear_enclosure_geom" type="mesh" mesh="rear_enclosure" material="shell_mat"
+              contype="0" conaffinity="0" group="2"/>
+        <geom name="front_bumper_geom" type="mesh" mesh="front_bumper" rgba="0.15 0.15 0.15 1"
+              contype="0" conaffinity="0" group="2"/>
+        <geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" rgba="0.15 0.15 0.15 1"
+              contype="0" conaffinity="0" group="2"/>
+        <!-- front_footpad.stl ships pre-placed at the rear footpad location;
+             yaw it 180 deg to mirror it onto the front (see header note). -->
+        <geom name="front_footpad_geom" type="mesh" mesh="front_footpad" euler="0 0 180"
+              rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0" group="2"/>
+        <geom name="rear_footpad_geom" type="mesh" mesh="rear_footpad"
+              rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0" group="2"/>
+        <geom name="electronics_platform_geom" type="mesh" mesh="electronics_platform"
+              rgba="0.3 0.3 0.3 1" contype="0" conaffinity="0" group="2"/>
+
+        <!-- Simple, robust collision footprint for the deck (not the shell meshes).
+             Sized deliberately smaller than the full nose-to-tail shell length: a
+             box reaching all the way to the bumper tips (~0.4m) would dig its
+             corner into the ground and mechanically arrest the fall by ~21 deg
+             (0.146m axle height / sin(theta) = 0.40m reach). Half-length 0.16m
+             keeps the deck clear of the ground until ~66 deg of lean, well past
+             the 45 deg toppled threshold, while still contacting the ground for
+             a large enough lean (matches a real onewheel's nose eventually
+             scraping down -- just at a higher angle than the true 0.4m reach
+             would give). -->
+        <geom name="deck_collision" type="box" size="0.16 0.116 0.02" pos="0 0 0.02"
+              rgba="0.5 0.5 0.5 0.0" group="3"/>
+
+        <!-- Mast + rider-proxy mass: keeps the CoM well above the axle. -->
+        <geom name="mast_geom" type="capsule" fromto="0 0 0.058 0 0 0.55" size="0.02"
+              rgba="0.6 0.3 0.1 1"/>
 
         <body name="rider_mass" pos="0 0 0.55">
+          <inertial pos="0 0 0" mass="8.0" diaginertia="0.0205 0.0205 0.0205"/>
           <geom name="rider_geom" type="sphere" size="0.08"
-                rgba="0.85 0.1 0.1 1" mass="8.0"/>
+                rgba="0.85 0.1 0.1 1"/>
         </body>
       </body>
     </body>
