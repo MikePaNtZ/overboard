@@ -222,9 +222,18 @@ def _pane_label(frame: np.ndarray, title: str, subtitle: str, colour) -> np.ndar
 
 
 def render_comparison(
-    open_loop: ImpulseResult, closed: ImpulseResult, camera: str
+    open_loop: ImpulseResult,
+    closed: ImpulseResult,
+    camera: str,
+    top_label: str = "OPEN LOOP",
+    bottom_label: str = "CLOSED LOOP",
+    model=None,
 ) -> list[np.ndarray]:
     """Two panes, same disturbance: uncontrolled above, controlled below.
+
+    Labels and model are parameters so the same renderer serves any A/B
+    experiment -- failing gains against working gains, driverless against
+    ballasted -- rather than only the open/closed case it was written for.
 
     Both panes are rendered natively at half height rather than rendered full
     size and downscaled — downscaling a 720p frame to 360 turns the board into
@@ -236,7 +245,7 @@ def render_comparison(
     """
     import mujoco
 
-    model = load_model()
+    model = model if model is not None else load_model()
     dt = float(model.opt.timestep)
     stride = max(1, int(round((1.0 / FPS) / dt)))
     n = max(len(open_loop.t), len(closed.t))
@@ -260,8 +269,8 @@ def render_comparison(
 
         frames = []
         for i in range(0, n, stride):
-            top = pane(open_loop, i, "OPEN LOOP", AMBER)
-            bottom = pane(closed, i, "CLOSED LOOP", MINT)
+            top = pane(open_loop, i, top_label, AMBER)
+            bottom = pane(closed, i, bottom_label, MINT)
             frames.append(np.vstack([top, bottom]))
         return frames
     finally:
