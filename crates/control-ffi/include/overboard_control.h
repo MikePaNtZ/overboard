@@ -23,6 +23,17 @@ typedef struct {
     float    kp_a_per_rad;
     float    kd_a_per_rad_s;
     float    max_current_a;
+
+    /* Outer velocity loop. Zero both gains to disable it. */
+    float    kp_v_rad_per_m_s;
+    float    ki_v_rad_per_m;
+    float    max_pitch_ref_rad;
+    float    v_ref_m_s;
+    float    r_eff_m;
+    /* 1 = centre of mass ABOVE the axle (ridden), 0 = below (driverless).
+     * The pitch-to-velocity coupling genuinely inverts between the two; this
+     * is a property of the vehicle, not a tuning knob. */
+    uint32_t com_above_axle;
 } ob_params_v1;
 
 typedef struct {
@@ -38,6 +49,7 @@ typedef struct {
     uint32_t size;
     float    amps;
     uint32_t saturated;         /* 0 no, 1 yes, 2 unknown */
+    float    pitch_ref_rad;      /* what the outer loop asked for */
 } ob_cmd_v1;
 
 typedef struct ob_controller ob_controller;

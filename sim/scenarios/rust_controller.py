@@ -38,6 +38,12 @@ DEFAULT_KD_A_PER_RAD_S = 11.0
 #: Envelope clamp, amps. Matches the model's derived ctrlrange (40 A * kt).
 DEFAULT_MAX_CURRENT_A = 40.0
 
+#: Loaded rolling radius, m (ICD 10.5). Stage-0 will measure it.
+DEFAULT_R_EFF_M = 0.14605
+
+#: Outer-loop clamp: the most lean it may ask the inner loop to hold.
+DEFAULT_MAX_PITCH_REF_RAD = 0.087   # 5 degrees
+
 _OK = 0
 _ERR = {
     -1: "null pointer",
@@ -52,6 +58,12 @@ class ObParams(ctypes.Structure):
         ("kp_a_per_rad", ctypes.c_float),
         ("kd_a_per_rad_s", ctypes.c_float),
         ("max_current_a", ctypes.c_float),
+        ("kp_v_rad_per_m_s", ctypes.c_float),
+        ("ki_v_rad_per_m", ctypes.c_float),
+        ("max_pitch_ref_rad", ctypes.c_float),
+        ("v_ref_m_s", ctypes.c_float),
+        ("r_eff_m", ctypes.c_float),
+        ("com_above_axle", ctypes.c_uint32),
     ]
 
 
@@ -71,6 +83,7 @@ class ObCmd(ctypes.Structure):
         ("size", ctypes.c_uint32),
         ("amps", ctypes.c_float),
         ("saturated", ctypes.c_uint32),
+        ("pitch_ref_rad", ctypes.c_float),
     ]
 
 
@@ -122,6 +135,12 @@ class RustController:
         kp_a_per_rad: float = DEFAULT_KP_A_PER_RAD,
         kd_a_per_rad_s: float = DEFAULT_KD_A_PER_RAD_S,
         max_current_a: float = DEFAULT_MAX_CURRENT_A,
+        kp_v_rad_per_m_s: float = 0.0,
+        ki_v_rad_per_m: float = 0.0,
+        max_pitch_ref_rad: float = DEFAULT_MAX_PITCH_REF_RAD,
+        v_ref_m_s: float = 0.0,
+        r_eff_m: float = DEFAULT_R_EFF_M,
+        com_above_axle: bool = True,
         lib_path: Path | None = None,
     ) -> None:
         path = lib_path or library_path()
@@ -159,6 +178,12 @@ class RustController:
             kp_a_per_rad=kp_a_per_rad,
             kd_a_per_rad_s=kd_a_per_rad_s,
             max_current_a=max_current_a,
+            kp_v_rad_per_m_s=kp_v_rad_per_m_s,
+            ki_v_rad_per_m=ki_v_rad_per_m,
+            max_pitch_ref_rad=max_pitch_ref_rad,
+            v_ref_m_s=v_ref_m_s,
+            r_eff_m=r_eff_m,
+            com_above_axle=1 if com_above_axle else 0,
         )
         self._handle = lib.ob_controller_new(ctypes.byref(params))
         if not self._handle:
@@ -176,6 +201,11 @@ class RustController:
         #: for now it is evidence about whether the gains have any headroom.
         self.saturated_cycles = 0
         self.cycles = 0
+        #: Last pitch reference the outer loop asked for, radians.
+        self.pitch_ref_rad = 0.0
+        #: Largest magnitude it ever asked for -- shows whether the outer loop
+        #: is living against its clamp.
+        self.peak_abs_pitch_ref_rad = 0.0
 
     def __call__(
         self,
@@ -197,6 +227,9 @@ class RustController:
         self.cycles += 1
         if c.saturated == 1:
             self.saturated_cycles += 1
+        self.pitch_ref_rad = float(c.pitch_ref_rad)
+        self.peak_abs_pitch_ref_rad = max(self.peak_abs_pitch_ref_rad,
+                                          abs(self.pitch_ref_rad))
         return float(c.amps)
 
     def close(self) -> None:

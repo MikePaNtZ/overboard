@@ -1,11 +1,16 @@
 """First-light gate: the REAL Rust control law, closing the loop in MuJoCo.
 
-What this proves is narrow and worth stating exactly. It proves that
-`control_core::PitchRegulator` behind `safety::Envelope`, reached over the C
-ABI, changes the physics in the right direction. It does **not** prove the
-balance controller works: the board is a stable pendulum, pitch is truth from
-MuJoCo rather than an estimator, and there is no outer loop, so the board holds
-attitude while riding away. Position regulation is the next increment.
+Two plants, deliberately. The first half runs the DRIVERLESS board, where the
+inner loop alone is the whole story. The second half runs the RIDDEN plant --
+a 70 kg mass above the axle -- which is the vehicle being built, and where the
+cascade is gated.
+
+What this proves is narrow and worth stating exactly: that
+`control_core::PitchRegulator` and `VelocityLoop` behind `safety::Envelope`,
+reached over the C ABI, change the physics in the right direction. It does
+**not** prove the balance controller works. Pitch is MuJoCo truth rather than
+an estimator, the rider is a rigid lump with no compliance, and there is no
+tyre model.
 
 THE LIBRARY MUST BE BUILT. If it is missing these tests FAIL; they do not skip.
 A closed-loop test that quietly passes because the controller was absent is the
@@ -118,14 +123,119 @@ def test_closed_loop_runs_are_deterministic(model):
     assert first.to_json_dict()["metrics"] == second.to_json_dict()["metrics"]
 
 
-@pytest.mark.xfail(
-    reason="known and expected: a pure inner loop holds pitch but does not "
-    "regulate position, so the board rides away. The outer velocity loop is "
-    "the next increment; this is here so it converts to a pass rather than "
-    "being remembered.",
-    strict=True,
-)
-def test_board_returns_to_rest_near_where_it_started(model, controller):
-    r = run(ImpulseParams(magnitude_ns=NOMINAL_IMPULSE_NS), model=model, controller=controller)
-    assert abs(r.metrics.travel_m) < 0.25
-    assert abs(float(r.wheel_rate_rads[-1])) < 0.5
+# --------------------------------------------------------------------------
+# The cascade. Gated on the BALLASTED plant, because that is the vehicle:
+# with a rider the centre of mass sits above the axle and the pitch-to-velocity
+# coupling has the opposite sign to the driverless board.
+# --------------------------------------------------------------------------
+
+BALLAST_KG, BALLAST_M = 70.0, 0.75
+INNER = dict(kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0)
+OUTER = dict(kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True)
+
+
+@pytest.fixture(scope="module")
+def ridden_model():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from experiment import build_model
+
+    return build_model(BALLAST_KG, BALLAST_M, 40.0, "figure")
+
+
+def _run(model, secs=12.0, **kw):
+    with RustController(**kw) as c:
+        r = run(ImpulseParams(magnitude_ns=NOMINAL_IMPULSE_NS, sim_seconds=secs),
+                model=model, controller=c)
+        return r, c
+
+
+def test_the_ridden_board_survives_the_impulse_at_all(ridden_model):
+    """Baseline for everything below: the inner loop alone must not strike."""
+    r, _ = _run(ridden_model, **INNER)
+    assert not r.metrics.nose_strike
+    assert r.metrics.peak_abs_pitch_deg < 8.0
+
+
+def test_without_the_outer_loop_the_ridden_board_rides_away(ridden_model):
+    """The motivating failure, asserted rather than remembered.
+
+    A pure inner loop holds attitude beautifully and does not regulate
+    position at all. If this ever stops being true the outer loop has stopped
+    being necessary, and the tests below are measuring nothing.
+    """
+    r, _ = _run(ridden_model, **INNER)
+    assert abs(r.metrics.travel_m) > 2.0, "expected it to ride away"
+    assert abs(float(r.wheel_rate_rads[-1])) > 1.0, "expected it to still be moving"
+
+
+def test_the_cascade_brings_the_ridden_board_back_to_rest(ridden_model):
+    """The point of the outer loop: stop, and stop roughly where you started.
+
+    Integrating velocity error IS position error, which is what turns "comes
+    to a halt" into "holds station".
+    """
+    r, c = _run(ridden_model, **INNER, **OUTER)
+    assert not r.metrics.nose_strike
+    assert abs(r.metrics.travel_m) < 0.25, f"ended {r.metrics.travel_m:.2f} m away"
+    assert abs(float(r.wheel_rate_rads[-1])) < 0.5, "should have stopped"
+    assert c.saturated_cycles == 0
+
+
+def test_the_cascade_costs_some_pitch_and_that_is_the_trade(ridden_model):
+    """Position regulation is bought with attitude excursion -- the outer loop
+    leans the board on purpose. Worth pinning so the cost stays visible and
+    bounded rather than drifting."""
+    inner, _ = _run(ridden_model, **INNER)
+    both, _ = _run(ridden_model, **INNER, **OUTER)
+    assert both.metrics.peak_abs_pitch_deg > inner.metrics.peak_abs_pitch_deg
+    assert both.metrics.peak_abs_pitch_deg < 2.0 * inner.metrics.peak_abs_pitch_deg
+
+
+def test_inverting_the_plant_coupling_flips_the_board(ridden_model):
+    """The mutation test for the outer loop's sign.
+
+    `com_above_axle=False` is the driverless coupling applied to a ridden
+    plant -- positive feedback in velocity. It must fail loudly, because on
+    the driverless board the same mistake passes every test.
+    """
+    wrong = dict(OUTER, com_above_axle=False)
+    r, _ = _run(ridden_model, **INNER, **wrong)
+    assert r.metrics.nose_strike, "inverted coupling must not look survivable"
+    assert r.metrics.peak_abs_pitch_deg > 90.0, "expected it to go right over"
+
+
+def test_a_speed_setpoint_is_tracked(ridden_model):
+    """Not just station keeping: ask for 1 m/s and get it."""
+    r, _ = _run(ridden_model, secs=14.0, **INNER, **dict(OUTER, v_ref_m_s=1.0))
+    import numpy as np
+
+    v = np.asarray(r.wheel_rate_rads) * 0.14605
+    settled = v[r.t >= r.t[-1] - 2.0]
+    assert not r.metrics.nose_strike
+    assert abs(float(settled.mean()) - 1.0) < 0.25, f"settled at {settled.mean():.2f} m/s"
+
+
+def test_the_outer_loop_does_not_suit_the_driverless_plant(model):
+    """A characterisation test, not a target.
+
+    The driverless board's centre of mass sits 19 mm BELOW the axle, so
+    holding 5 deg of lean is worth 0.205 N*m against the ridden board's
+    44.7 N*m -- roughly 200x less authority to change speed with. The outer
+    loop therefore pegs its pitch reference at the clamp and never catches
+    the error: travel diverges (-29 m at 40 s, -64 m at 90 s).
+
+    Recorded so nobody "fixes" the driverless case by retuning. It is not a
+    tuning problem, and it is not the vehicle.
+    """
+    import math
+
+    r, c = _run(model, kp_a_per_rad=80.0, kd_a_per_rad_s=11.0, max_current_a=40.0,
+                kp_v_rad_per_m_s=0.20, ki_v_rad_per_m=0.10, com_above_axle=False)
+    assert math.degrees(c.peak_abs_pitch_ref_rad) > 4.9, (
+        "expected the reference pegged at its clamp; if this now passes "
+        "comfortably, the plant or the clamp has changed"
+    )
+    assert abs(r.metrics.travel_m) > 1.0, "expected it not to hold station"

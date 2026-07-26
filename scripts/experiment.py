@@ -260,16 +260,33 @@ def plant_summary(model) -> dict:
     }
 
 
-def one_run(model, kp, kd, clamp_a, impulse, seconds):
-    with RustController(kp_a_per_rad=kp, kd_a_per_rad_s=kd, max_current_a=clamp_a) as ctl:
+def one_run(model, kp, kd, clamp_a, impulse, seconds,
+            kp_v=0.0, ki_v=0.0, v_ref=0.0, com_above_axle=None):
+    """One configuration against one plant.
+
+    `com_above_axle` defaults to being READ OFF THE PLANT rather than passed
+    in. The outer loop's sign is a property of where the centre of mass sits,
+    not a tuning choice, and deriving it here means an experiment cannot
+    accidentally run the ridden coupling on the driverless board.
+    """
+    if com_above_axle is None:
+        com_above_axle = plant_summary(model)["inverted_pendulum"]
+    with RustController(kp_a_per_rad=kp, kd_a_per_rad_s=kd, max_current_a=clamp_a,
+                        kp_v_rad_per_m_s=kp_v, ki_v_rad_per_m=ki_v, v_ref_m_s=v_ref,
+                        com_above_axle=com_above_axle) as ctl:
         r = run(ImpulseParams(magnitude_ns=impulse, sim_seconds=seconds),
                 model=model, controller=ctl, capture_state=True)
         sat = ctl.saturated_cycles
+        peak_ref = ctl.peak_abs_pitch_ref_rad
     tau = np.abs(r.motor_current_a) * KT_NM_PER_A
     m = r.metrics
     return r, {
         "kp_a_per_rad": kp,
         "kd_a_per_rad_s": kd,
+        "kp_v_rad_per_m_s": kp_v,
+        "ki_v_rad_per_m": ki_v,
+        "v_ref_m_s": v_ref,
+        "com_above_axle": bool(com_above_axle),
         "clamp_a": clamp_a,
         "nose_strike": bool(m.nose_strike),
         "peak_abs_pitch_deg": round(m.peak_abs_pitch_deg, 3),
@@ -280,6 +297,7 @@ def one_run(model, kp, kd, clamp_a, impulse, seconds):
         "peak_torque_nm": round(float(tau.max()), 2),
         "rms_torque_nm": round(float(np.sqrt((tau**2).mean())), 2),
         "saturated_cycles": sat,
+        "peak_abs_pitch_ref_deg": round(float(np.degrees(peak_ref)), 3),
     }
 
 
@@ -295,6 +313,12 @@ def main() -> int:
     ap.add_argument("--kd", type=float, default=11.0)
     ap.add_argument("--vs-kp", type=float, help="second config, for an A/B clip")
     ap.add_argument("--vs-kd", type=float)
+    ap.add_argument("--kp-v", type=float, default=0.0,
+                    help="outer velocity loop; 0 disables it")
+    ap.add_argument("--ki-v", type=float, default=0.0)
+    ap.add_argument("--vs-kp-v", type=float)
+    ap.add_argument("--vs-ki-v", type=float)
+    ap.add_argument("--v-ref", type=float, default=0.0, help="speed setpoint, m/s")
     ap.add_argument("--clamp-a", type=float, default=40.0)
     ap.add_argument("--impulse", type=float, default=NOMINAL_IMPULSE_NS)
     ap.add_argument("--seconds", type=float, default=6.0)
@@ -310,12 +334,20 @@ def main() -> int:
                         args.rider_style)
     plant = plant_summary(model)
 
-    ra, a = one_run(model, args.kp, args.kd, args.clamp_a, args.impulse, args.seconds)
+    ra, a = one_run(model, args.kp, args.kd, args.clamp_a, args.impulse, args.seconds,
+                    args.kp_v, args.ki_v, args.v_ref)
     runs = {"a": a}
     rb = None
-    if args.vs_kp is not None:
-        rb, b = one_run(model, args.vs_kp, args.vs_kd if args.vs_kd is not None else args.kd,
-                        args.clamp_a, args.impulse, args.seconds)
+    if args.vs_kp is not None or args.vs_kp_v is not None:
+        rb, b = one_run(
+            model,
+            args.vs_kp if args.vs_kp is not None else args.kp,
+            args.vs_kd if args.vs_kd is not None else args.kd,
+            args.clamp_a, args.impulse, args.seconds,
+            args.vs_kp_v if args.vs_kp_v is not None else args.kp_v,
+            args.vs_ki_v if args.vs_ki_v is not None else args.ki_v,
+            args.v_ref,
+        )
         runs["b"] = b
 
     manifest = {
@@ -335,9 +367,11 @@ def main() -> int:
           f"mgl {plant['mgl_n_m_per_rad']:+} "
           f"({'INVERTED pendulum' if plant['inverted_pendulum'] else 'stable pendulum'})")
     for k, v in runs.items():
-        print(f"  [{k}] Kp={v['kp_a_per_rad']:<7g} strike={str(v['nose_strike']):<5} "
-              f"peak|pitch|={v['peak_abs_pitch_deg']:7.2f}deg  peak_tau={v['peak_torque_nm']:6.2f}Nm  "
-              f"travel={v['travel_m']:+7.2f}m")
+        outer = (f"Kpv={v['kp_v_rad_per_m_s']:g}/{v['ki_v_rad_per_m']:g}"
+                 if (v["kp_v_rad_per_m_s"] or v["ki_v_rad_per_m"]) else "no outer loop")
+        print(f"  [{k}] Kp={v['kp_a_per_rad']:<6g} {outer:<18} "
+              f"strike={str(v['nose_strike']):<5} peak|pitch|={v['peak_abs_pitch_deg']:7.2f}deg  "
+              f"travel={v['travel_m']:+7.2f}m  final_wheel={v['final_wheel_rate_rad_s']:+7.2f}")
 
     mpath = args.out_dir / f"{args.id}.json"
     mpath.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -347,7 +381,9 @@ def main() -> int:
         from render_scenario import render_comparison, render_frames, write_video
 
         def tag(cfg):
-            return f"Kp={cfg['kp_a_per_rad']:g} Kd={cfg['kd_a_per_rad_s']:g}"
+            if cfg["kp_v_rad_per_m_s"] or cfg["ki_v_rad_per_m"]:
+                return f"CASCADE  Kp={cfg['kp_a_per_rad']:g}  Kpv={cfg['kp_v_rad_per_m_s']:g}"
+            return f"INNER ONLY  Kp={cfg['kp_a_per_rad']:g}"
 
         try:
             if rb is not None:

@@ -32,7 +32,7 @@
 //! state that produced it.
 
 use board_types::{Command, Faults, Params, Saturation};
-use control_core::PitchRegulator;
+use control_core::{PitchRegulator, PlantCoupling, VelocityLoop};
 use safety::Envelope;
 
 /// Bumped only for an incompatible change to the *function* signatures.
@@ -60,6 +60,23 @@ pub struct ObParamsV1 {
     pub kd_a_per_rad_s: f32,
     /// Envelope clamp on commanded current, amps (ICD §7.6 stage 2).
     pub max_current_a: f32,
+
+    // --- outer velocity loop --------------------------------------------
+    /// Radians of pitch reference per m/s of speed error. Zero disables the
+    /// outer loop entirely, leaving a pure inner-loop regulator.
+    pub kp_v_rad_per_m_s: f32,
+    pub ki_v_rad_per_m: f32,
+    /// Clamp on the pitch the outer loop may ask for, radians.
+    pub max_pitch_ref_rad: f32,
+    /// Ground-speed setpoint, m/s. Zero is station keeping.
+    pub v_ref_m_s: f32,
+    /// Wheel radius used to turn wheel rate into ground speed, metres.
+    pub r_eff_m: f32,
+    /// **1 = centre of mass ABOVE the axle** (a ridden board), 0 = below (the
+    /// driverless board). Not a preference: the pitch-to-velocity coupling
+    /// genuinely inverts between them, and getting it wrong makes the outer
+    /// loop positive feedback. See `control_core::PlantCoupling`.
+    pub com_above_axle: u32,
 }
 
 /// One cycle of plant state.
@@ -93,12 +110,22 @@ pub struct ObCmdV1 {
     /// 0 = not saturated, 1 = saturated, 2 = unknown. Mirrors
     /// [`board_types::Saturation`], which anti-windup will read.
     pub saturated: u32,
+    /// What the outer loop asked the inner loop to hold, radians. Reported so
+    /// a run can be diagnosed without instrumenting the library.
+    pub pitch_ref_rad: f32,
 }
 
 /// Opaque controller handle.
 pub struct ObController {
     regulator: PitchRegulator,
+    outer: Option<VelocityLoop>,
     envelope: Envelope,
+    v_ref_m_s: f32,
+    r_eff_m: f32,
+    last_t_ns: Option<u64>,
+    /// Carried between cycles so the outer loop can hold off integrating while
+    /// the inner loop is against its clamp (ICD §7.6).
+    last_saturated: bool,
 }
 
 fn saturation_code(s: Saturation) -> u32 {
@@ -129,8 +156,28 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
         return core::ptr::null_mut();
     }
 
+    let outer = if p.kp_v_rad_per_m_s != 0.0 || p.ki_v_rad_per_m != 0.0 {
+        Some(VelocityLoop::new(
+            p.kp_v_rad_per_m_s,
+            p.ki_v_rad_per_m,
+            p.max_pitch_ref_rad,
+            if p.com_above_axle != 0 {
+                PlantCoupling::ComAboveAxle
+            } else {
+                PlantCoupling::ComBelowAxle
+            },
+        ))
+    } else {
+        None
+    };
+
     let boxed = Box::new(ObController {
         regulator: PitchRegulator::new(p.kp_a_per_rad, p.kd_a_per_rad_s),
+        outer,
+        v_ref_m_s: p.v_ref_m_s,
+        r_eff_m: if p.r_eff_m > 0.0 { p.r_eff_m } else { 0.14605 },
+        last_t_ns: None,
+        last_saturated: false,
         envelope: Envelope::new(Params {
             kp: p.kp_a_per_rad,
             kd: p.kd_a_per_rad_s,
@@ -194,13 +241,36 @@ pub unsafe extern "C" fn ob_controller_update(
     // A NaN reaching the regulator would propagate silently into the plant and
     // show up as an unexplained divergence. Refuse it at the boundary, where it
     // is still attributable, and command nothing.
-    if !o.pitch_rad.is_finite() || !o.pitch_rate_rad_s.is_finite() {
+    if !o.pitch_rad.is_finite()
+        || !o.pitch_rate_rad_s.is_finite()
+        || !o.wheel_rate_rad_s.is_finite()
+    {
         cmd.amps = 0.0;
         cmd.saturated = saturation_code(Saturation::No);
+        cmd.pitch_ref_rad = 0.0;
         return OB_ERR_NOT_FINITE;
     }
 
-    let proposed = ctl.regulator.update(o.pitch_rad, o.pitch_rate_rad_s);
+    // dt from the caller's clock, never assumed. Zero on the first cycle, and
+    // a zero dt simply means the integrator does not advance -- which is the
+    // right thing when there is no interval to integrate over.
+    let dt_s = match ctl.last_t_ns {
+        Some(prev) => (o.t_ns.saturating_sub(prev)) as f32 * 1e-9,
+        None => 0.0,
+    };
+    ctl.last_t_ns = Some(o.t_ns);
+
+    let pitch_ref = match ctl.outer.as_mut() {
+        Some(outer) => {
+            let v = o.wheel_rate_rad_s * ctl.r_eff_m;
+            outer.update(v, ctl.v_ref_m_s, dt_s, ctl.last_saturated)
+        }
+        None => 0.0,
+    };
+
+    let proposed = ctl
+        .regulator
+        .update(o.pitch_rad, o.pitch_rate_rad_s, pitch_ref);
     let (bounded, sat) = ctl
         .envelope
         .apply(Command::MotorCurrent { amps: proposed }, Faults::NONE);
@@ -212,6 +282,8 @@ pub unsafe extern "C" fn ob_controller_update(
         Command::RemoteSpeed { .. } => 0.0,
     };
     cmd.saturated = saturation_code(sat);
+    cmd.pitch_ref_rad = pitch_ref;
+    ctl.last_saturated = sat == Saturation::Yes;
     OB_OK
 }
 
@@ -225,6 +297,12 @@ mod tests {
             kp_a_per_rad: 80.0,
             kd_a_per_rad_s: 11.0,
             max_current_a: 40.0,
+            kp_v_rad_per_m_s: 0.0,
+            ki_v_rad_per_m: 0.0,
+            max_pitch_ref_rad: 0.087,
+            v_ref_m_s: 0.0,
+            r_eff_m: 0.14605,
+            com_above_axle: 1,
         }
     }
 
@@ -244,6 +322,7 @@ mod tests {
             size: core::mem::size_of::<ObCmdV1>() as u32,
             amps: f32::NAN,
             saturated: 99,
+            pitch_ref_rad: f32::NAN,
         }
     }
 
