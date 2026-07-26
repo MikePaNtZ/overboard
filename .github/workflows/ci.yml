@@ -18,6 +18,50 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
+  # ---------------------------------------------------------------------
+  # Does this change need a ~20 min render? Docs-only commits cannot change
+  # sim behaviour, and on a doc-heavy project they were burning a full render
+  # each to publish a preview identical to the last one.
+  #
+  # A job, not a workflow-level `paths-ignore`: that would skip `rust` and
+  # `sim` too, and a SKIPPED required check never reports, so branch
+  # protection would wait on it forever. Only the render is optional.
+  #
+  # Fails OPEN -- if the base commit cannot be resolved (first push on a
+  # branch, force-push, shallow history) it renders. Rendering needlessly
+  # costs minutes; skipping wrongly loses the artifact for that commit.
+  # ---------------------------------------------------------------------
+  render-needed:
+    runs-on: ubuntu-latest
+    outputs:
+      render: ${{ steps.check.outputs.render }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "base '$BASE' unresolvable - rendering to be safe"
+            echo "render=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          changed="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "changed files:"; echo "$changed"
+
+          # Anything that is not a doc or a markdown file means render.
+          if echo "$changed" | grep -qvE '^(docs/|\.github/ISSUE_|.*\.md$)'; then
+            echo "render=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs-only change - skipping the render"
+            echo "render=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -85,13 +129,14 @@ jobs:
   # merge whose physics passed.
   # ---------------------------------------------------------------------
   publish-sim-artifact:
-    needs: [sim, rust]
+    needs: [sim, rust, render-needed]
     # Fork PRs get a read-only token, so the upload would fail on a
     # contribution rather than on a mistake. Render-and-skip-publish is not
     # worth the minutes; skip the job outright.
     if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.render-needed.outputs.render == 'true' &&
+      (github.event_name == 'push' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
