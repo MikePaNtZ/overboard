@@ -357,14 +357,30 @@ impl CommandFeedforward {
         CommandFeedforward { gain_m_s2_per_a }
     }
 
-    /// Predicted forward acceleration, m/s², from the last commanded current.
+    /// Predicted forward acceleration, m/s², from motor current.
     ///
-    /// Takes the *commanded* current rather than a measured one so it stays
-    /// usable on hardware that cannot report phase current, and so it carries
-    /// no sensing delay. Where measured current is available it is the better
-    /// input and can be passed here instead — the arithmetic is the same.
-    pub fn predict(&self, commanded_a: f32) -> f32 {
-        self.gain_m_s2_per_a * commanded_a
+    /// **Pass the MEASURED current wherever the drive reports one.** An earlier
+    /// version of this comment argued for the commanded value, on the grounds
+    /// that it carries no sensing delay and works on drives that cannot report
+    /// phase current. That reasoning does not survive contact with the drive
+    /// this project actually selected.
+    ///
+    /// A VESC silently derates commanded torque through at least six cutback
+    /// layers — battery voltage sag, input-current limits, FET and motor
+    /// temperature, ERPM limits. Fed the *commanded* value during a cutback,
+    /// this function subtracts an acceleration that is not happening, and the
+    /// error lands directly on the accelerometer's gravity reference. That is
+    /// the same corruption the estimator work removed, re-entering through the
+    /// actuator instead of the sensor — and it would appear under load, on a
+    /// hill, at low state of charge, with a rider aboard. The sim cannot show
+    /// it, because the sim has no cutback.
+    ///
+    /// The commanded value remains the fallback for a drive with no current
+    /// telemetry, and the *difference* between the two is worth reporting as a
+    /// fault in its own right: it is exactly the cutback detector such a drive
+    /// needs anyway.
+    pub fn predict(&self, current_a: f32) -> f32 {
+        self.gain_m_s2_per_a * current_a
     }
 }
 

@@ -216,7 +216,8 @@ def test_the_shuttle_hands_the_controller_a_live_imu():
         def __exit__(self, *exc):
             return False
 
-        def __call__(self, t, pitch, rate, wheel, gyro_rad_s=None, accel_m_s2=None):
+        def __call__(self, t, pitch, rate, wheel, gyro_rad_s=None,
+                     accel_m_s2=None, motor_current_a=None):
             seen.append((gyro_rad_s, accel_m_s2))
             return 0.0
 
@@ -286,4 +287,116 @@ def test_a_long_crossover_is_the_other_way_to_survive_and_costs_accuracy():
     assert long_tau.metrics.return_error_m > 5 * good.metrics.return_error_m, (
         "the tau trade should be visible: surviving via a long crossover ought to "
         "drift substantially further than surviving via better aiding"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Which current the feedforward believes (DR-CTRL-5)
+# ---------------------------------------------------------------------------
+
+COMMANDED, MEASURED = 0, 1
+
+
+def test_the_default_current_source_survives_a_backend_that_reports_nothing():
+    """Why the default is `commanded` even though hardware wants `measured`.
+
+    `motor_current_a` is an optional-in-practice field: a backend that never
+    populates it leaves a plausible-looking ZERO, and a feedforward told to
+    trust it then predicts no acceleration at all -- silently degrading to no
+    aiding, which at tau = 2 s does not fly. This codebase has already lost a
+    day to exactly that shape of bug (the shuttle's unwired IMU), so the
+    default must be the one that cannot fail quietly.
+    """
+    from sim.scenarios.shuttle_run import ShuttleParams
+    from sim.scenarios.shuttle_run import run as shuttle_run
+
+    class Blind(RustController):
+        """A backend that forgets to report measured current."""
+
+        def __call__(self, t, pitch, rate, wheel, gyro_rad_s=None,
+                     accel_m_s2=None, motor_current_a=None):
+            return super().__call__(t, pitch, rate, wheel, gyro_rad_s=gyro_rad_s,
+                                    accel_m_s2=accel_m_s2, motor_current_a=None)
+
+    r = shuttle_run(
+        ShuttleParams(),
+        controller_factory=lambda vp: Blind(
+            **SHUTTLE_GAINS, v_ref_fn=vp.v_ref, use_estimator=1,
+            estimator_tau_s=2.0, estimator_accel_aiding=COMMAND_FEEDFORWARD,
+            accel_ff_current_source=MEASURED),
+    )
+    assert r.metrics.nose_strike, (
+        "trusting an unpopulated motor_current_a should fail LOUDLY. If this "
+        "now survives, the default in ObParamsV1 can safely become MEASURED"
+    )
+
+
+def test_sim_cannot_tell_the_two_current_sources_apart():
+    """**A negative result, recorded so it is not mistaken for a positive one.**
+
+    On hardware the feedforward must use MEASURED current, because a VESC
+    derates commanded torque silently through half a dozen cutback layers
+    (DR-CTRL-5). In sim the two are nearly identical, differing only by the
+    actuation delay and current-loop lag -- **because the sim has no cutback
+    model at all**.
+
+    So this test does not vindicate the hardware choice; it documents that the
+    sim is incapable of vindicating it. Making that case testable needs a
+    PROPORTIONAL derate row in the imperfection profile. The existing hard
+    current cap is not a substitute: capping hard enough to matter destroys
+    torque authority, and the resulting crash is the missing torque rather than
+    the corrupted estimate.
+    """
+    from sim.scenarios.shuttle_run import ShuttleParams
+    from sim.scenarios.shuttle_run import run as shuttle_run
+
+    def go(source):
+        return shuttle_run(
+            ShuttleParams(),
+            controller_factory=lambda vp: RustController(
+                **SHUTTLE_GAINS, v_ref_fn=vp.v_ref, use_estimator=1,
+                estimator_tau_s=2.0, estimator_accel_aiding=COMMAND_FEEDFORWARD,
+                accel_ff_current_source=source),
+        )
+
+    cmd, meas = go(COMMANDED), go(MEASURED)
+    assert not cmd.metrics.nose_strike and not meas.metrics.nose_strike
+    assert abs(cmd.metrics.return_error_m - meas.metrics.return_error_m) < 0.01, (
+        "if these have diverged, the sim has gained something cutback-like and "
+        "this test should become a real comparison rather than a caveat"
+    )
+
+
+def test_the_scenarios_report_a_measured_current_that_is_not_the_command():
+    """The field exists, is populated, and is genuinely a different signal.
+
+    It was declared in the observation from the start and left at zero by every
+    scenario -- so any backend consuming it would have read a constant zero.
+    """
+    import numpy as np
+
+    from sim.scenarios.shuttle_run import ShuttleParams
+    from sim.scenarios.shuttle_run import run as shuttle_run
+
+    seen = []
+
+    class Spy(RustController):
+        def __call__(self, t, pitch, rate, wheel, gyro_rad_s=None,
+                     accel_m_s2=None, motor_current_a=None):
+            amps = super().__call__(t, pitch, rate, wheel, gyro_rad_s=gyro_rad_s,
+                                    accel_m_s2=accel_m_s2,
+                                    motor_current_a=motor_current_a)
+            seen.append((amps, motor_current_a))
+            return amps
+
+    shuttle_run(ShuttleParams(),
+                controller_factory=lambda vp: Spy(**SHUTTLE_GAINS, v_ref_fn=vp.v_ref))
+
+    measured = np.array([m for _, m in seen], dtype=float)
+    commanded = np.array([c for c, _ in seen], dtype=float)
+    assert np.abs(measured).max() > 1.0, "measured current is still all zeros"
+    # Delay plus current-loop lag: they track, but they are not the same series.
+    assert np.abs(measured - commanded).max() > 0.5, (
+        "measured current is echoing the command -- ICD 12 calls that "
+        "non-conforming, because it hides the lag the controller must tolerate"
     )
