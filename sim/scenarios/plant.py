@@ -7,9 +7,39 @@ model out of `scripts/` would have the dependency backwards.
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
 MODEL_PATH = Path(__file__).resolve().parents[2] / "sim" / "models" / "overboard_onewheel.xml"
+
+
+@functools.lru_cache(maxsize=1)
+def R_MODEL_TO_ICD():
+    """Rotation from the MuJoCo model frame to the ICD body frame (§10.1).
+
+    Model: z-up, **forward = −X** (overboard_onewheel.xml). ICD: FRD,
+    right-handed — x forward, y right, z down. Forward flips and up flips;
+    right is shared. That is a 180° rotation about +Y.
+
+    A frame change is a PROPER rotation. The determinant assertion is the whole
+    reason this is a matrix and not a per-axis sign triple: `det = −1` is a
+    reflection, it turns a right-handed frame into a left-handed one, and it is
+    exactly the defect this replaced. A sign triple gives you nowhere to check.
+
+    Built lazily and cached because this module imports numpy per-function on
+    purpose (see the module docstring's note on dependency direction).
+    """
+    import numpy as np
+
+    R = np.diag([-1.0, 1.0, -1.0])
+    det = float(np.linalg.det(R))
+    if abs(det - 1.0) > 1e-12:
+        raise ValueError(
+            f"model→ICD frame map must be a proper rotation (det = +1), got {det:+.6f}. "
+            "A det = −1 map is a reflection and produces a left-handed frame, which "
+            "ICD §10.1 forbids."
+        )
+    return R
 
 #: Motor torque constant, N*m per amp. **UNFITTED PLACEHOLDER.**
 #:
@@ -248,22 +278,37 @@ def imu_readings(model, data) -> tuple:
     the sensor block has been reordered once already, and an index quietly
     pointing at the wrong sensor would hand the estimator plausible garbage.
 
-    THE MODEL'S BODY FRAME IS NOT THE ICD'S. MuJoCo's frame here is **z-up**;
-    ICD §10.1 specifies FRD, **z-down**. Feeding the raw sensor to an estimator
-    that assumes FRD gives an attitude offset by 180°, which is about as bad as
-    a sign error gets on a balancer.
+    THE MODEL'S BODY FRAME IS NOT THE ICD'S. The model is **z-up with forward
+    = −X** (see the FORWARD note in overboard_onewheel.xml); ICD §10.1 mandates
+    **FRD, right-handed**: x forward, y right, z down. Feeding a raw sensor to
+    an estimator that assumes FRD is about as bad as a sign error gets on a
+    balancer.
 
-    The conversion is **z-negation on both vectors**, and it was determined
-    EMPIRICALLY against `framequat` truth rather than derived — §10.3 makes the
-    sim the arbiter for exactly this class of question, and a derivation that
-    looked right had the accelerometer's x sign backwards. On quiet samples
-    (specific force within 0.15 of 1 g, so gravity dominates) the converted
-    reading recovers truth to about 2° RMS, the residual being real
-    acceleration rather than a frame error. `test_imu_frame_matches_truth`
-    pins it.
+    The map is therefore a **180° rotation about +Y**, `diag(−1, +1, −1)` —
+    derived from the two frame definitions, not fitted. It is written as a
+    matrix rather than a per-axis sign triple so that its determinant can be
+    asserted: a frame change is a PROPER rotation, `det = +1`. A sign triple
+    has nowhere to check handedness, which is how the previous value got in.
 
-    The y axis is untouched, which is the component that matters: `gyro[1]` is
-    the nose-up pitch rate in both frames.
+    HISTORY, because this cost a real result. This used to be
+    `diag(+1, +1, −1)`, `det = −1` — a reflection, mapping a right-handed frame
+    to a left-handed one, which ICD §10.1 forbids in as many words. It was
+    "determined EMPIRICALLY against framequat truth" on quiet samples and
+    reported ~2° RMS. That residual was not real acceleration; it was the frame
+    error itself. The error vanishes at θ = 0 and grows as 2θ, so validating
+    near upright is validating in the one regime where the bug is invisible —
+    undisturbed estimator error is bit-identical under both maps. A test named
+    `test_imu_frame_matches_truth` was cited as pinning this and was never
+    written. See tests/test_frame_conformance.py, which does.
+
+    Two channels were wrong, one root cause. Accel-derived pitch came out at
+    exactly −θ, so the estimator fused a nose-up-positive gyro against a
+    nose-down-positive accelerometer. `gyro[0]` — roll rate — was also
+    inverted, and silently, because nothing consumes roll yet; it would have
+    surfaced as a control inversion the day lean-to-steer was wired up.
+
+    `gyro[1]` is the nose-up pitch rate and is the one component both maps
+    agree on, which is why the pitch RATE path was always correct.
     """
     import mujoco
     import numpy as np
@@ -276,5 +321,5 @@ def imu_readings(model, data) -> tuple:
         adr, dim = int(model.sensor_adr[sid]), int(model.sensor_dim[sid])
         out.append(np.array(data.sensordata[adr : adr + dim], dtype=float))
     gyro, accel = out
-    to_icd = np.array([1.0, 1.0, -1.0])
-    return gyro * to_icd, accel * to_icd
+    R = R_MODEL_TO_ICD()
+    return R @ gyro, R @ accel
