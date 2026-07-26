@@ -117,7 +117,10 @@ def _draw_hud(frame: np.ndarray, result: ImpulseResult, idx: int, strike_deg: fl
     # --- pitch trace strip -------------------------------------------------
     x0, y0, x1, y1 = 26, HEIGHT - 150, WIDTH - 26, HEIGHT - 46
     d.rectangle([x0, y0, x1, y1], fill=(*INK, 190))
-    lo, hi = -8.0, max(strike_deg + 6.0, float(result.pitch_deg.max()) + 3.0)
+    # Pitch is nose-up-positive (ICD 10.1), so a nose strike is a NEGATIVE
+    # excursion and the interesting half of the axis is below zero.
+    lo = min(-strike_deg - 6.0, float(result.pitch_deg.min()) - 3.0)
+    hi = 8.0
 
     def px(i):
         return x0 + 10 + (x1 - x0 - 20) * (result.t[i] / result.t[-1])
@@ -126,11 +129,11 @@ def _draw_hud(frame: np.ndarray, result: ImpulseResult, idx: int, strike_deg: fl
         return y1 - 14 - (y1 - y0 - 28) * ((v - lo) / (hi - lo))
 
     d.line([(x0 + 10, py(0)), (x1 - 10, py(0))], fill=(*MUTED, 110), width=1)
-    d.line([(x0 + 10, py(strike_deg)), (x1 - 10, py(strike_deg))], fill=(*AMBER, 150), width=2)
+    d.line([(x0 + 10, py(-strike_deg)), (x1 - 10, py(-strike_deg))], fill=(*AMBER, 150), width=2)
     # Right-aligned: the impulse marker lives at the left of the strip and the
     # two labels sat on top of each other.
     sl = f"nose strike  {strike_deg:.1f}°"
-    d.text((x1 - 14 - d.textlength(sl, font=f_small), py(strike_deg) - 18), sl,
+    d.text((x1 - 14 - d.textlength(sl, font=f_small), py(-strike_deg) - 18), sl,
            font=f_small, fill=AMBER)
 
     if idx > 1:
@@ -268,7 +271,7 @@ def save_pitch_plot(result: ImpulseResult, strike_deg: float, path: Path) -> Non
     fig, (ax, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True,
                                   gridspec_kw={"height_ratios": [3, 1]})
     ax.plot(result.t, result.pitch_deg, lw=2.2, color="#2AAE97", label="frame pitch")
-    ax.axhline(strike_deg, ls="--", lw=1.8, color="#C4650F",
+    ax.axhline(-strike_deg, ls="--", lw=1.8, color="#C4650F",
                label=f"nose strike ({strike_deg:.1f}°, from geometry)")
     ax.axvspan(p.t0_s, p.t0_s + p.duration_s, color="#F2A24A", alpha=0.35,
                label=f"impulse {p.magnitude_ns:.0f} N·s")
@@ -276,7 +279,7 @@ def save_pitch_plot(result: ImpulseResult, strike_deg: float, path: Path) -> Non
         ax.plot([m.t_strike_s], [result.pitch_deg[np.searchsorted(result.t, m.t_strike_s)]],
                 "o", ms=9, color="#C4650F", zorder=5)
         ax.annotate(f"strike @ {m.t_strike_s:.2f}s\n{m.speed_at_strike_ms:.2f} m/s",
-                    (m.t_strike_s, strike_deg), textcoords="offset points",
+                    (m.t_strike_s, -strike_deg), textcoords="offset points",
                     xytext=(16, -46), color="#16232E", fontsize=9,
                     arrowprops=dict(arrowstyle="-", lw=0.8, color="#8a99a0"))
     ax.set_ylabel("pitch, nose-down positive (deg)")
@@ -318,7 +321,7 @@ def main() -> int:
 
     print(f"impulse            {params.magnitude_ns:.1f} N*s at t={params.t0_s}s")
     print(f"nose strike angle  {strike:.2f} deg (from collision hull)")
-    print(f"peak pitch         {m.peak_pitch_deg:.2f} deg at t={m.t_peak_s:.2f}s")
+    print(f"peak |pitch|       {m.peak_abs_pitch_deg:.2f} deg at t={m.t_peak_s:.2f}s")
     print(f"nose strike        {m.nose_strike}"
           + (f" at t={m.t_strike_s:.3f}s, {m.speed_at_strike_ms:.2f} m/s, "
              f"{m.pitch_rate_at_strike_dps:.0f} deg/s" if m.nose_strike else ""))

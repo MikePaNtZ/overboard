@@ -31,7 +31,7 @@ does is a bug. That is the entire point of the rewrite: the previous model
 faked instability with an 8 kg rider mass on a mast (the red "ball on a stick"),
 which made every result about the stand-in rather than the vehicle.
 
-## 2. Two departures from the design doc
+## 2. Where the implementation departs from the design doc
 
 ### 2.1 The topple criterion is nose strike, not 45° of tilt
 
@@ -84,36 +84,78 @@ the open-loop scenario never actuates — but it would have inverted the balance
 law the moment a controller was attached. The hinge is now on `-Y`, and
 `test_motor_sign_matches_icd` asserts both the forward case and its mirror.
 
-**Decided — pitch reporting disagreed; the sim moves.** This scenario reports
-pitch **nose-down-positive** (so the strike is at +18.6°, the natural reading
-here); the ICD is **nose-up-positive**. They are exact negations, so the same
-physical law is written `current ≈ +K·pitch` here and `−K·pitch` in the ICD.
-Measured, not argued: `+K·pitch` holds the board upright through the nominal
-impulse (peak 0.21°, no strike), while the ICD's literal `−K·pitch` drives it
-to 180°.
+**Resolved — pitch reporting disagreed; the sim moved.** This scenario *used
+to* report pitch **nose-down-positive** (putting the strike at +18.6°, the
+natural reading in isolation) while the ICD is **nose-up-positive**. They are
+exact negations, so the same physical law had to be written `current ≈ +K·pitch`
+here and `−K·pitch` in the ICD — two conventions in one system, which is the
+cross-seam sign error the ICD calls the most dangerous defect class.
 
-This was left open as "which document moves". **It is now closed: the sim
-moves.** ICD §10 is normative and derives the convention from a free-body
-argument rather than asserting it — and it has already been wrong once (v0.2
-inverted the polarity gate), which is precisely why §10.3 makes the sim the
-arbiter and requires the gate to be asserted in CI rather than documented.
+The law is now written the ICD's way, `current ≈ −K·pitch` with `K > 0`, in the
+document, the model comment and the code alike.
 
-⚠️ **Decided, not yet done.** The flip lands in increment I1 of the seam PR,
-not here, because it has to move together with the MJCF actuator comments and
-`test_motor_sign_matches_icd` — left behind, those become stale-and-wrong,
-which is worse than a documented inconsistency. It carries a test asserting
-the trajectory is bit-identical with the pitch series exactly negated, proving
-it is a reporting change and not a physics change.
+**Why the sim moved and not the ICD.** §10 is normative and derives the
+convention from a free-body argument rather than asserting it, and §10.3 names
+the sim as the arbiter of the polarity gate — so a sim reporting the opposite
+sign to the document it arbitrates is the defect. §10 has also been wrong once
+before (v0.2 inverted the gate), which is exactly why it is derived and
+CI-asserted rather than documented.
+
+The seam is now **nose-up-positive radians**; degrees survive only in metrics
+and plots. `frame_pitch_rad` is the primary accessor and derives the sign from
+the geometry. The MJCF actuator comment and `test_motor_sign_matches_icd` moved
+in the same commit — left behind they would have become stale-and-wrong, which
+is worse than a documented inconsistency.
+
+**The open-loop numbers are unchanged** (strike at 1.646 s, 1.00 m/s, 4.03 m,
+18.64° peak), which is the evidence that this was a reporting change and not a
+physics change. Two consequences did follow, and both are real rather than
+cosmetic:
+
+- A nose strike is now a **negative** excursion, so `pitch_rate_at_strike_dps`
+  is negative. Severity is asserted as a magnitude; the sign is asserted
+  separately, because "the nose is falling when it hits" is itself a fact worth
+  pinning.
+- `peak_pitch_deg` became **`peak_abs_pitch_deg`**. The old one-sided maximum
+  was adequate open-loop, where the board only ever pitches one way. A
+  controller overshoots past level, and a one-sided maximum would not see it —
+  while this is the headline acceptance number.
 
 Converting at the seam only, and letting the two conventions coexist, was
 considered and rejected: one repo, one convention. That is the trap ICD §10
 exists to prevent.
 
+### 2.4 Current is amps; the model wants newton-metres
+
+The MJCF actuator is a `motor` with `gear="1"`, so `data.ctrl` is **torque in
+N·m**. The scenario commands **current in amps**, because that is what the ICD
+and the VESC speak. Nothing converted between them, which silently baked in a
+**Kt of 1.0 N·m/A** and made `ctrlrange` (N·m) and `max_current_a` (A) look like
+the same quantity — so every torque-headroom comparison in the design docs was
+comparing two different units.
+
+`KT_NM_PER_A = 0.7` is now an explicit, named, **unfitted placeholder** with a
+measurement task attached: a current step of known magnitude against a known
+inertia gives it directly, and it is the first number the bench must produce.
+`ctrlrange` is derived from it rather than chosen — 40 A × 0.7 = 28 N·m.
+
+### 2.5 Actuation delay is modelled, because zero delay flatters a controller
+
+The loop computed a command from pre-step state and applied it to that same
+step: **zero actuation delay**. ICD §5.2 says actuation delay is *additive* on
+top of the structural loop delay, and tuning against a zero-delay plant is the
+standard way to build a controller that only works in simulation.
+
+`actuation_delay_cycles` defaults to **1** (2 ms at the current timestep, the
+placeholder for ICD §12's ~1 ms). It is a parameter so the sensitivity can be
+swept once a controller exists. It changes nothing open-loop, where the command
+is always zero.
+
 ## 3. Measured behaviour
 
 Impulse sweep, open-loop, forward, through the CoM:
 
-| Impulse (N·s) | Peak pitch | Nose strike | t_strike | Speed at strike | Travel |
+| Impulse (N·s) | Peak \|pitch\| | Nose strike | t_strike | Speed at strike | Travel |
 |---:|---:|:---:|---:|---:|---:|
 | 0 | 0.00° | no | — | — | 0.00 m |
 | 6 | 9.04° | no | — | — | 1.34 m |
@@ -132,7 +174,7 @@ flaky, so the chosen constants sit well clear of it:
   1.6 m/s Δv, a firm shove.
 - `SUBTHRESHOLD_IMPULSE_NS = 6.0` — peaks at 9.0°, under half the strike angle.
 
-Peak pitch saturates at the strike angle by construction, so **severity** is
+Peak |pitch| saturates at the strike angle by construction, so **severity** is
 carried by `speed_at_strike_ms` and `pitch_rate_at_strike_dps`, which grow
 monotonically with impulse. Those are the metrics to watch, not peak pitch.
 
