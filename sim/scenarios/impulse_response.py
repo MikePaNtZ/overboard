@@ -61,26 +61,15 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from .imperfections import STAGE0_PLACEHOLDER, ImperfectionProfile, ImperfectionState
+from .plant import KT_NM_PER_A, imu_readings
+
 MODEL_PATH = Path(__file__).resolve().parents[2] / "sim" / "models" / "overboard_onewheel.xml"
 
 #: Forward is -X in the Openwheel assembly frame (the front enclosure spans
 #: x = -431.8..-145.4 mm). See the model header.
 FORWARD = np.array([-1.0, 0.0, 0.0])
 
-#: Motor torque constant, N*m per amp. **UNFITTED PLACEHOLDER.**
-#:
-#: The MJCF actuator is a torque source; the controller commands current. This
-#: is the conversion, and it is the first thing the bench must measure: a
-#: current step of known magnitude against a known inertia gives kt directly
-#: (Bench Test-Stand, Config A). 0.7 is an order-of-magnitude guess for a
-#: hoverboard-class hub motor and nothing has been fitted to it.
-#:
-#: It is named rather than implicit because it was previously implicit at 1.0 --
-#: amps written straight into a N*m channel -- which made `ctrlrange` (N*m) and
-#: `max_current_a` (A) look like the same number and hid the unit error.
-#:
-#: The model's ctrlrange is derived from this: 40 A x 0.7 = 28 N*m.
-KT_NM_PER_A = 0.7
 
 #: Impulse that topples the board open-loop, with margin. The knee is at
 #: ~12.5 N*s, where the nose grazes the ground and the strike boolean is
@@ -135,14 +124,10 @@ class ImpulseParams:
     settle_band_deg: float = 2.0
     """Pitch band the board must stay inside to count as settled."""
 
-    actuation_delay_cycles: int = 1
-    """Steps between a command being computed and it reaching the plant.
-
-    ICD 5.2: actuation delay is ADDITIVE on top of the structural loop delay,
-    not inclusive of it. One step at the 2 ms timestep is the placeholder for
-    the ICD 12 figure of ~1 ms; it is a parameter so the sensitivity can be
-    swept once a controller exists. Zero reproduces the old behaviour and
-    should only be used to demonstrate what the delay costs."""
+    # Actuation delay used to live here as a whole-cycle count. It now belongs
+    # to the imperfection profile (ICD 12), in seconds, alongside the rest of
+    # the signal-path imperfections -- two places to configure the same physics
+    # is how they end up disagreeing.
 
 
 @dataclass
@@ -174,7 +159,13 @@ class ImpulseMetrics:
     steady_state_pitch_deg: float | None = None
     control_effort_a_s: float = 0.0
 
+    #: Attitude-estimate error against truth, degrees. Zero when the controller
+    #: runs on truth; the estimator's own contribution when it does not.
+    pitch_est_rms_deg: float = 0.0
+    pitch_est_max_deg: float = 0.0
+
     # --- provenance ---
+    imperfection_profile_id: str = ""
     travel_m: float = 0.0
     final_pitch_deg: float = 0.0
     model_sha256: str = ""
@@ -282,12 +273,19 @@ def run(
     model: mujoco.MjModel | None = None,
     controller=None,
     capture_state: bool = False,
+    profile: ImperfectionProfile = STAGE0_PLACEHOLDER,
 ) -> ImpulseResult:
     """Run one impulse scenario.
 
     `controller` is the closed-loop hook:
 
-        (t_s, pitch_rad, pitch_rate_rad_s, wheel_rate_rad_s) -> amps
+        (t_s, pitch_rad, pitch_rate_rad_s, wheel_rate_rad_s,
+         gyro_rad_s=..., accel_m_s2=...) -> amps
+
+    **A controller must accept the two IMU keyword arguments**, even if it
+    ignores them -- `**_` is enough. They carry the raw inertial data an
+    estimator needs, and they are passed unconditionally rather than only when
+    someone asks, so a controller cannot silently miss them.
 
     **Radians, nose-up-positive, per ICD 10.1** -- not degrees, and not the
     old nose-down convention. The return is CURRENT in amps; the scenario
@@ -325,17 +323,23 @@ def run(
         timestep_s=float(dt),
     )
 
+    # Populate sensordata BEFORE the first read. Sensors are computed during
+    # mj_step, so on the first control cycle they would otherwise be zeros --
+    # and an all-zero accelerometer makes atan2 return a garbage attitude that
+    # the estimator then has to spend ~tau unwinding. It showed up as a fixed
+    # 3.15 deg peak error, identical across every noise profile and crossover,
+    # which is the signature of a transient rather than a sensor problem.
+    mujoco.mj_forward(model, data)
+
     ts, pitches, rates, wheel, travel, currents = [], [], [], [], [], []
+    est_err: list[float] = []
     states: list[np.ndarray] = []
     x0 = float(data.xpos[frame][0])
 
-    # Commands awaiting their actuation delay. A command computed this cycle
-    # becomes effective `actuation_delay_cycles` steps later, matching the ICD
-    # 5.2 rule that actuation delay is ADDITIVE on top of the loop delay.
-    # Without this the loop applies a command to the very step whose state
-    # produced it -- zero delay, which is the classic way to tune a controller
-    # that only works in simulation.
-    pipeline = [0.0] * params.actuation_delay_cycles
+    # The signal path between the plant and the controller: actuation delay,
+    # current-loop lag, gyro noise, wheel-rate quantisation (ICD 12).
+    imp = ImperfectionState(profile=profile, dt_s=dt)
+    m.imperfection_profile_id = profile.profile_id
 
     for _ in range(n_steps):
         data.xfrc_applied[frame] = 0.0
@@ -343,18 +347,26 @@ def run(
             data.xfrc_applied[frame][:3] = force
             data.xfrc_applied[frame][3:] = torque
 
+        # WHAT THE CONTROLLER SEES vs WHAT ACTUALLY HAPPENED. The controller is
+        # handed the corrupted signals; the trajectory below records TRUTH.
+        # Logging the sensor's version would make it impossible to tell a plant
+        # problem from a sensing one, which is most of what these runs are for.
         pitch = frame_pitch_rad(model, data)
-        pitch_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
-        wheel_rate = float(data.qvel[6])
+        true_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
+        sensed_rate = imp.gyro(true_rate)
+        sensed_wheel = imp.wheel_rate(float(data.qvel[6]), float(data.time))
 
         proposed = 0.0
         if controller is not None:
-            proposed = float(controller(float(data.time), pitch, pitch_rate, wheel_rate))
+            true_gyro, true_accel = imu_readings(model, data)
+            proposed = float(controller(
+                float(data.time), pitch, sensed_rate, sensed_wheel,
+                gyro_rad_s=imp.gyro_vec(true_gyro),
+                accel_m_s2=imp.accel_vec(true_accel),
+            ))
 
-        if pipeline:
-            current, pipeline = pipeline[0], pipeline[1:] + [proposed]
-        else:
-            current = proposed
+        # Delay and current-loop lag live here, not in the controller.
+        current = imp.apply_current(proposed)
 
         # ctrl is TORQUE (motor actuator, gear=1); the controller speaks amps.
         data.ctrl[0] = current * KT_NM_PER_A
@@ -380,6 +392,7 @@ def run(
         if capture_state:
             states.append(data.qpos.copy())
 
+        est_err.append(abs(float(np.degrees(getattr(controller, "pitch_used_rad", pitch) - pitch))))
         m.control_effort_a_s += abs(current) * dt
         # ABSOLUTE peak. Open-loop the board only ever pitches one way, so a
         # one-sided max was adequate; a controller overshoots the other way and
@@ -411,6 +424,10 @@ def run(
     else:
         m.settle_time_s = 0.0
     m.steady_state_pitch_deg = float(np.mean(pitch_arr[t >= t[-1] - 0.5]))
+    if est_err:
+        e = np.asarray(est_err)
+        m.pitch_est_rms_deg = float(np.sqrt((e**2).mean()))
+        m.pitch_est_max_deg = float(e.max())
 
     return ImpulseResult(
         params=params,

@@ -19,3 +19,9 @@ imageio-ffmpeg==0.6.0       # bundles an ffmpeg binary; no apt-get in CI
 
 # Test gate
 pytest==8.4.2
+
+# Notebooks. Optional -- nothing in CI needs them, and the analysis scripts
+# they read run without any of this. Kept pinned for the same reason as the
+# rest: a notebook that renders differently next year is not a record.
+jupyterlab==4.5.2
+nbformat==5.10.4

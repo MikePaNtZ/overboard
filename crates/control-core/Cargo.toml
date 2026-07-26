@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 board-types = { workspace = true }
+# no_std trig: control-core cannot use std::f32::atan2.
+libm = "0.2"

@@ -33,6 +33,17 @@ typedef struct {
      * The pitch-to-velocity coupling genuinely inverts between the two; this
      * is a property of the vehicle, not a tuning knob. */
     uint32_t com_above_axle;
+
+    /* Attitude estimator. 1 = fuse from the raw IMU, 0 = use obs.pitch_rad
+     * (truth in sim). The truth path is kept so the estimator's contribution
+     * to the error stays measurable on its own. */
+    uint32_t use_estimator;
+    float    estimator_tau_s;
+    /* 1 = subtract wheel-odometry forward acceleration from the accelerometer
+     * before deriving tilt. Without it the implied tilt is wrong by
+     * atan(a/g) -- about 5 deg at the outer loop's acceleration limit. */
+    uint32_t estimator_accel_aiding;
+    float    wheel_accel_tau_s;
 } ob_params_v1;
 
 typedef struct {
@@ -42,6 +53,8 @@ typedef struct {
     float    pitch_rate_rad_s;  /* nose-up positive */
     float    wheel_rate_rad_s;  /* positive = forward */
     float    motor_current_a;   /* measured, not commanded */
+    float    gyro_rad_s[3];     /* body frame; [1] IS the nose-up pitch rate */
+    float    accel_m_s2[3];    /* body frame specific force */
     float    v_ref_m_s;         /* speed setpoint for THIS cycle */
 } ob_obs_v1;
 
@@ -49,7 +62,8 @@ typedef struct {
     uint32_t size;
     float    amps;
     uint32_t saturated;         /* 0 no, 1 yes, 2 unknown */
-    float    pitch_ref_rad;      /* what the outer loop asked for */
+    float    pitch_ref_rad;     /* what the outer loop asked for */
+    float    pitch_used_rad;     /* the attitude actually acted on */
 } ob_cmd_v1;
 
 typedef struct ob_controller ob_controller;

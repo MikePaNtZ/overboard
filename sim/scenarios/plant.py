@@ -11,9 +11,20 @@ from pathlib import Path
 
 MODEL_PATH = Path(__file__).resolve().parents[2] / "sim" / "models" / "overboard_onewheel.xml"
 
-#: Motor torque constant, N*m per amp. **UNFITTED PLACEHOLDER** -- re-exported
-#: from the impulse scenario so there is exactly one definition of it.
-from .impulse_response import KT_NM_PER_A  # noqa: E402
+#: Motor torque constant, N*m per amp. **UNFITTED PLACEHOLDER.**
+#:
+#: The MJCF actuator is a torque source; the controller commands current. This
+#: is the conversion, and it is the first thing the bench must measure: a
+#: current step of known magnitude against a known inertia gives kt directly
+#: (Bench Test-Stand, Config A). 0.7 is an order-of-magnitude guess for a
+#: hoverboard-class hub motor and nothing has been fitted to it.
+#:
+#: It is named rather than implicit because it was previously implicit at 1.0 --
+#: amps written straight into a N*m channel -- which made `ctrlrange` (N*m) and
+#: `max_current_a` (A) look like the same number and hid the unit error.
+#:
+#: The model's ctrlrange is derived from this: 40 A x 0.7 = 28 N*m.
+KT_NM_PER_A = 0.7
 
 #: Rider-proxy colours, from the overboard-web palette.
 #:
@@ -228,3 +239,42 @@ def plant_summary(model) -> dict:
     }
 
 
+
+
+def imu_readings(model, data) -> tuple:
+    """Gyro and specific force at the IMU site, **converted to the ICD frame**.
+
+    Looked up by sensor NAME rather than a hardcoded offset into `sensordata`:
+    the sensor block has been reordered once already, and an index quietly
+    pointing at the wrong sensor would hand the estimator plausible garbage.
+
+    THE MODEL'S BODY FRAME IS NOT THE ICD'S. MuJoCo's frame here is **z-up**;
+    ICD §10.1 specifies FRD, **z-down**. Feeding the raw sensor to an estimator
+    that assumes FRD gives an attitude offset by 180°, which is about as bad as
+    a sign error gets on a balancer.
+
+    The conversion is **z-negation on both vectors**, and it was determined
+    EMPIRICALLY against `framequat` truth rather than derived — §10.3 makes the
+    sim the arbiter for exactly this class of question, and a derivation that
+    looked right had the accelerometer's x sign backwards. On quiet samples
+    (specific force within 0.15 of 1 g, so gravity dominates) the converted
+    reading recovers truth to about 2° RMS, the residual being real
+    acceleration rather than a frame error. `test_imu_frame_matches_truth`
+    pins it.
+
+    The y axis is untouched, which is the component that matters: `gyro[1]` is
+    the nose-up pitch rate in both frames.
+    """
+    import mujoco
+    import numpy as np
+
+    out = []
+    for name in ("frame_gyro", "frame_accel"):
+        sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+        if sid < 0:
+            raise KeyError(f"model has no sensor named {name!r}")
+        adr, dim = int(model.sensor_adr[sid]), int(model.sensor_dim[sid])
+        out.append(np.array(data.sensordata[adr : adr + dim], dtype=float))
+    gyro, accel = out
+    to_icd = np.array([1.0, 1.0, -1.0])
+    return gyro * to_icd, accel * to_icd

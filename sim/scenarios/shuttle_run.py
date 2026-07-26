@@ -39,6 +39,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from .imperfections import STAGE0_PLACEHOLDER, ImperfectionProfile, ImperfectionState
 from .impulse_response import KT_NM_PER_A, frame_pitch_rad
 from .plant import MODEL_PATH, build_model, plant_summary
 
@@ -142,6 +143,7 @@ class ShuttleMetrics:
     model_sha256: str = ""
     mujoco_version: str = ""
     timestep_s: float = 0.0
+    imperfection_profile_id: str = ""
 
 
 @dataclass
@@ -242,6 +244,7 @@ def run(
     params: ShuttleParams | None = None,
     controller_factory=None,
     capture_state: bool = False,
+    profile: ImperfectionProfile = STAGE0_PLACEHOLDER,
 ) -> ShuttleResult:
     """Drive the route and measure how well it was followed.
 
@@ -250,7 +253,7 @@ def run(
     `RustController` is.
     """
     params = params or ShuttleParams()
-    profile = VelocityProfile(params)
+    vprofile = VelocityProfile(params)
 
     model = build_model(params.ballast_mass_kg, params.ballast_height_m, params.max_current_a)
 
@@ -282,47 +285,56 @@ def run(
     if controller_factory is None:
         from .rust_controller import RustController
 
-        def controller_factory(profile):
+        def controller_factory(vprofile):
             return RustController(
                 kp_a_per_rad=200.0,
                 kd_a_per_rad_s=30.0,
                 max_current_a=params.max_current_a,
                 kp_v_rad_per_m_s=0.05,
                 ki_v_rad_per_m=0.02,
-                v_ref_fn=profile.v_ref,
+                v_ref_fn=vprofile.v_ref,
                 com_above_axle=True,
             )
 
     dt = float(model.opt.timestep)
-    n_steps = int(round(profile.duration_s / dt))
+    n_steps = int(round(vprofile.duration_s / dt))
+    imp = ImperfectionState(profile=profile, dt_s=dt)
     x0 = float(data.xpos[frame][0])
 
     m = ShuttleMetrics(
-        duration_s=profile.duration_s,
+        duration_s=vprofile.duration_s,
         model_sha256=hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest()[:16],
         mujoco_version=mujoco.__version__,
         timestep_s=dt,
+        imperfection_profile_id=profile.profile_id,
     )
+
+    # Populate sensordata BEFORE the first read. Sensors are computed during
+    # mj_step, so on the first control cycle they would otherwise be zeros --
+    # and an all-zero accelerometer makes atan2 return a garbage attitude that
+    # the estimator then has to spend ~tau unwinding. It showed up as a fixed
+    # 3.15 deg peak error, identical across every noise profile and crossover,
+    # which is the signature of a transient rather than a sensor problem.
+    mujoco.mj_forward(model, data)
 
     ts, pos, pos_cmd, vs, vrefs, pitches, prefs, currents = [], [], [], [], [], [], [], []
     states: list[np.ndarray] = []
     commanded_pos = 0.0
     hold_anchor: float | None = None
-    pending = 0.0
 
-    with controller_factory(profile) as ctl:
+    with controller_factory(vprofile) as ctl:
         for _ in range(n_steps):
             t = float(data.time)
+            # Corrupted signals to the controller; truth to the trajectory.
             pitch = frame_pitch_rad(model, data)
-            rate = float(data.qvel[4])
-            wheel = float(data.qvel[6])
+            rate = imp.gyro(float(data.qvel[4]))
+            wheel = imp.wheel_rate(float(data.qvel[6]), t)
 
-            current = pending
-            pending = float(ctl(t, pitch, rate, wheel))
+            current = imp.apply_current(float(ctl(t, pitch, rate, wheel)))
             data.ctrl[0] = current * KT_NM_PER_A
             mujoco.mj_step(model, data)
 
-            commanded_pos += profile.v_ref(t) * dt
+            commanded_pos += vprofile.v_ref(t) * dt
             fwd = float(-(data.xpos[frame][0] - x0))
             v = float(data.qvel[6]) * 0.14605
 
@@ -330,7 +342,7 @@ def run(
             pos.append(fwd)
             pos_cmd.append(commanded_pos)
             vs.append(v)
-            vrefs.append(profile.v_ref(t))
+            vrefs.append(vprofile.v_ref(t))
             pitch_deg = float(np.degrees(frame_pitch_rad(model, data)))
             pitches.append(pitch_deg)
             prefs.append(float(np.degrees(ctl.pitch_ref_rad)))
@@ -347,7 +359,7 @@ def run(
             # Hold quality, over the SETTLED half of each pause. Anchoring at
             # the start of the window would score the tail of the previous
             # leg's deceleration as drift.
-            settled = profile.is_settled_hold(t)
+            settled = vprofile.is_settled_hold(t)
             if settled:
                 if hold_anchor is None:
                     hold_anchor = fwd
