@@ -179,6 +179,58 @@ def test_fresh_model_load_gives_the_same_answer():
 # The closed-loop hook (the controller itself is a later milestone)
 # --------------------------------------------------------------------------
 
+def test_motor_sign_matches_icd(model):
+    """BoardIo ICD §7.3: `amps > 0` => forward wheel acceleration => nose up.
+
+    The ICD calls a sign error across this seam the most dangerous bug in the
+    system, and says not to implement it from memory -- so it is asserted here
+    against the plant rather than trusted to a comment. Pitch is
+    nose-down-positive, so "nose up" means pitch goes NEGATIVE.
+
+    This caught a real inversion: with the wheel hinge on +Y, positive current
+    drove the board backwards and pitched the nose down, which would have
+    flipped the sign of the balance law the moment a controller was attached.
+    """
+    fwd = run(ImpulseParams(magnitude_ns=0.0, sim_seconds=1.5), model=model,
+              controller=lambda t, p, pr, w: +6.0)
+    assert fwd.metrics.travel_m > 0.1, "positive current must drive the board FORWARD"
+    assert fwd.pitch_deg[-1] < -1.0, "positive current must pitch the nose UP"
+    assert fwd.wheel_rate_rads[-1] > 0, "forward roll must be positive joint velocity"
+
+    # ...and the mirror, so the test cannot pass on a model that ignores sign.
+    rev = run(ImpulseParams(magnitude_ns=0.0, sim_seconds=1.5), model=model,
+              controller=lambda t, p, pr, w: -6.0)
+    assert rev.metrics.travel_m < -0.1
+    assert rev.pitch_deg[-1] > 1.0
+
+
+def test_balance_law_sign_is_stabilising(model):
+    """The consequence of §7.3 that actually matters: feedback must push the
+    board back toward upright rather than drive it into the ground.
+
+    ⚠️ NOTE THE SIGN. The ICD writes the balance term as `current ≈ −K·pitch`,
+    but that is in the ICD's pitch convention, which is NOSE-UP-POSITIVE. This
+    module uses NOSE-DOWN-POSITIVE (so the nose strike is at +18.6°, which is
+    the natural reading for this test). The two are negations of each other, so
+    the same physical law is written `current ≈ +K·pitch` here.
+
+    Measured, not assumed: `+K·pitch` holds the board upright through the
+    nominal impulse (peak 0.2°, no strike); `−K·pitch` flips it to 180°. See
+    the convention warning in impulse_response's module docstring — carrying
+    two pitch conventions in one system is exactly the cross-seam sign error
+    the ICD calls the most dangerous bug, and it needs resolving before the
+    Rust controller is wired in.
+    """
+    open_loop = run(ImpulseParams(), model=model)
+    damped = run(ImpulseParams(), model=model,
+                 controller=lambda t, p, pr, w: max(-40.0, min(40.0, 3.0 * p + 0.3 * pr)))
+    assert damped.metrics.peak_pitch_deg < open_loop.metrics.peak_pitch_deg, (
+        f"stabilising feedback made it worse: {damped.metrics.peak_pitch_deg:.2f} deg "
+        f"vs {open_loop.metrics.peak_pitch_deg:.2f} deg open loop -- sign is inverted"
+    )
+    assert not damped.metrics.nose_strike, "PD feedback should prevent the strike entirely"
+
+
 def test_controller_hook_is_wired_to_the_motor(model):
     """A trivial constant-current 'controller' must visibly change the outcome.
 

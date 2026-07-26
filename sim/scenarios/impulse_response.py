@@ -15,10 +15,32 @@ underside of the bumper reaches the ground after 18.6 deg of pitch (see
 `nose_strike_angle_deg`, computed from the actual collision hull, not assumed).
 The board physically cannot tilt further while upright — it noses in first.
 
-So `toppled` is a real contact between a bumper geom and the ground plane. That
-is the true failure mode, it falls out of the geometry rather than a tuned
+So `nose_strike` is a real contact between a bumper geom and the ground plane.
+That is the true failure mode, it falls out of the geometry rather than a tuned
 constant, and 18.6 deg is the margin the balance controller actually has to
 hold.
+
+PITCH SIGN -- THIS MODULE DISAGREES WITH THE BoardIo ICD
+--------------------------------------------------------
+This module uses NOSE-DOWN-POSITIVE pitch, so the nose strike is at +18.6 deg.
+The BoardIo ICD uses NOSE-UP-POSITIVE: its section 7.3 reads "amps > 0 => nose
+pitches up", and it writes the balance term as `current ~= -K*pitch`.
+
+The two are exact negations, so the same physical control law is written
+`current ~= +K*pitch` here. Verified rather than argued: +K*pitch holds the
+board upright through the nominal impulse (peak 0.2 deg, no strike), while the
+ICD's literal -K*pitch drives it to 180 deg. See
+test_balance_law_sign_is_stabilising.
+
+*** RESOLVE THIS BEFORE THE RUST CONTROLLER IS WIRED IN. *** Carrying two pitch
+conventions across the sim/HAL seam is exactly the cross-seam sign error the
+ICD calls the most dangerous bug in the system.
+
+The ACTUATOR sign is already reconciled: the wheel hinge sits on -Y
+specifically so that `amps > 0 => forward => nose up` per ICD 7.3, asserted by
+test_motor_sign_matches_icd. Only the pitch REPORTING sign still differs, and
+fixing it is a decision about which document moves, not a code change to make
+unilaterally.
 """
 
 from __future__ import annotations

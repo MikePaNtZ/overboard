@@ -70,6 +70,30 @@ Pushing through the CoM keeps the disturbance a pure linear impulse, so the
 pitch response is produced by the vehicle's own dynamics. Deck-height
 application is retained for a follow-on "shove"/curb-strike scenario.
 
+### 2.3 Sign conventions across the sim/HAL seam
+
+The BoardIo ICD calls a sign error across this seam the most dangerous bug in
+the system, and says not to implement it from memory. Reconciling the docs
+against the model found one:
+
+**Fixed — the motor was inverted.** ICD §7.3 mandates `amps > 0 ⇒ forward wheel
+acceleration ⇒ nose pitches up`. With the wheel hinge on `+Y` the model did the
+exact opposite: `+6 A` drove the board *backwards* 2.1 m and pitched the nose
+*down*, while its own comment claimed the reverse. Nothing depended on it —
+the open-loop scenario never actuates — but it would have inverted the balance
+law the moment a controller was attached. The hinge is now on `-Y`, and
+`test_motor_sign_matches_icd` asserts both the forward case and its mirror.
+
+**Still open — pitch reporting disagrees.** This scenario reports pitch
+**nose-down-positive** (so the strike is at +18.6°, the natural reading here);
+the ICD is **nose-up-positive**. They are exact negations, so the same physical
+law is written `current ≈ +K·pitch` here and `−K·pitch` in the ICD. Measured,
+not argued: `+K·pitch` holds the board upright through the nominal impulse
+(peak 0.21°, no strike), while the ICD's literal `−K·pitch` drives it to 180°.
+
+Resolving this means deciding **which document moves** — an ICD amendment, not
+a unilateral code change — and it must happen before the Rust controller lands.
+
 ## 3. Measured behaviour
 
 Impulse sweep, open-loop, forward, through the CoM:
