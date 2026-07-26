@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Feature-branch pushes are covered by `pull_request`. Without the branch
+  # filter both events fire on every PR commit and the whole suite runs twice.
   push:
+    branches: [master]
   pull_request:
 
 env:
