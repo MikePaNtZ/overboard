@@ -115,6 +115,19 @@ jobs:
       - name: Install sim toolchain
         run: pip install -r requirements-sim.txt
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The closed-loop gate loads the REAL control law over the C ABI, so the
+      # cdylib has to exist before pytest runs. If it is missing those tests
+      # FAIL rather than skip -- a closed-loop test that passes because the
+      # controller was absent would be worse than no test at all.
+      - name: Build the control library
+        run: cargo build --release -p control-ffi
+
       - name: Scenario acceptance gate
         run: pytest tests/ -v
 

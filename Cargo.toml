@@ -6,6 +6,7 @@ members = [
     "crates/control-core",
     "crates/safety",
     "crates/sim-backend",
+    "crates/control-ffi",
     "crates/board-app",
 ]
 

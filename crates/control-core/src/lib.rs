@@ -7,6 +7,47 @@
 
 use board_types::{Command, Observation, Params};
 
+/// Inner-loop pitch regulator — the balance law itself.
+///
+/// `amps = −(kp·θ + kd·θ̇)` with θ **nose-up-positive in radians** (ICD §10.1).
+/// The minus sign is the ICD's own `current ≈ −K·pitch`, K > 0, and it is the
+/// stabilising sense: a nose-down excursion is negative pitch, correcting it
+/// means driving the contact patch forward, which is positive current.
+///
+/// Deliberately takes an already-estimated pitch rather than an [`Observation`].
+/// Fusing raw IMU into an attitude is a separate concern with its own interface
+/// and its own error budget; keeping them apart means the regulator can be
+/// tuned against truth first and the estimator's contribution measured
+/// separately afterwards, instead of debugging both at once.
+///
+/// **No integrator yet.** The plant has a real restoring term, so steady-state
+/// error may be small enough that an integrator only adds windup risk. That is
+/// an open question to settle with data, not on a whiteboard — and adding one
+/// requires the anti-windup path (ICD §7.6) to be wired to `Saturation` first.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PitchRegulator {
+    kp_a_per_rad: f32,
+    kd_a_per_rad_s: f32,
+}
+
+impl PitchRegulator {
+    pub const fn new(kp_a_per_rad: f32, kd_a_per_rad_s: f32) -> Self {
+        PitchRegulator {
+            kp_a_per_rad,
+            kd_a_per_rad_s,
+        }
+    }
+
+    /// Requested current in amps, before any clamping.
+    ///
+    /// Unclamped on purpose: bounding the command is the safety envelope's job
+    /// (stage 2, ICD §7.6), and a controller that silently clamps its own
+    /// output hides saturation from the anti-windup that needs to see it.
+    pub fn update(&self, pitch_rad: f32, pitch_rate_rad_s: f32) -> f32 {
+        -(self.kp_a_per_rad * pitch_rad + self.kd_a_per_rad_s * pitch_rate_rad_s)
+    }
+}
+
 /// Cascaded balance controller.
 ///
 /// **Stub.** Returns [`Command::ZERO`] regardless of input; the sim checkpoint
@@ -140,5 +181,62 @@ mod tests {
     fn an_observation_with_no_imu_samples_yields_no_dt() {
         let mut ctrl = Controller::new(Params::default());
         assert_eq!(ctrl.dt_s(&Observation::COLD_START), None);
+    }
+
+    // ---- PitchRegulator -------------------------------------------------
+    //
+    // These assert the SIGN and the shape, not tuned values. The gains that
+    // matter are validated against the plant in the sim scenario; what must be
+    // true here, independent of any plant, is that the law opposes the error.
+
+    const KP: f32 = 80.0;
+    const KD: f32 = 11.0;
+
+    #[test]
+    fn nose_down_commands_positive_current() {
+        // Nose-down is NEGATIVE pitch (ICD 10.1). Correcting it means driving
+        // the contact patch forward, i.e. POSITIVE current. If this ever
+        // inverts, the board accelerates into its own nosedive.
+        let r = PitchRegulator::new(KP, KD);
+        assert!(r.update(-0.1, 0.0) > 0.0);
+    }
+
+    #[test]
+    fn nose_up_commands_negative_current() {
+        let r = PitchRegulator::new(KP, KD);
+        assert!(r.update(0.1, 0.0) < 0.0);
+    }
+
+    #[test]
+    fn the_rate_term_opposes_the_rate() {
+        // At zero pitch error, a nose-up RATE must still be resisted -- that is
+        // the damping, and without it the proportional term alone rings.
+        let r = PitchRegulator::new(KP, KD);
+        assert!(r.update(0.0, 0.5) < 0.0);
+        assert!(r.update(0.0, -0.5) > 0.0);
+    }
+
+    #[test]
+    fn level_and_still_commands_nothing() {
+        let r = PitchRegulator::new(KP, KD);
+        assert_eq!(r.update(0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn the_law_is_odd_symmetric() {
+        // Equal and opposite errors must produce equal and opposite commands.
+        // An asymmetry here would mean the board recovers better one way than
+        // the other, which is the kind of thing that only shows up in a hard
+        // save in the wrong direction.
+        let r = PitchRegulator::new(KP, KD);
+        assert_eq!(r.update(0.07, 0.3), -r.update(-0.07, -0.3));
+    }
+
+    #[test]
+    fn output_is_unclamped_so_the_envelope_can_see_saturation() {
+        // A controller that clamps itself hides saturation from the anti-windup
+        // that needs to observe it (ICD 7.6).
+        let r = PitchRegulator::new(KP, KD);
+        assert!(r.update(-1.0, 0.0) > 40.0);
     }
 }
