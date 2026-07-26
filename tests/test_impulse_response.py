@@ -118,10 +118,14 @@ def test_nominal_impulse_causes_a_nose_strike(model):
     m = run(ImpulseParams(magnitude_ns=NOMINAL_IMPULSE_NS), model=model).metrics
     assert m.nose_strike
     assert m.t_strike_s > ImpulseParams().t0_s, "strike must follow the kick, not precede it"
-    assert m.peak_pitch_deg >= nose_strike_angle_deg(model) - 0.1
+    assert m.peak_abs_pitch_deg >= nose_strike_angle_deg(model) - 0.1
     # Severity, not just occurrence: a graze and a real dig-in are different.
     assert m.speed_at_strike_ms > 0.5
-    assert m.pitch_rate_at_strike_dps > 10.0
+    # Magnitude, because the rate is signed in the ICD convention and a nose
+    # striking the ground is pitching DOWN, i.e. negative. Severity is how fast
+    # it was moving, not which way.
+    assert m.pitch_rate_at_strike_dps < 0, "the nose must be falling when it strikes"
+    assert abs(m.pitch_rate_at_strike_dps) > 10.0
 
 
 def test_subthreshold_impulse_does_not_topple(model):
@@ -129,7 +133,7 @@ def test_subthreshold_impulse_does_not_topple(model):
     margin. Together with the nominal case this brackets the real threshold."""
     m = run(ImpulseParams(magnitude_ns=SUBTHRESHOLD_IMPULSE_NS), model=model).metrics
     assert not m.nose_strike
-    assert m.peak_pitch_deg < 0.75 * nose_strike_angle_deg(model)
+    assert m.peak_abs_pitch_deg < 0.75 * nose_strike_angle_deg(model)
     assert m.travel_m > 0.1, "it should still roll -- otherwise the kick did nothing"
 
 
@@ -137,7 +141,7 @@ def test_response_is_monotonic_in_impulse(model):
     """Bigger kick, bigger pitch. Cheap, but it catches sign errors and
     saturation bugs that a single-point test sails past."""
     peaks = [
-        run(ImpulseParams(magnitude_ns=j, sim_seconds=4.0), model=model).metrics.peak_pitch_deg
+        run(ImpulseParams(magnitude_ns=j, sim_seconds=4.0), model=model).metrics.peak_abs_pitch_deg
         for j in (2.0, 4.0, 6.0, 8.0, 10.0)
     ]
     assert all(b > a for a, b in zip(peaks, peaks[1:])), peaks
@@ -145,11 +149,11 @@ def test_response_is_monotonic_in_impulse(model):
 
 def test_forward_impulse_drives_the_board_forward(model):
     """Sign check across the whole convention stack -- forward is -X, pitch is
-    nose-down-positive. Sign errors here are the classic way a balance
+    NOSE-UP-POSITIVE (ICD 10.1). Sign errors here are the classic way a balance
     controller ends up driving itself into the ground."""
     r = run(ImpulseParams(magnitude_ns=SUBTHRESHOLD_IMPULSE_NS), model=model)
     assert r.metrics.travel_m > 0
-    assert r.pitch_deg.max() > 0, "a forward push must pitch the nose down"
+    assert r.pitch_deg.min() < 0, "a forward push must pitch the nose DOWN, i.e. negative"
 
 
 # --------------------------------------------------------------------------
@@ -185,7 +189,7 @@ def test_motor_sign_matches_icd(model):
     The ICD calls a sign error across this seam the most dangerous bug in the
     system, and says not to implement it from memory -- so it is asserted here
     against the plant rather than trusted to a comment. Pitch is
-    nose-down-positive, so "nose up" means pitch goes NEGATIVE.
+    NOSE-UP-POSITIVE (ICD 10.1), so "nose up" means pitch goes POSITIVE.
 
     This caught a real inversion: with the wheel hinge on +Y, positive current
     drove the board backwards and pitched the nose down, which would have
@@ -194,56 +198,56 @@ def test_motor_sign_matches_icd(model):
     fwd = run(ImpulseParams(magnitude_ns=0.0, sim_seconds=1.5), model=model,
               controller=lambda t, p, pr, w: +6.0)
     assert fwd.metrics.travel_m > 0.1, "positive current must drive the board FORWARD"
-    assert fwd.pitch_deg[-1] < -1.0, "positive current must pitch the nose UP"
+    assert fwd.pitch_deg[-1] > 1.0, "positive current must pitch the nose UP"
     assert fwd.wheel_rate_rads[-1] > 0, "forward roll must be positive joint velocity"
 
     # ...and the mirror, so the test cannot pass on a model that ignores sign.
     rev = run(ImpulseParams(magnitude_ns=0.0, sim_seconds=1.5), model=model,
               controller=lambda t, p, pr, w: -6.0)
     assert rev.metrics.travel_m < -0.1
-    assert rev.pitch_deg[-1] > 1.0
+    assert rev.pitch_deg[-1] < -1.0
 
 
 def test_balance_law_sign_is_stabilising(model):
-    """The consequence of §7.3 that actually matters: feedback must push the
+    """The consequence of 7.3 that actually matters: feedback must push the
     board back toward upright rather than drive it into the ground.
 
-    ⚠️ NOTE THE SIGN. The ICD writes the balance term as `current ≈ −K·pitch`,
-    but that is in the ICD's pitch convention, which is NOSE-UP-POSITIVE. This
-    module uses NOSE-DOWN-POSITIVE (so the nose strike is at +18.6°, which is
-    the natural reading for this test). The two are negations of each other, so
-    the same physical law is written `current ≈ +K·pitch` here.
+    With pitch nose-up-positive (ICD 10.1) the stabilising law is the ICD's own
+    `current ~= -K*pitch`, K > 0, with no convention flip anywhere. That is the
+    whole point of having moved the sim onto the ICD's convention: the law is
+    now written the same way in the document, the model comment and the code.
 
-    Measured, not assumed: `+K·pitch` holds the board upright through the
-    nominal impulse (peak 0.2°, no strike); `−K·pitch` flips it to 180°. See
-    the convention warning in impulse_response's module docstring — carrying
-    two pitch conventions in one system is exactly the cross-seam sign error
-    the ICD calls the most dangerous bug, and it needs resolving before the
-    Rust controller is wired in.
+    Measured, not assumed -- inverting the sign here drives the board over.
+
+    Gains are in AMPS PER RADIAN, because the hook takes radians.
     """
+    def pd(t, pitch_rad, pitch_rate_rad_s, wheel_rate):
+        amps = -(80.0 * pitch_rad + 11.0 * pitch_rate_rad_s)
+        return max(-40.0, min(40.0, amps))
+
     open_loop = run(ImpulseParams(), model=model)
-    damped = run(ImpulseParams(), model=model,
-                 controller=lambda t, p, pr, w: max(-40.0, min(40.0, 3.0 * p + 0.3 * pr)))
-    assert damped.metrics.peak_pitch_deg < open_loop.metrics.peak_pitch_deg, (
-        f"stabilising feedback made it worse: {damped.metrics.peak_pitch_deg:.2f} deg "
-        f"vs {open_loop.metrics.peak_pitch_deg:.2f} deg open loop -- sign is inverted"
+    damped = run(ImpulseParams(), model=model, controller=pd)
+    assert damped.metrics.peak_abs_pitch_deg < open_loop.metrics.peak_abs_pitch_deg, (
+        f"stabilising feedback made it worse: {damped.metrics.peak_abs_pitch_deg:.2f} deg "
+        f"vs {open_loop.metrics.peak_abs_pitch_deg:.2f} deg open loop -- sign is inverted"
     )
     assert not damped.metrics.nose_strike, "PD feedback should prevent the strike entirely"
 
 
-def test_controller_hook_is_wired_to_the_motor(model):
-    """A trivial constant-current 'controller' must visibly change the outcome.
+def test_inverting_the_balance_law_drives_the_board_over(model):
+    """The mutation test for the sign gate.
 
-    This does not test a control law -- it proves the seam carries torque, so
-    that when the Rust controller lands, a null result means the controller is
-    wrong rather than the plumbing."""
-    seen = []
+    A polarity assertion that has never been seen to fail is not a gate. This
+    runs the same law with K negated and requires the board to strike -- so if
+    someone flips a sign somewhere and the stabilising test starts passing for
+    the wrong reason, this one stops passing.
+    """
+    def inverted_pd(t, pitch_rad, pitch_rate_rad_s, wheel_rate):
+        amps = +(80.0 * pitch_rad + 11.0 * pitch_rate_rad_s)
+        return max(-40.0, min(40.0, amps))
 
-    def spin(t, pitch, pitch_rate, wheel_rate):
-        seen.append((t, pitch))
-        return 8.0
-
-    driven = run(ImpulseParams(magnitude_ns=0.0, sim_seconds=2.0), model=model, controller=spin)
-    assert seen, "controller was never called"
-    assert driven.metrics.control_effort_a_s > 0
-    assert abs(driven.metrics.travel_m) > 0.01, "motor torque did not reach the wheel"
+    r = run(ImpulseParams(), model=model, controller=inverted_pd)
+    assert r.metrics.nose_strike, (
+        "positive feedback must drive the board into the ground; if this passes "
+        "the pitch or motor sign convention has moved and the gate is inert"
+    )

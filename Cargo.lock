@@ -28,6 +28,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "control-ffi"
+version = "0.1.0"
+dependencies = [
+ "board-types",
+ "control-core",
+ "safety",
+]
+
+[[package]]
 name = "hal"
 version = "0.1.0"
 dependencies = [

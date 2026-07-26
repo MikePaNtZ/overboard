@@ -117,7 +117,10 @@ def _draw_hud(frame: np.ndarray, result: ImpulseResult, idx: int, strike_deg: fl
     # --- pitch trace strip -------------------------------------------------
     x0, y0, x1, y1 = 26, HEIGHT - 150, WIDTH - 26, HEIGHT - 46
     d.rectangle([x0, y0, x1, y1], fill=(*INK, 190))
-    lo, hi = -8.0, max(strike_deg + 6.0, float(result.pitch_deg.max()) + 3.0)
+    # Pitch is nose-up-positive (ICD 10.1), so a nose strike is a NEGATIVE
+    # excursion and the interesting half of the axis is below zero.
+    lo = min(-strike_deg - 6.0, float(result.pitch_deg.min()) - 3.0)
+    hi = 8.0
 
     def px(i):
         return x0 + 10 + (x1 - x0 - 20) * (result.t[i] / result.t[-1])
@@ -126,11 +129,11 @@ def _draw_hud(frame: np.ndarray, result: ImpulseResult, idx: int, strike_deg: fl
         return y1 - 14 - (y1 - y0 - 28) * ((v - lo) / (hi - lo))
 
     d.line([(x0 + 10, py(0)), (x1 - 10, py(0))], fill=(*MUTED, 110), width=1)
-    d.line([(x0 + 10, py(strike_deg)), (x1 - 10, py(strike_deg))], fill=(*AMBER, 150), width=2)
+    d.line([(x0 + 10, py(-strike_deg)), (x1 - 10, py(-strike_deg))], fill=(*AMBER, 150), width=2)
     # Right-aligned: the impulse marker lives at the left of the strip and the
     # two labels sat on top of each other.
     sl = f"nose strike  {strike_deg:.1f}°"
-    d.text((x1 - 14 - d.textlength(sl, font=f_small), py(strike_deg) - 18), sl,
+    d.text((x1 - 14 - d.textlength(sl, font=f_small), py(-strike_deg) - 18), sl,
            font=f_small, fill=AMBER)
 
     if idx > 1:
@@ -191,6 +194,99 @@ def render_frames(result: ImpulseResult, camera: str) -> list[np.ndarray]:
             mujoco.mj_forward(model, data)
             renderer.update_scene(data, camera=camera, scene_option=scene_opt)
             frames.append(_draw_hud(renderer.render().copy(), result, i, strike))
+        return frames
+    finally:
+        renderer.close()
+
+
+PANE_H = HEIGHT // 2
+
+
+def _pane_label(frame: np.ndarray, title: str, subtitle: str, colour,
+                width: int = WIDTH) -> np.ndarray:
+    """Label one pane of the comparison. Deliberately not the full HUD.
+
+    The HUD is laid out for a 720-high frame; shrinking it to fit a pane makes
+    it unreadable, and the comparison's job is to show the two behaviours side
+    by side, not to restate every metric twice.
+    """
+    from PIL import Image, ImageDraw
+
+    img = Image.fromarray(frame)
+    d = ImageDraw.Draw(img, "RGBA")
+    f_title, f_sub = _font(26), _font(17)
+
+    d.rectangle([0, 0, width, 44], fill=(*INK, 205))
+    d.text((18, 9), title, font=f_title, fill=colour)
+    # Subtitle drops to a second line if the pane is too narrow to hold both.
+    tw = d.textlength(title, font=f_title)
+    if 18 + tw + 14 + d.textlength(subtitle, font=f_sub) < width - 10:
+        d.text((18 + tw + 14, 16), subtitle, font=f_sub, fill=CLOUD)
+    else:
+        d.rectangle([0, 44, width, 72], fill=(*INK, 175))
+        d.text((18, 49), subtitle, font=f_sub, fill=CLOUD)
+    return np.asarray(img)
+
+
+def render_comparison(
+    open_loop: ImpulseResult,
+    closed: ImpulseResult,
+    camera: str,
+    top_label: str = "OPEN LOOP",
+    bottom_label: str = "CLOSED LOOP",
+    model=None,
+    layout: str = "v",
+) -> list[np.ndarray]:
+    """Two panes, same disturbance: uncontrolled above, controlled below.
+
+    Labels and model are parameters so the same renderer serves any A/B
+    experiment -- failing gains against working gains, driverless against
+    ballasted -- rather than only the open/closed case it was written for.
+
+    Both panes are rendered natively at half height rather than rendered full
+    size and downscaled — downscaling a 720p frame to 360 turns the board into
+    mush exactly where the pitch angle is the thing being read.
+
+    The two runs are separate trajectories of differing length; each pane
+    replays its own and holds its final frame if it is the shorter, so the
+    comparison stays time-aligned rather than one pane running ahead.
+    """
+    import mujoco
+
+    model = model if model is not None else load_model()
+    dt = float(model.opt.timestep)
+    stride = max(1, int(round((1.0 / FPS) / dt)))
+    n = max(len(open_loop.t), len(closed.t))
+
+    # A tall subject (a board with a rider on it) does not fit a 360-high
+    # pane: fovy is the VERTICAL field of view, so a short pane can only frame
+    # a tall thing by zooming out until it is too small to read. Side-by-side
+    # panes are full height, which is the right layout the moment the subject
+    # is taller than it is wide.
+    pane_w, pane_h = ((WIDTH, PANE_H) if layout == "v" else (WIDTH // 2, HEIGHT))
+    renderer = mujoco.Renderer(model, height=pane_h, width=pane_w)
+    data = mujoco.MjData(model)
+    try:
+        scene_opt = mujoco.MjvOption()
+        scene_opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
+
+        def pane(result: ImpulseResult, i: int, title: str, colour) -> np.ndarray:
+            j = min(i, len(result.qpos) - 1)
+            data.qpos[:] = result.qpos[j]
+            mujoco.mj_forward(model, data)
+            renderer.update_scene(data, camera=camera, scene_option=scene_opt)
+            sub = (
+                f"pitch {float(result.pitch_deg[j]):+6.2f}°   "
+                f"travel {float(result.travel_m[j]):+5.2f} m"
+            )
+            return _pane_label(renderer.render().copy(), title, sub, colour, width=pane_w)
+
+        frames = []
+        for i in range(0, n, stride):
+            top = pane(open_loop, i, top_label, AMBER)
+            bottom = pane(closed, i, bottom_label, MINT)
+            frames.append(np.vstack([top, bottom]) if layout == "v"
+                          else np.hstack([top, bottom]))
         return frames
     finally:
         renderer.close()
@@ -268,7 +364,7 @@ def save_pitch_plot(result: ImpulseResult, strike_deg: float, path: Path) -> Non
     fig, (ax, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True,
                                   gridspec_kw={"height_ratios": [3, 1]})
     ax.plot(result.t, result.pitch_deg, lw=2.2, color="#2AAE97", label="frame pitch")
-    ax.axhline(strike_deg, ls="--", lw=1.8, color="#C4650F",
+    ax.axhline(-strike_deg, ls="--", lw=1.8, color="#C4650F",
                label=f"nose strike ({strike_deg:.1f}°, from geometry)")
     ax.axvspan(p.t0_s, p.t0_s + p.duration_s, color="#F2A24A", alpha=0.35,
                label=f"impulse {p.magnitude_ns:.0f} N·s")
@@ -276,7 +372,7 @@ def save_pitch_plot(result: ImpulseResult, strike_deg: float, path: Path) -> Non
         ax.plot([m.t_strike_s], [result.pitch_deg[np.searchsorted(result.t, m.t_strike_s)]],
                 "o", ms=9, color="#C4650F", zorder=5)
         ax.annotate(f"strike @ {m.t_strike_s:.2f}s\n{m.speed_at_strike_ms:.2f} m/s",
-                    (m.t_strike_s, strike_deg), textcoords="offset points",
+                    (m.t_strike_s, -strike_deg), textcoords="offset points",
                     xytext=(16, -46), color="#16232E", fontsize=9,
                     arrowprops=dict(arrowstyle="-", lw=0.8, color="#8a99a0"))
     ax.set_ylabel("pitch, nose-down positive (deg)")
@@ -306,6 +402,12 @@ def main() -> int:
     ap.add_argument("--no-video", action="store_true", help="skip GL; plot + metrics only")
     ap.add_argument("--no-gif", action="store_true")
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    ap.add_argument(
+        "--compare",
+        action="store_true",
+        help="also film the same disturbance closed-loop, as a two-pane comparison "
+        "(requires: cargo build --release -p control-ffi)",
+    )
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -318,7 +420,7 @@ def main() -> int:
 
     print(f"impulse            {params.magnitude_ns:.1f} N*s at t={params.t0_s}s")
     print(f"nose strike angle  {strike:.2f} deg (from collision hull)")
-    print(f"peak pitch         {m.peak_pitch_deg:.2f} deg at t={m.t_peak_s:.2f}s")
+    print(f"peak |pitch|       {m.peak_abs_pitch_deg:.2f} deg at t={m.t_peak_s:.2f}s")
     print(f"nose strike        {m.nose_strike}"
           + (f" at t={m.t_strike_s:.3f}s, {m.speed_at_strike_ms:.2f} m/s, "
              f"{m.pitch_rate_at_strike_dps:.0f} deg/s" if m.nose_strike else ""))
@@ -360,6 +462,42 @@ def main() -> int:
         if not args.no_gif:
             write_gif(frames, args.out_dir / f"{STEM}.gif", result)
             print(f"wrote {args.out_dir / f'{STEM}.gif'}")
+
+    if args.compare:
+        # Imported here, not at module scope: the open-loop path is the CI
+        # gate's artifact and must not start depending on a built cdylib.
+        from sim.scenarios.rust_controller import RustController
+
+        # No try/except. If the library is missing this must fail loudly --
+        # silently publishing an "open vs closed" clip whose closed pane was
+        # actually uncontrolled would be a lie in the most visible artifact
+        # the project produces.
+        with RustController() as ctl:
+            closed = run(params, model=model, controller=ctl, capture_state=True)
+            saturated = ctl.saturated_cycles
+        cm = closed.metrics
+
+        print()
+        print(f"closed-loop peak   {cm.peak_abs_pitch_deg:.2f} deg "
+              f"(open loop {m.peak_abs_pitch_deg:.2f})")
+        print(f"closed-loop strike {cm.nose_strike}")
+        print(f"closed-loop travel {cm.travel_m:.2f} m")
+        print(f"peak current       {float(abs(closed.motor_current_a).max()):.2f} A "
+              f"({saturated} saturated cycles)")
+
+        (args.out_dir / "impulse_closed_loop_metrics.json").write_text(
+            json.dumps(closed.to_json_dict(), indent=2) + "\n"
+        )
+        print(f"wrote {args.out_dir / 'impulse_closed_loop_metrics.json'}")
+
+        if not args.no_video:
+            try:
+                cmp_frames = render_comparison(result, closed, args.camera)
+            except Exception as exc:
+                print(f"\ncomparison render unavailable ({type(exc).__name__}: {exc})")
+                return 0
+            write_video(cmp_frames, args.out_dir / "impulse_compare.mp4", "libx264", 6)
+            print(f"wrote {args.out_dir / 'impulse_compare.mp4'} ({len(cmp_frames)} frames)")
 
     return 0
 

@@ -18,6 +18,59 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
+  # ---------------------------------------------------------------------
+  # Does this change need a ~20 min render? Docs-only commits cannot change
+  # sim behaviour, and on a doc-heavy project they were burning a full render
+  # each to publish a preview identical to the last one.
+  #
+  # A job, not a workflow-level `paths-ignore`: that would skip `rust` and
+  # `sim` too, and a SKIPPED required check never reports, so branch
+  # protection would wait on it forever. Only the render is optional.
+  #
+  # Compares against the PREVIOUS HEAD (`github.event.before`), not the PR
+  # base. Diffing against the base means the comparison covers every commit on
+  # the branch, so on a long-lived feature PR -- exactly the case this exists
+  # for -- one earlier code commit makes every later docs commit look like a
+  # code change and the skip never fires. `before` is populated on both `push`
+  # and `pull_request: synchronize`; it is absent when a PR is first opened,
+  # where the base is the correct comparison anyway.
+  #
+  # Fails OPEN -- if the comparison commit cannot be resolved (first push on a
+  # branch, force-push, shallow history) it renders. Rendering needlessly
+  # costs minutes; skipping wrongly loses the artifact for that commit.
+  # ---------------------------------------------------------------------
+  render-needed:
+    runs-on: ubuntu-latest
+    outputs:
+      render: ${{ steps.check.outputs.render }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        env:
+          BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "comparison base '$BASE' unresolvable - rendering to be safe"
+            echo "render=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          echo "comparing ${BASE:0:7}..${HEAD:0:7}"
+          changed="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "changed files:"; echo "$changed"
+
+          # Anything that is not a doc or a markdown file means render.
+          if echo "$changed" | grep -qvE '^(docs/|\.github/ISSUE_|.*\.md$)'; then
+            echo "render=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs-only change - skipping the render"
+            echo "render=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -62,21 +115,63 @@ jobs:
       - name: Install sim toolchain
         run: pip install -r requirements-sim.txt
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The closed-loop gate loads the REAL control law over the C ABI, so the
+      # cdylib has to exist before pytest runs. If it is missing those tests
+      # FAIL rather than skip -- a closed-loop test that passes because the
+      # controller was absent would be worse than no test at all.
+      - name: Build the control library
+        run: cargo build --release -p control-ffi
+
       - name: Scenario acceptance gate
         run: pytest tests/ -v
 
   # ---------------------------------------------------------------------
-  # Film the scenario and publish it. Mainline only, and only behind a green
-  # gate -- the landing page eventually consumes this artifact, so a clip must
-  # never be published for a commit whose physics did not pass.
+  # Film the scenario and publish it, always behind a green gate -- the landing
+  # page eventually consumes this artifact, so a clip must never be published
+  # for a commit whose physics did not pass.
+  #
+  # ONE job renders for both destinations, deliberately. Only the publish step
+  # differs by ref:
+  #   master  -> rolling `sim-latest` release, stable URLs, feeds the web page.
+  #   PR      -> accumulating `sim-preview` prerelease, sha-stamped filenames,
+  #              giving one immutable URL per commit to paste into the Notion
+  #              implementation log as a feature develops.
+  # A second job would have been simpler to read and would have drifted from
+  # this one within a release or two; then the clip Mike reviews on a PR would
+  # no longer be from the same pipeline as the clip that ships.
+  #
+  # Still deliberately NOT a required status check: it now reports on PRs, but
+  # rendering depends on an offscreen GL stack and must not be able to block a
+  # merge whose physics passed.
   # ---------------------------------------------------------------------
   publish-sim-artifact:
-    needs: [sim, rust]
-    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    needs: [sim, rust, render-needed]
+    # Fork PRs get a read-only token, so the upload would fail on a
+    # contribution rather than on a mistake. Render-and-skip-publish is not
+    # worth the minutes; skip the job outright.
+    if: >-
+      needs.render-needed.outputs.render == 'true' &&
+      (github.event_name == 'push' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
       contents: write        # rolling release upload
+    env:
+      # On `pull_request`, `github.sha` is the EPHEMERAL MERGE COMMIT, which
+      # exists in no branch and cannot be checked out. Stamping artifacts with
+      # it makes them untraceable -- the opposite of the point. Every consumer
+      # of a sha in this job wants the head commit, so resolve it once here.
+      ARTIFACT_SHA: >-
+        ${{ github.event_name == 'pull_request'
+            && github.event.pull_request.head.sha
+            || github.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -97,11 +192,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libosmesa6 libgl1 libglx-mesa0
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # --compare films the SAME disturbance closed-loop as a second pane, and
+      # that pane runs the real control law over the C ABI -- so the cdylib has
+      # to exist. The script has no fallback here on purpose: publishing an
+      # "open vs closed" clip whose closed pane was quietly uncontrolled would
+      # be a lie in the most visible artifact the project produces.
+      - name: Build the control library
+        run: cargo build --release -p control-ffi
+
       - name: Render impulse scenario
         env:
           MUJOCO_GL: osmesa
           PYOPENGL_PLATFORM: osmesa
-        run: python scripts/render_scenario.py
+        run: python scripts/render_scenario.py --compare
 
       # Fail loudly if rendering silently degraded to the plot-only fallback.
       # The script exits 0 in that case by design (a dead GL stack must not
@@ -112,11 +221,23 @@ jobs:
             echo "::error::no mp4 was rendered - offscreen GL likely failed"; exit 1; }
           test -s sim/out/impulse_poster.jpg
           test -s sim/out/impulse_metrics.json
+          test -s sim/out/impulse_compare.mp4 || {
+            echo "::error::no comparison clip - the closed-loop render failed"; exit 1; }
+          # The comparison is only worth publishing if the two panes actually
+          # differ. Equal outcomes would mean the controller did nothing and
+          # the clip is quietly claiming a result it does not have.
+          python - <<'PYCL'
+          import json, pathlib
+          cl = json.loads(pathlib.Path("sim/out/impulse_closed_loop_metrics.json").read_text())["metrics"]
+          assert not cl["nose_strike"], "closed-loop pane struck; do not publish this as a recovery"
+          assert cl["peak_abs_pitch_deg"] < 5.0, f"closed peak {cl['peak_abs_pitch_deg']:.2f} deg is not a recovery"
+          print(f"closed loop: peak |pitch| {cl['peak_abs_pitch_deg']:.2f}deg, no strike")
+          PYCL
           python - <<'PY'
           import json, pathlib
           m = json.loads(pathlib.Path("sim/out/impulse_metrics.json").read_text())["metrics"]
           assert m["nose_strike"], "published clip must show the documented outcome"
-          print(f"strike {m['t_strike_s']:.3f}s  peak {m['peak_pitch_deg']:.2f}deg")
+          print(f"strike {m['t_strike_s']:.3f}s  peak |pitch| {m['peak_abs_pitch_deg']:.2f}deg")
           PY
 
       - name: Record provenance for downstream consumers
@@ -131,14 +252,14 @@ jobs:
           # the scenario's internal schema.
           pathlib.Path("sim/out/sim-run.json").write_text(json.dumps({
               "schema": 1,
-              "commit": os.environ["GITHUB_SHA"][:7],
-              "commit_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/commit/{os.environ['GITHUB_SHA']}",
+              "commit": os.environ["ARTIFACT_SHA"][:7],
+              "commit_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/commit/{os.environ['ARTIFACT_SHA']}",
               "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
               "scenario": "impulse disturbance response",
               "regime": "open-loop (no controller)",
               "impulse_ns": doc["params"]["magnitude_ns"],
               "nose_strike_angle_deg": round(m["nose_strike_angle_deg"], 2),
-              "peak_pitch_deg": round(m["peak_pitch_deg"], 2),
+              "peak_abs_pitch_deg": round(m["peak_abs_pitch_deg"], 2),
               "t_strike_s": round(m["t_strike_s"], 3) if m["t_strike_s"] else None,
               "speed_at_strike_ms": round(m["speed_at_strike_ms"], 2) if m["speed_at_strike_ms"] else None,
               "travel_m": round(m["travel_m"], 2),
@@ -148,7 +269,9 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: impulse-response-${{ github.sha }}
+          # Scenario-neutral: later increments of the closed-loop epic add
+          # test-stand scenarios to the same sim/out/ directory.
+          name: sim-artifacts-${{ env.ARTIFACT_SHA }}
           path: sim/out/
           retention-days: 30
 
@@ -156,6 +279,7 @@ jobs:
       # deploy time, so no binary ever lands in the web repo's git history.
       #   .../releases/download/sim-latest/impulse_open_loop.mp4
       - name: Publish to rolling sim-latest release
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -172,15 +296,66 @@ jobs:
             sim/out/impulse_open_loop.mp4 \
             sim/out/impulse_open_loop.webm \
             sim/out/impulse_open_loop.gif \
+            sim/out/impulse_compare.mp4 \
             sim/out/impulse_poster.jpg \
             sim/out/impulse_pitch.png \
             sim/out/impulse_metrics.json \
+            sim/out/impulse_closed_loop_metrics.json \
             sim/out/sim-run.json
+
+      # Per-commit preview. Filenames are sha-stamped and the release is never
+      # clobbered wholesale, so every commit on a long-lived feature branch
+      # keeps its own immutable URL -- that is the "artifacts for posterity"
+      # log the Notion implementation doc links to, one entry per milestone.
+      #
+      # Globbed over sim/out/ rather than a hardcoded file list: new scenarios
+      # land in later increments of this very epic, and a list here would mean
+      # every one of them needs a CI edit before its video appears.
+      - name: Publish sha-stamped preview
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          short="${ARTIFACT_SHA:0:7}"
+          mkdir -p preview
+          for f in sim/out/*; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            case "$base" in
+              *.*) cp "$f" "preview/${base%.*}-${short}.${base##*.}" ;;
+              *)   cp "$f" "preview/${base}-${short}" ;;
+            esac
+          done
+          ls -la preview/
+
+          gh release view sim-preview >/dev/null 2>&1 || \
+            gh release create sim-preview \
+              --prerelease \
+              --title "Sim previews (feature branches)" \
+              --notes "Per-commit renders from open PRs. Sha-stamped and accumulating; mainline artifacts live in the sim-latest release instead."
+          # --clobber so re-running a job for the same sha replaces rather than
+          # errors; distinct shas never collide because the name carries one.
+          gh release upload sim-preview --clobber preview/*
+
+          {
+            echo "### Preview artifacts — \`$short\` (\`$BRANCH\`)"
+            echo
+            for f in preview/*; do
+              n="$(basename "$f")"
+              echo "- [\`$n\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/sim-preview/$n)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Phase C (deferred): notify overboard-web so it redeploys with the new
       # clip. Needs a fine-grained PAT with contents:write on that repo, stored
       # as WEB_DISPATCH_TOKEN. Guarded so mainline is not broken by its absence.
+      #
+      # Mainline-only: the job itself now also runs on PRs, so without this
+      # guard every PR commit would redeploy the public site with an
+      # unreviewed clip.
       - name: Notify overboard-web
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
         env:
           WEB_DISPATCH_TOKEN: ${{ secrets.WEB_DISPATCH_TOKEN }}
         run: |

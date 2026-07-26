@@ -36,6 +36,25 @@ is on the ground before that. That angle is computed from the collision hulls
 rather than assumed, and it is the margin the balance controller has to hold.
 See [`docs/sim-impulse-response.md`](docs/sim-impulse-response.md).
 
+### What the sim results here do and do not claim
+
+A simulation is only worth publishing if it is honest about its own reach, so
+this repo states the boundary rather than leaving it to be inferred:
+
+- Results are from a **model whose constants are hand-specified**, not measured.
+  No hardware exists yet. Every absolute figure — torque constant, friction,
+  latency — is a placeholder awaiting the Stage-0 bench campaign.
+- A **bench-stand** result says nothing about balancing. Pinning the axle
+  removes translation, which is the mechanism that makes balancing hard.
+- Nothing here has been ridden, and nothing has carried a rider's mass. The
+  genuinely unstable equilibrium only appears once the centre of mass sits
+  above the axle.
+
+The strongest claim the sim-only phase can make is that *the control path is
+correct, timed, signed and instrumented, and the identify → design → verify
+method closes against a plant whose truth is known*. It cannot claim that the
+balance controller works. Public status is held to the same line (UR-13).
+
 ## Build the Rust workspace
 
 ```sh
@@ -90,10 +109,10 @@ correctness one.
 ## Layout
 
 - `crates/board-types` -- shared types (`Command`, `Observation`, `Faults`, `Params`), `no_std`-friendly.
-- `crates/hal` -- the `BoardIo` seam between control-core and a backend (sim or hardware).
+- `crates/hal` -- the `BoardObserve` / `BoardActuate` seam between control-core and a backend (sim or hardware).
 - `crates/control-core` -- pure/deterministic control logic (stub: zero command for now).
 - `crates/safety` -- pure safety envelope (stub: arm/disarm passthrough).
-- `crates/sim-backend` -- `hal::BoardIo` backend (stub today; MuJoCo FFI is the next milestone).
+- `crates/sim-backend` -- `hal` backend (stub today; MuJoCo FFI is the next increment).
 - `crates/board-app` -- the binary that wires it all together.
 - `sim/models` -- MuJoCo MJCF models (the shared physics asset). The onewheel's
   visual shells are imported from [Openwheel](https://github.com/bytesizedengineering/Openwheel)

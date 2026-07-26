@@ -1,0 +1,16 @@
+[package]
+name = "control-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# cdylib so the MuJoCo scenario (Python) can load the REAL control law over a C
+# ABI, rather than a Python reimplementation of it that would then have to be
+# kept in sync with the thing that actually ships.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+board-types = { workspace = true }
+control-core = { workspace = true }
+safety = { workspace = true }

@@ -20,27 +20,36 @@ That is the true failure mode, it falls out of the geometry rather than a tuned
 constant, and 18.6 deg is the margin the balance controller actually has to
 hold.
 
-PITCH SIGN -- THIS MODULE DISAGREES WITH THE BoardIo ICD
---------------------------------------------------------
-This module uses NOSE-DOWN-POSITIVE pitch, so the nose strike is at +18.6 deg.
-The BoardIo ICD uses NOSE-UP-POSITIVE: its section 7.3 reads "amps > 0 => nose
-pitches up", and it writes the balance term as `current ~= -K*pitch`.
+PITCH SIGN -- RESOLVED: ONE CONVENTION, THE ICD'S
+-------------------------------------------------
+Pitch is NOSE-UP-POSITIVE, in RADIANS at the controller seam, per BoardIo ICD
+section 10.1. This module previously used nose-down-positive degrees, which
+made the same physical law read `+K*pitch` here and `-K*pitch` in the ICD.
 
-The two are exact negations, so the same physical control law is written
-`current ~= +K*pitch` here. Verified rather than argued: +K*pitch holds the
-board upright through the nominal impulse (peak 0.2 deg, no strike), while the
-ICD's literal -K*pitch drives it to 180 deg. See
-test_balance_law_sign_is_stabilising.
+The ICD moved nothing; the sim did. Section 10 derives the convention from a
+free-body argument rather than asserting it, and 10.3 names the sim as the
+arbiter of the polarity gate -- so a sim that reports the opposite sign to the
+document it is supposed to arbitrate is the defect.
 
-*** RESOLVE THIS BEFORE THE RUST CONTROLLER IS WIRED IN. *** Carrying two pitch
-conventions across the sim/HAL seam is exactly the cross-seam sign error the
-ICD calls the most dangerous bug in the system.
+Two conventions across this seam is the cross-seam sign error the ICD calls the
+most dangerous bug in the system, and it has already caught this project once
+(the v0.2 polarity gate was inverted). Converting only at the seam and letting
+both live in one repo was considered and rejected.
 
-The ACTUATOR sign is already reconciled: the wheel hinge sits on -Y
-specifically so that `amps > 0 => forward => nose up` per ICD 7.3, asserted by
-test_motor_sign_matches_icd. Only the pitch REPORTING sign still differs, and
-fixing it is a decision about which document moves, not a code change to make
-unilaterally.
+DEGREES EXIST ONLY IN METRICS. The seam is radians; `frame_pitch_deg` is a thin
+wrapper for human-readable output and the JSON. Do not widen its use.
+
+The ACTUATOR sign was already reconciled: the wheel hinge sits on -Y so that
+`amps > 0 => forward => nose up` per ICD 7.3, asserted by
+test_motor_sign_matches_icd.
+
+CURRENT IS AMPS; THE MODEL WANTS NEWTON-METRES
+-----------------------------------------------
+The MJCF actuator is a `motor` with `gear="1"`, so `data.ctrl` is TORQUE in
+N*m. This scenario commands CURRENT in amps, because that is what the ICD and
+the VESC speak. The conversion is `KT_NM_PER_A` below -- previously absent,
+which silently baked in Kt = 1.0 N*m/A and made every torque-headroom
+comparison in the design docs a comparison of two different units.
 """
 
 from __future__ import annotations
@@ -57,6 +66,21 @@ MODEL_PATH = Path(__file__).resolve().parents[2] / "sim" / "models" / "overboard
 #: Forward is -X in the Openwheel assembly frame (the front enclosure spans
 #: x = -431.8..-145.4 mm). See the model header.
 FORWARD = np.array([-1.0, 0.0, 0.0])
+
+#: Motor torque constant, N*m per amp. **UNFITTED PLACEHOLDER.**
+#:
+#: The MJCF actuator is a torque source; the controller commands current. This
+#: is the conversion, and it is the first thing the bench must measure: a
+#: current step of known magnitude against a known inertia gives kt directly
+#: (Bench Test-Stand, Config A). 0.7 is an order-of-magnitude guess for a
+#: hoverboard-class hub motor and nothing has been fitted to it.
+#:
+#: It is named rather than implicit because it was previously implicit at 1.0 --
+#: amps written straight into a N*m channel -- which made `ctrlrange` (N*m) and
+#: `max_current_a` (A) look like the same number and hid the unit error.
+#:
+#: The model's ctrlrange is derived from this: 40 A x 0.7 = 28 N*m.
+KT_NM_PER_A = 0.7
 
 #: Impulse that topples the board open-loop, with margin. The knee is at
 #: ~12.5 N*s, where the nose grazes the ground and the strike boolean is
@@ -111,6 +135,15 @@ class ImpulseParams:
     settle_band_deg: float = 2.0
     """Pitch band the board must stay inside to count as settled."""
 
+    actuation_delay_cycles: int = 1
+    """Steps between a command being computed and it reaching the plant.
+
+    ICD 5.2: actuation delay is ADDITIVE on top of the structural loop delay,
+    not inclusive of it. One step at the 2 ms timestep is the placeholder for
+    the ICD 12 figure of ~1 ms; it is a parameter so the sensitivity can be
+    swept once a controller exists. Zero reproduces the old behaviour and
+    should only be used to demonstrate what the delay costs."""
+
 
 @dataclass
 class ImpulseMetrics:
@@ -127,7 +160,10 @@ class ImpulseMetrics:
     nose_strike_angle_deg: float = 0.0
 
     # --- disturbance response ---
-    peak_pitch_deg: float = 0.0
+    peak_abs_pitch_deg: float = 0.0
+    """Largest absolute pitch excursion, either direction. Absolute because a
+    controller overshoots past level and a one-sided maximum would miss it."""
+
     t_peak_s: float = 0.0
     pitch_rate_at_strike_dps: float | None = None
     speed_at_strike_ms: float | None = None
@@ -174,16 +210,27 @@ def load_model(path: Path = MODEL_PATH) -> mujoco.MjModel:
     return mujoco.MjModel.from_xml_path(str(path))
 
 
-def frame_pitch_deg(model: mujoco.MjModel, data: mujoco.MjData) -> float:
-    """Frame pitch about the lateral axis, NOSE-DOWN POSITIVE.
+def frame_pitch_rad(model: mujoco.MjModel, data: mujoco.MjData) -> float:
+    """Frame pitch about the lateral axis, NOSE-UP POSITIVE, radians (ICD 10.1).
 
     Read off the frame's world z-axis rather than the quaternion so the sign
-    convention is inspectable: a rotation of +theta about +Y lifts the nose and
-    tilts the z-axis toward +X, so nose-down is -theta.
+    convention is inspectable rather than asserted.
+
+    Derivation, given forward is -X (see FORWARD): a rotation of +phi about +Y
+    maps the body -x axis -- the nose -- to (-cos phi, 0, +sin phi), whose z
+    component is positive. So +phi lifts the nose. The same rotation maps the
+    body z axis to (sin phi, 0, cos phi), giving R[0,2] = sin phi and
+    R[2,2] = cos phi, hence atan2(R[0,2], R[2,2]) = phi.
     """
     body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
     R = data.xmat[body].reshape(3, 3)
-    return float(np.degrees(np.arctan2(-R[0, 2], R[2, 2])))
+    return float(np.arctan2(R[0, 2], R[2, 2]))
+
+
+def frame_pitch_deg(model: mujoco.MjModel, data: mujoco.MjData) -> float:
+    """Nose-up-positive pitch in degrees. **Metrics and humans only** -- the
+    controller seam is radians (see the module docstring)."""
+    return float(np.degrees(frame_pitch_rad(model, data)))
 
 
 def nose_strike_angle_deg(model: mujoco.MjModel) -> float:
@@ -238,10 +285,17 @@ def run(
 ) -> ImpulseResult:
     """Run one impulse scenario.
 
-    `controller` is the closed-loop hook: a callable (t, pitch_deg,
-    pitch_rate_dps, wheel_rate_rads) -> motor current (A), clamped by the
-    actuator's ctrlrange. Left None the scenario is open-loop -- which is the
-    current milestone, and the baseline the controller has to beat.
+    `controller` is the closed-loop hook:
+
+        (t_s, pitch_rad, pitch_rate_rad_s, wheel_rate_rad_s) -> amps
+
+    **Radians, nose-up-positive, per ICD 10.1** -- not degrees, and not the
+    old nose-down convention. The return is CURRENT in amps; the scenario
+    converts to torque via KT_NM_PER_A, and the actuator's ctrlrange bounds the
+    result. The command takes effect `actuation_delay_cycles` steps later.
+
+    Left None the scenario is open-loop -- the baseline the controller has to
+    beat.
 
     Fully deterministic: fixed timestep, no stochastic terms, no wall clock.
     Two calls with equal params return bit-identical trajectories.
@@ -275,30 +329,51 @@ def run(
     states: list[np.ndarray] = []
     x0 = float(data.xpos[frame][0])
 
+    # Commands awaiting their actuation delay. A command computed this cycle
+    # becomes effective `actuation_delay_cycles` steps later, matching the ICD
+    # 5.2 rule that actuation delay is ADDITIVE on top of the loop delay.
+    # Without this the loop applies a command to the very step whose state
+    # produced it -- zero delay, which is the classic way to tune a controller
+    # that only works in simulation.
+    pipeline = [0.0] * params.actuation_delay_cycles
+
     for _ in range(n_steps):
         data.xfrc_applied[frame] = 0.0
         if params.t0_s <= data.time < params.t0_s + params.duration_s:
             data.xfrc_applied[frame][:3] = force
             data.xfrc_applied[frame][3:] = torque
 
-        pitch = frame_pitch_deg(model, data)
-        pitch_rate = float(np.degrees(-data.qvel[4]))
+        pitch = frame_pitch_rad(model, data)
+        pitch_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
         wheel_rate = float(data.qvel[6])
 
-        current = 0.0
+        proposed = 0.0
         if controller is not None:
-            current = float(controller(float(data.time), pitch, pitch_rate, wheel_rate))
-        data.ctrl[0] = current
+            proposed = float(controller(float(data.time), pitch, pitch_rate, wheel_rate))
+
+        if pipeline:
+            current, pipeline = pipeline[0], pipeline[1:] + [proposed]
+        else:
+            current = proposed
+
+        # ctrl is TORQUE (motor actuator, gear=1); the controller speaks amps.
+        data.ctrl[0] = current * KT_NM_PER_A
 
         mujoco.mj_step(model, data)
 
-        pitch = frame_pitch_deg(model, data)
-        pitch_rate = float(np.degrees(-data.qvel[4]))
+        pitch = frame_pitch_rad(model, data)
+        pitch_rate = float(data.qvel[4])
         fwd = float(-(data.xpos[frame][0] - x0))  # forward is -x
 
+        # Trajectories are stored in degrees: they feed plots, the JSON and the
+        # settle band, all of which are human-facing. Radians stay at the seam.
+        # Both conversions are named, so nothing below can reach for the radian
+        # value and store it in a field whose name ends in _deg or _dps.
+        pitch_deg = float(np.degrees(pitch))
+        pitch_rate_dps = float(np.degrees(pitch_rate))
         ts.append(float(data.time))
-        pitches.append(pitch)
-        rates.append(pitch_rate)
+        pitches.append(pitch_deg)
+        rates.append(pitch_rate_dps)
         wheel.append(float(data.qvel[6]))
         travel.append(fwd)
         currents.append(current)
@@ -306,8 +381,12 @@ def run(
             states.append(data.qpos.copy())
 
         m.control_effort_a_s += abs(current) * dt
-        if pitch > m.peak_pitch_deg:
-            m.peak_pitch_deg, m.t_peak_s = pitch, float(data.time)
+        # ABSOLUTE peak. Open-loop the board only ever pitches one way, so a
+        # one-sided max was adequate; a controller overshoots the other way and
+        # a one-sided max would not see it -- while this is the headline
+        # acceptance number.
+        if abs(pitch_deg) > m.peak_abs_pitch_deg:
+            m.peak_abs_pitch_deg, m.t_peak_s = abs(pitch_deg), float(data.time)
 
         depth = _bumper_ground_contact(model, data, ground, bumpers)
         if depth is not None:
@@ -315,7 +394,7 @@ def run(
             if not m.nose_strike:
                 m.nose_strike = True
                 m.t_strike_s = float(data.time)
-                m.pitch_rate_at_strike_dps = pitch_rate
+                m.pitch_rate_at_strike_dps = pitch_rate_dps
                 m.speed_at_strike_ms = float(-data.qvel[0])
 
     t = np.asarray(ts)
