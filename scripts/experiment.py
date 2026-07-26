@@ -181,9 +181,10 @@ def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
         # board; a ballast 0.75 m above the axle falls outside them, and a clip
         # that crops out the mass whose whole point is being there is worse
         # than no clip.
-        # 58 deg chosen by sweeping the render, not derived: it is the tightest
-        # framing that still fits the rider's helmet in shot.
-        xml = xml.replace('fovy="26"', 'fovy="58"').replace('fovy="24"', 'fovy="56"')
+        # Swept, not derived. 58 framed the figure well in a bare render but
+        # the pane's label bar then clipped the helmet, so this carries the
+        # extra headroom the overlay eats.
+        xml = xml.replace('fovy="26"', 'fovy="66"').replace('fovy="24"', 'fovy="64"')
 
     # Load from a string with the meshes supplied in-memory, rather than
     # writing a temporary MJCF next to the real one. A temp file in the model
