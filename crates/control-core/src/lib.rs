@@ -65,24 +65,69 @@ pub trait Estimator {
 /// **No bias estimator in v1** — at 0.11° against a 0.5° budget it would be
 /// solving a problem that is not binding, while adding an integrator that
 /// interacts with the accel corruption in ways worth measuring separately.
+///
+/// # Rejecting the accelerometer when it is lying
+///
+/// Aiding cancels the acceleration the board *commanded*. It cannot cancel
+/// acceleration nobody commanded — an impulse, a kerb, a shove. On the nominal
+/// 400 N·s disturbance that is 4.9 m/s², or **26° of apparent tilt**, and the
+/// filter dutifully believes a quarter of it. Measured: peak pitch went from
+/// 4.6° with truth to ~19.5° with the estimator, at every τ from 0.5 to 5 s,
+/// which is the signature of a disturbance the filter cannot see rather than a
+/// tuning problem.
+///
+/// So gate it. After aiding, the residual specific force should be gravity and
+/// nothing else; if `‖a − a_fwd‖` is not within `accel_trust_band_m_s2` of g,
+/// something unmodelled is happening and the correction is skipped for that
+/// sample — the estimate coasts on the gyro until the world makes sense again.
+/// This is the standard trick and it is cheap, but it is not free: while
+/// coasting there is no attitude reference at all, so the band must be wide
+/// enough that ordinary riding does not trip it. Zero disables the gate.
 #[derive(Debug, Clone, Copy)]
 pub struct ComplementaryFilter {
     tau_s: f32,
+    accel_trust_band_m_s2: f32,
     pitch_rad: f32,
     pitch_rate_rad_s: f32,
     last_t_ns: Option<u64>,
     initialised: bool,
+    /// Samples whose accelerometer update was skipped by the gate. Reported so
+    /// a run that coasted most of the way is distinguishable from one that
+    /// never tripped -- both look identical in the attitude trace alone.
+    rejected: u32,
 }
 
 impl ComplementaryFilter {
     pub const fn new(tau_s: f32) -> Self {
+        Self::with_trust_band(tau_s, 0.0)
+    }
+
+    pub const fn with_trust_band(tau_s: f32, accel_trust_band_m_s2: f32) -> Self {
         ComplementaryFilter {
             tau_s,
+            accel_trust_band_m_s2,
             pitch_rad: 0.0,
             pitch_rate_rad_s: 0.0,
             last_t_ns: None,
             initialised: false,
+            rejected: 0,
         }
+    }
+
+    /// How many accelerometer updates the trust gate has rejected.
+    pub fn rejected_samples(&self) -> u32 {
+        self.rejected
+    }
+
+    /// Is this sample's specific force consistent with gravity plus the
+    /// acceleration we already know about?
+    fn accel_trusted(&self, accel: [f32; 3], forward_accel_m_s2: f32) -> bool {
+        if self.accel_trust_band_m_s2 <= 0.0 {
+            return true;
+        }
+        let (x, y, z) = (accel[0] - forward_accel_m_s2, accel[1], accel[2]);
+        let mag = libm::sqrtf(x * x + y * y + z * z);
+        libm::fabsf(mag - 9.81) <= self.accel_trust_band_m_s2
     }
 
     /// Tilt implied by the accelerometer, with the known linear acceleration
@@ -135,9 +180,17 @@ impl Estimator for ComplementaryFilter {
             if dt <= 0.0 {
                 continue;
             }
-            let alpha = self.tau_s / (self.tau_s + dt);
             let predicted = self.pitch_rad + self.pitch_rate_rad_s * dt;
-            self.pitch_rad = alpha * predicted + (1.0 - alpha) * theta_accel;
+            if self.accel_trusted(s.accel_m_s2, forward_accel_m_s2) {
+                let alpha = self.tau_s / (self.tau_s + dt);
+                self.pitch_rad = alpha * predicted + (1.0 - alpha) * theta_accel;
+            } else {
+                // Dead reckoning on the gyro alone. Equivalent to alpha = 1 for
+                // this sample, so the estimate keeps moving -- it just stops
+                // being corrected towards a "down" it has no reason to believe.
+                self.pitch_rad = predicted;
+                self.rejected = self.rejected.saturating_add(1);
+            }
         }
 
         Attitude {
@@ -151,6 +204,7 @@ impl Estimator for ComplementaryFilter {
         self.pitch_rate_rad_s = 0.0;
         self.last_t_ns = None;
         self.initialised = false;
+        self.rejected = 0;
     }
 }
 
@@ -207,10 +261,24 @@ impl PitchRegulator {
 /// differentiates through a first-order low pass, which is the standard
 /// dirty-derivative and costs phase in exchange for being finite.
 ///
-/// The phase cost is affordable *here* specifically because the aiding term
-/// only has to be right on the timescale the accelerometer is believed on —
-/// the estimator's crossover, around 1 s — not at the control loop's
-/// bandwidth.
+/// **That phase cost was measured, and it is not affordable.** An earlier
+/// version of this comment argued the opposite — that the aiding term only has
+/// to be right on the timescale the accelerometer is believed on, around 1 s,
+/// and not at the control loop's bandwidth. The reasoning was that the filter
+/// low-passes the accelerometer branch anyway, so errors above the filter's
+/// crossover get attenuated before they reach the control law.
+///
+/// It is wrong because the low-pass is `1/(τs+1)`, not a brick wall: it leaves
+/// roughly `1/(ωτ)` of the accelerometer's error at every frequency above
+/// crossover, and the accelerometer's error is not small. Under a commanded
+/// velocity change the residual acceleration this fails to cancel dominates
+/// the gravity signal, and what reaches the P term at the loop's ~12 rad/s
+/// crossover is an amplified, phase-shifted version of pitch — measured at
+/// **+6.4 dB and −73°**, which is enough to destabilise a loop that tolerates
+/// 40 ms of pure delay. See `scripts/analyse_estimator_phase.py` and
+/// `notebooks/03-attitude-estimation.ipynb`.
+///
+/// [`CommandFeedforward`] exists because of that measurement.
 #[derive(Debug, Clone, Copy)]
 pub struct WheelAccelEstimator {
     tau_s: f32,
@@ -249,6 +317,54 @@ impl WheelAccelEstimator {
     pub fn reset(&mut self) {
         self.last_v = None;
         self.accel = 0.0;
+    }
+}
+
+/// Forward acceleration predicted from the current we just commanded.
+///
+/// The wheel-odometry route above has to *measure* an acceleration by
+/// differentiating a quantised, slowly-updated speed. This one does not
+/// measure anything: it asserts that the current we asked for produced the
+/// acceleration Newton says it should,
+///
+/// ```text
+///     a ≈ (k_t · I) / (r_eff · m)
+/// ```
+///
+/// collapsed into a single fitted constant, `gain_m_s2_per_a`. That is one
+/// number to measure on the bench — command a current on the flat, read the
+/// accelerometer, divide — rather than three to estimate separately.
+///
+/// **The trade is measurement noise for model error.** It has no lag and no
+/// quantisation, which is the whole point: the wheel-derived estimate is
+/// wrong exactly where the control loop lives, and that error lands straight
+/// on the accelerometer branch of the attitude filter. What it cannot see is
+/// anything that breaks the assumed relationship — a slope, a kerb, wheel
+/// slip, a rider shifting their weight. Those all appear as real acceleration
+/// the feedforward denies is happening.
+///
+/// So it is not strictly better, and the choice is left to the caller. On the
+/// bench, where the ground is flat and the mass is bolted down, the model
+/// error is small and this wins comfortably. Outdoors on a hill it would not,
+/// and blending the two against a slope estimate is the obvious next step.
+#[derive(Debug, Clone, Copy)]
+pub struct CommandFeedforward {
+    gain_m_s2_per_a: f32,
+}
+
+impl CommandFeedforward {
+    pub const fn new(gain_m_s2_per_a: f32) -> Self {
+        CommandFeedforward { gain_m_s2_per_a }
+    }
+
+    /// Predicted forward acceleration, m/s², from the last commanded current.
+    ///
+    /// Takes the *commanded* current rather than a measured one so it stays
+    /// usable on hardware that cannot report phase current, and so it carries
+    /// no sensing delay. Where measured current is available it is the better
+    /// input and can be passed here instead — the arithmetic is the same.
+    pub fn predict(&self, commanded_a: f32) -> f32 {
+        self.gain_m_s2_per_a * commanded_a
     }
 }
 

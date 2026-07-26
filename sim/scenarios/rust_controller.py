@@ -67,6 +67,8 @@ class ObParams(ctypes.Structure):
         ("estimator_tau_s", ctypes.c_float),
         ("estimator_accel_aiding", ctypes.c_uint32),
         ("wheel_accel_tau_s", ctypes.c_float),
+        ("accel_ff_gain_m_s2_per_a", ctypes.c_float),
+        ("accel_trust_band_m_s2", ctypes.c_float),
     ]
 
 
@@ -151,8 +153,10 @@ class RustController:
         com_above_axle: bool = True,
         use_estimator=False,
         estimator_tau_s: float = 1.0,
-        estimator_accel_aiding: bool = True,
+        estimator_accel_aiding: int = 1,
         wheel_accel_tau_s: float = 0.05,
+        accel_ff_gain_m_s2_per_a: float = 0.0,
+        accel_trust_band_m_s2: float = 0.0,
         lib_path: Path | None = None,
     ) -> None:
         path = lib_path or library_path()
@@ -199,8 +203,12 @@ class RustController:
             # shadow, which fuses and reports without driving.
             use_estimator=int(use_estimator),
             estimator_tau_s=estimator_tau_s,
-            estimator_accel_aiding=1 if estimator_accel_aiding else 0,
+            # 0 off / 1 wheel odometry / 2 command feedforward. `True` still
+            # means wheel odometry, so existing callers keep their behaviour.
+            estimator_accel_aiding=int(estimator_accel_aiding),
             wheel_accel_tau_s=wheel_accel_tau_s,
+            accel_ff_gain_m_s2_per_a=accel_ff_gain_m_s2_per_a,
+            accel_trust_band_m_s2=accel_trust_band_m_s2,
         )
         self._handle = lib.ob_controller_new(ctypes.byref(params))
         if not self._handle:
