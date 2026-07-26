@@ -27,7 +27,15 @@ jobs:
   # `sim` too, and a SKIPPED required check never reports, so branch
   # protection would wait on it forever. Only the render is optional.
   #
-  # Fails OPEN -- if the base commit cannot be resolved (first push on a
+  # Compares against the PREVIOUS HEAD (`github.event.before`), not the PR
+  # base. Diffing against the base means the comparison covers every commit on
+  # the branch, so on a long-lived feature PR -- exactly the case this exists
+  # for -- one earlier code commit makes every later docs commit look like a
+  # code change and the skip never fires. `before` is populated on both `push`
+  # and `pull_request: synchronize`; it is absent when a PR is first opened,
+  # where the base is the correct comparison anyway.
+  #
+  # Fails OPEN -- if the comparison commit cannot be resolved (first push on a
   # branch, force-push, shallow history) it renders. Rendering needlessly
   # costs minutes; skipping wrongly loses the artifact for that commit.
   # ---------------------------------------------------------------------
@@ -42,15 +50,16 @@ jobs:
 
       - id: check
         env:
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
           HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-            echo "base '$BASE' unresolvable - rendering to be safe"
+            echo "comparison base '$BASE' unresolvable - rendering to be safe"
             echo "render=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
 
+          echo "comparing ${BASE:0:7}..${HEAD:0:7}"
           changed="$(git diff --name-only "$BASE" "$HEAD")"
           echo "changed files:"; echo "$changed"
 
