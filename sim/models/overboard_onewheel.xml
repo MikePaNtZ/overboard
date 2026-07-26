@@ -171,7 +171,21 @@
         Its hinge IS the motor axis.
       -->
       <body name="wheel" pos="0 0 0">
-        <joint name="wheel_hinge" type="hinge" axis="0 1 0" pos="0 0 0" damping="0.08"/>
+        <!--
+          Hinge axis is -Y, not +Y, and that sign is load-bearing. It makes
+          positive joint velocity = rolling FORWARD and positive motor torque =
+          forward acceleration, which is what BoardIo ICD 7.3 mandates:
+
+              amps > 0  =>  forward wheel acceleration  =>  nose pitches up.
+
+          With a +Y axis the model did the exact opposite (+current drove the
+          board backwards and pitched the nose DOWN), which would have inverted
+          the balance law the moment the Rust controller was wired in -- the
+          single failure mode the ICD calls out as the most dangerous across
+          this seam. Asserted by test_motor_sign_matches_icd; do not flip
+          without changing the ICD.
+        -->
+        <joint name="wheel_hinge" type="hinge" axis="0 -1 0" pos="0 0 0" damping="0.08"/>
         <inertial pos="0 0 0" mass="4.5" diaginertia="0.0382 0.0595 0.0382"/>
         <geom name="wheel_geom" type="cylinder" size="0.1454 0.075" euler="90 0 0"
               material="tire_mat" condim="4"/>
@@ -185,8 +199,12 @@
     </body>
   </worldbody>
 
-  <!-- The single motor. Torque (current) mode, matching the smart-drive HAL
-       contract: positive current -> positive wheel velocity -> nose lifts.
+  <!-- The single motor. Torque (current) mode, matching the BoardIo ICD 7.3
+       sign convention: positive current -> forward wheel acceleration -> the
+       nose pitches UP (i.e. pitch, which is nose-down-positive here, goes
+       negative). That is the sign the balance law depends on: correcting a
+       nose-down excursion means driving the contact patch forward, so the
+       balance term is current ~= -K*pitch with K > 0.
        Left at zero by the open-loop scenario; this is the hook the Rust
        controller takes over once the MuJoCo FFI backend lands. -->
   <actuator>
