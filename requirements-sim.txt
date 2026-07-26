@@ -1,0 +1,21 @@
+# Sim + scenario toolchain. PINNED EXACTLY ON PURPOSE.
+#
+# The impulse scenario is a CI gate whose pass/fail depends on the physics
+# being reproducible. MuJoCo is deterministic for a fixed version + platform,
+# so the version is part of the test fixture, not an implementation detail --
+# floating an upgrade here can move the nose-strike threshold. Bump
+# deliberately and re-baseline the metrics in the same commit.
+#
+#   python -m venv .venv && .venv/bin/pip install -r requirements-sim.txt
+
+mujoco==3.10.0
+numpy==2.5.1
+
+# Rendering + artifacts
+Pillow==12.3.0
+matplotlib==3.11.1
+imageio==2.37.0
+imageio-ffmpeg==0.6.0       # bundles an ffmpeg binary; no apt-get in CI
+
+# Test gate
+pytest==8.4.2

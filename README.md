@@ -10,10 +10,25 @@ conventions, and `docs/README.md` for where the design docs live.
 
 ## Status
 
-This is the initial workspace scaffold plus the first visual checkpoint: a
-MuJoCo onewheel model with **no controller** that visibly topples over under
-gravity. The Rust control loop does not step MuJoCo yet (that's a later
-milestone, tracked as a TODO in `crates/sim-backend`).
+Workspace scaffold plus the first real sim-in-the-loop test: an **impulse
+disturbance-response scenario** that runs in CI on every push. The Rust control
+loop does not step MuJoCo yet (a later milestone, tracked as a TODO in
+`crates/sim-backend`), so the scenario is open-loop — which makes it the
+baseline the controller has to beat.
+
+<!-- Served from the rolling `sim-latest` release, which CI republishes on every
+     green mainline push. sim/out/ is gitignored on purpose: these artifacts are
+     regenerated every build and committing them would bloat history for nothing. -->
+![Impulse disturbance response](https://github.com/MikePaNtZ/overboard/releases/download/sim-latest/impulse_open_loop.gif)
+
+A driverless onewheel at rest is **stable** — the battery and hub motor put the
+centre of mass below the axle. So it is kicked with a 20 N·s impulse, and with
+no controller it rolls 4 m, pitches over and noses into the ground at 1.0 m/s.
+
+The board physically cannot exceed **18.6° of pitch** while upright: the bumper
+is on the ground before that. That angle is computed from the collision hulls
+rather than assumed, and it is the margin the balance controller has to hold.
+See [`docs/sim-impulse-response.md`](docs/sim-impulse-response.md).
 
 ## Build the Rust workspace
 
@@ -29,29 +44,41 @@ Run the (currently stubbed) control loop:
 cargo run -p board-app -- --backend sim --cycles 100
 ```
 
-## Watch the onewheel fall over (the checkpoint)
+## Run the sim
 
-Set up the Python environment once:
+Set up the Python environment once. The pins are exact on purpose — the
+scenario is a CI gate whose pass/fail depends on reproducible physics, so the
+MuJoCo version is part of the test fixture:
 
 ```sh
 python3 -m venv .venv
-source .venv/bin/activate
-pip install mujoco matplotlib
+.venv/bin/pip install -r requirements-sim.txt
 ```
 
-Then, to watch it live in an interactive window -- **on macOS this must run
-under `mjpython`, not plain `python`**:
+**The acceptance gate** (this is what CI runs on every push; ~2 s, no GL):
 
 ```sh
-mjpython scripts/view_sim.py
+.venv/bin/python -m pytest tests/ -v
 ```
 
-Or to generate a headless proof (an animated GIF plus a pitch-angle-vs-time
-plot in `sim/out/`, and the final tilt angle printed to stdout):
+**Film it** — writes the mp4/webm/gif, poster, plot and metrics to `sim/out/`:
 
 ```sh
-source .venv/bin/activate
-python scripts/render_fall.py
+.venv/bin/python scripts/render_scenario.py
+.venv/bin/python scripts/render_scenario.py --impulse 6   # sub-threshold: survives
+```
+
+Headless environments need `MUJOCO_GL=osmesa` (software) or `=egl` (GPU). If
+offscreen rendering is unavailable the plot and metrics are still written and
+the exit status is unchanged — rendering is a publishing concern, not a
+correctness one.
+
+**Watch it live** — on macOS this must run under `mjpython`, not plain
+`python`:
+
+```sh
+.venv/bin/mjpython scripts/view_sim.py
+.venv/bin/mjpython scripts/view_sim.py --impulse 0   # undisturbed: it just sits there
 ```
 
 ## Layout
@@ -65,5 +92,8 @@ python scripts/render_fall.py
 - `sim/models` -- MuJoCo MJCF models (the shared physics asset). The onewheel's
   visual shells are imported from [Openwheel](https://github.com/bytesizedengineering/Openwheel)
   by Byte Sized Engineering (MIT license, see `sim/models/meshes/openwheel/NOTICE.md`).
-- `scripts/` -- Python viewer/render scripts for the MuJoCo sim.
+- `sim/scenarios` -- scripted, deterministic sim experiments. `impulse_response`
+  is the first: the disturbance-response test that gates CI.
+- `scripts/` -- Python viewer/render entry points for the MuJoCo sim.
+- `tests/` -- the sim-in-the-loop acceptance gate (pytest).
 - `docs/` -- Markdown+Mermaid mirrors of the design docs (Notion is the source of truth).

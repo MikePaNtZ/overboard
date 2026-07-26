@@ -7,6 +7,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push supersedes an in-flight run on the same ref. Mainline is exempt:
+# its runs publish the sim artifact, and cancelling one halfway could leave the
+# rolling release pointing at a partially-uploaded set.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -32,3 +39,156 @@ jobs:
 
       - name: test
         run: cargo test --workspace
+
+  # ---------------------------------------------------------------------
+  # Sim-in-the-loop gate. Physics only -- no GL, no rendering, ~2 seconds.
+  # Runs on every push and PR, and its failure fails the build.
+  # ---------------------------------------------------------------------
+  sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-sim.txt
+
+      - name: Install sim toolchain
+        run: pip install -r requirements-sim.txt
+
+      - name: Scenario acceptance gate
+        run: pytest tests/ -v
+
+  # ---------------------------------------------------------------------
+  # Film the scenario and publish it. Mainline only, and only behind a green
+  # gate -- the landing page eventually consumes this artifact, so a clip must
+  # never be published for a commit whose physics did not pass.
+  # ---------------------------------------------------------------------
+  publish-sim-artifact:
+    needs: [sim, rust]
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write        # rolling release upload
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-sim.txt
+
+      - name: Install sim toolchain
+        run: pip install -r requirements-sim.txt
+
+      # MuJoCo's offscreen renderer needs a GL implementation. osmesa is
+      # software rasterisation: no GPU, no display, no driver roulette -- the
+      # slow-but-certain option, which is the right trade for a build step.
+      - name: Install OSMesa
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libosmesa6 libgl1 libglx-mesa0
+
+      - name: Render impulse scenario
+        env:
+          MUJOCO_GL: osmesa
+          PYOPENGL_PLATFORM: osmesa
+        run: python scripts/render_scenario.py
+
+      # Fail loudly if rendering silently degraded to the plot-only fallback.
+      # The script exits 0 in that case by design (a dead GL stack must not
+      # fail the physics), so the publishing job has to check for itself.
+      - name: Verify the video was actually produced
+        run: |
+          test -s sim/out/impulse_open_loop.mp4 || {
+            echo "::error::no mp4 was rendered - offscreen GL likely failed"; exit 1; }
+          test -s sim/out/impulse_poster.jpg
+          test -s sim/out/impulse_metrics.json
+          python - <<'PY'
+          import json, pathlib
+          m = json.loads(pathlib.Path("sim/out/impulse_metrics.json").read_text())["metrics"]
+          assert m["nose_strike"], "published clip must show the documented outcome"
+          print(f"strike {m['t_strike_s']:.3f}s  peak {m['peak_pitch_deg']:.2f}deg")
+          PY
+
+      - name: Record provenance for downstream consumers
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path("sim/out/impulse_metrics.json")
+          doc = json.loads(p.read_text())
+          m = doc["metrics"]
+          # Flat, stable shape for the landing-page caption. Deliberately
+          # separate from metrics.json so page copy never has to reach into
+          # the scenario's internal schema.
+          pathlib.Path("sim/out/sim-run.json").write_text(json.dumps({
+              "schema": 1,
+              "commit": os.environ["GITHUB_SHA"][:7],
+              "commit_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/commit/{os.environ['GITHUB_SHA']}",
+              "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "scenario": "impulse disturbance response",
+              "regime": "open-loop (no controller)",
+              "impulse_ns": doc["params"]["magnitude_ns"],
+              "nose_strike_angle_deg": round(m["nose_strike_angle_deg"], 2),
+              "peak_pitch_deg": round(m["peak_pitch_deg"], 2),
+              "t_strike_s": round(m["t_strike_s"], 3) if m["t_strike_s"] else None,
+              "speed_at_strike_ms": round(m["speed_at_strike_ms"], 2) if m["speed_at_strike_ms"] else None,
+              "travel_m": round(m["travel_m"], 2),
+              "mujoco_version": m["mujoco_version"],
+          }, indent=2) + "\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: impulse-response-${{ github.sha }}
+          path: sim/out/
+          retention-days: 30
+
+      # Rolling release = one stable URL the landing page can pull from at
+      # deploy time, so no binary ever lands in the web repo's git history.
+      #   .../releases/download/sim-latest/impulse_open_loop.mp4
+      - name: Publish to rolling sim-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Upsert rather than delete-then-create: deleting first leaves a
+          # window where the download URL 404s, and that URL is exactly what a
+          # deploy might be fetching at the time.
+          gh release view sim-latest >/dev/null 2>&1 || \
+            gh release create sim-latest \
+              --title "Latest sim artifacts (mainline)" \
+              --notes "Auto-published by CI. Impulse disturbance response, open loop."
+          gh release edit sim-latest \
+            --notes "Auto-published by CI from ${{ github.sha }}. Impulse disturbance response, open loop."
+          gh release upload sim-latest --clobber \
+            sim/out/impulse_open_loop.mp4 \
+            sim/out/impulse_open_loop.webm \
+            sim/out/impulse_open_loop.gif \
+            sim/out/impulse_poster.jpg \
+            sim/out/impulse_pitch.png \
+            sim/out/impulse_metrics.json \
+            sim/out/sim-run.json
+
+      # Phase C (deferred): notify overboard-web so it redeploys with the new
+      # clip. Needs a fine-grained PAT with contents:write on that repo, stored
+      # as WEB_DISPATCH_TOKEN. Guarded so mainline is not broken by its absence.
+      - name: Notify overboard-web
+        env:
+          WEB_DISPATCH_TOKEN: ${{ secrets.WEB_DISPATCH_TOKEN }}
+        run: |
+          # Checked in the shell, not in an `if:` -- job/step-level `env` is not
+          # visible to workflow-level `if` expressions, so `if: env.X != ''`
+          # against a step env silently evaluates false and the step is skipped
+          # forever, including after the secret is added.
+          if [ -z "$WEB_DISPATCH_TOKEN" ]; then
+            echo "WEB_DISPATCH_TOKEN unset - skipping web redeploy (Phase C not wired yet)"
+            exit 0
+          fi
+          GH_TOKEN="$WEB_DISPATCH_TOKEN" gh api repos/MikePaNtZ/overboard-web/dispatches \
+            -f event_type=sim-artifact \
+            -F client_payload[commit]="${{ github.sha }}"

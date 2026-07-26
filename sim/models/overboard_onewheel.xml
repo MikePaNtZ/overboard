@@ -1,47 +1,109 @@
 <mujoco model="overboard_onewheel">
   <!--
-    Overboard onewheel checkpoint model.
+    Overboard onewheel plant model — driverless configuration.
 
-    A single hub-motor wheel (real-dimension tire cylinder) with a deck/shell
-    assembly skinned from the MIT-licensed Openwheel STL shells (see
-    sim/models/meshes/openwheel/NOTICE.md for attribution), hinged well above
-    the tire's center of mass -- a classic inverted pendulum on a wheel, i.e.
-    a onewheel/unicycle. A short mast + rider-proxy mass sits on top of the
-    deck to keep the combined center of mass high (unstable equilibrium).
+    Topology is the real vehicle: a `frame` (deck, rails, enclosures, battery,
+    electronics, bumpers, footpads) carried on a free joint, with the hub
+    `wheel` attached to it by a single pitch-axis hinge. That hinge is the
+    motor axis, so `wheel_motor` below is the one and only actuator — exactly
+    the seam the Rust control stack drives through `hal::BoardIo`.
 
-    Deliberately NO actuator/controller here: the mast_pitch hinge (which
-    carries the whole deck+shell+rider assembly) is given a small (5 deg)
-    initial lean so the unstable equilibrium is broken, and with gravity on
-    and nothing balancing it, the rig topples. This is the intended
-    "no controller yet" checkpoint -- see scripts/view_sim.py and
-    scripts/render_fall.py.
+    NOTE — no rider, no mast, no proxy mass. An earlier checkpoint model faked
+    instability with a tall rider-mass-on-a-stick ("ball on a stick") so the
+    rig would topple on its own. That was a lie about the physics: a bare
+    driverless onewheel at rest is *stable*, because the battery and hub motor
+    put the centre of mass at or below the axle. Instability here is driven by
+    an external disturbance instead — see sim/scenarios/impulse_response.py.
 
-    Openwheel meshes are authored in millimeters in a shared assembly frame
-    centered on the wheel axle (verified by inspecting STL bounding boxes:
-    front/rear enclosure + bumper pairs mirror exactly across X=0, and the
-    front/rear gap between the enclosures is ~290mm -- i.e. a ~145mm tire
-    radius, matching the real onewheel tire size used below). Mesh scale is
-    therefore 0.001 (mm -> m) and no rotation is needed: mesh X/Y/Z already
-    line up with the body's fore-aft/lateral/up axes. The one exception is
-    "front_footpad.stl", which (per its raw vertex coordinates) was exported
-    sitting at the *rear* footpad location rather than mirrored to the front;
-    it is placed here with an extra 180 deg yaw (euler "0 0 180") to move it
-    to the front, matching front_enclosure/front_bumper.
+    GEOMETRY / MESH PROVENANCE
+    Openwheel meshes (MIT — see meshes/openwheel/NOTICE.md) are authored in
+    millimetres in a shared assembly frame centred on the wheel axle, so mesh
+    scale is 0.001 and no rotation is needed: mesh X/Y/Z already line up with
+    the body's fore-aft/lateral/up axes. Verified against the raw STL bounding
+    boxes — the front/rear enclosure and bumper pairs mirror exactly across
+    X=0, and the gap between the enclosures is 290.8 mm, i.e. a 145.4 mm tire
+    radius, which is the tire size used below. FORWARD IS -X (the front
+    enclosure spans x = -431.8..-145.4 mm).
+
+    The one exception is front_footpad.stl, which per its raw vertex
+    coordinates was exported sitting at the *rear* footpad location rather
+    than mirrored to the front; it is placed with an extra 180 deg yaw to move
+    it to the front, matching front_enclosure/front_bumper.
+
+    NOSE-STRIKE ANGLE (the topple criterion)
+    With the axle held at the 145.4 mm tire radius, the underside of a bumper
+    reaches the ground after 18.57 deg of pitch. So this vehicle physically
+    CANNOT exceed ~18.6 deg of pitch while upright — it noses into the ground
+    first. That, not an arbitrary 45 deg tilt, is the real failure mode and the
+    real margin the balance controller has to hold.
+
+    The bumper meshes are therefore collision-enabled (MuJoCo convex-hulls
+    them) and the angle is computed from those hulls at runtime by
+    `nose_strike_angle_deg()` — it is not a tuned constant, and it tracks any
+    change to the meshes or the tire radius.
+
+    Do NOT re-derive this from the STL bounding box. Doing so gives 14.9 deg,
+    by assuming the extreme -X and extreme -Z coordinates meet at one corner.
+    They do not: the bumper sweeps upward toward its tip, so the vertex that
+    actually lands first is the underside heel at x = -381 mm, some 90 mm
+    inboard of the 469 mm tip.
   -->
   <compiler angle="degree" meshdir="meshes/openwheel"/>
 
+  <!-- Fixed timestep + RK4, no stochastic elements anywhere in the model:
+       the scenario runner depends on bit-identical repeat runs. -->
   <option gravity="0 0 -9.81" timestep="0.002" integrator="RK4"/>
 
+  <visual>
+    <!-- 720p offscreen buffer: the scenario renderer films at 1280x720 and
+         MuJoCo will not allocate beyond what is declared here. -->
+    <global offwidth="1280" offheight="720"/>
+    <!-- Low ambient so the directional key light actually models the form;
+         at 0.45 the whole scene flattened out and the ground washed white. -->
+    <headlight ambient="0.28 0.29 0.31" diffuse="0.32 0.32 0.32" specular="0.08 0.08 0.08"/>
+    <quality shadowsize="4096" offsamples="8"/>
+    <map shadowclip="2" shadowscale="1.5"/>
+  </visual>
+
   <default>
-    <geom friction="1 0.005 0.0001"/>
-    <joint damping="0.05"/>
+    <!-- Rubber-on-asphalt: high sliding friction so the tire rolls rather
+         than skids when the disturbance hits. -->
+    <geom friction="1.0 0.005 0.0001"/>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="collision">
+      <geom group="3"/>
+    </default>
   </default>
 
   <asset>
-    <texture type="skybox" builtin="gradient" rgb1="0.6 0.75 0.9" rgb2="0.1 0.1 0.2" width="256" height="256"/>
-    <texture name="grid" type="2d" builtin="checker" rgb1="0.7 0.7 0.7" rgb2="0.85 0.85 0.85" width="256" height="256"/>
-    <material name="grid_mat" texture="grid" texrepeat="8 8" reflectance="0.1"/>
-    <material name="shell_mat" rgba="0.92 0.15 0.1 1"/>
+    <!-- Brand palette (see overboard-web index.html :root tokens):
+         ink #16232E, tire #23384A, amber #F2A24A, mint #2AAE97, cloud #F4F8F7 -->
+    <texture type="skybox" builtin="gradient" rgb1="0.82 0.87 0.90" rgb2="0.35 0.44 0.52"
+             width="512" height="512"/>
+    <!-- The two tones need real separation AND headroom. An earlier pass used
+         the brand paper colours (0.07 apart in luminance) and the checker was
+         invisible; raising them to ~0.95 then clipped to flat white under the
+         ~1.33x total illumination, so the pattern only survived inside
+         shadows. These albedos land just under saturation when lit. Neutral
+         rather than blue, so the ground does not compete with the bumpers. -->
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.720 0.730 0.720"
+             rgb2="0.560 0.580 0.570" width="512" height="512"/>
+    <!-- Ground texture is a rendering necessity, not decoration: the scenario
+         cameras track the board, so without ground detail at a human scale the
+         board appears to hang motionless while actually travelling 4 m. The
+         checker supplies the parallax that makes the motion legible.
+         texrepeat is tuned by eye — MuJoCo's plane texture mapping is not
+         simply repeats-over-the-plane, so 160 is what lands ~1 m squares
+         against a 0.94 m board, not the 80 the arithmetic suggested. -->
+    <material name="ground_mat" texture="grid" texrepeat="160 160" reflectance="0.05" specular="0.1"/>
+
+    <material name="shell_mat" rgba="0.086 0.137 0.180 1" specular="0.35" shininess="0.45"/>
+    <material name="bumper_mat" rgba="0.949 0.635 0.290 1" specular="0.25" shininess="0.3"/>
+    <material name="footpad_mat" rgba="0.059 0.098 0.133 1" specular="0.05" shininess="0.05"/>
+    <material name="platform_mat" rgba="0.165 0.682 0.592 1" specular="0.3" shininess="0.3"/>
+    <material name="tire_mat" rgba="0.078 0.106 0.137 1" specular="0.12" shininess="0.15"/>
 
     <mesh name="front_enclosure" file="front_enclosure.stl" scale="0.001 0.001 0.001"/>
     <mesh name="rear_enclosure" file="rear_enclosure.stl" scale="0.001 0.001 0.001"/>
@@ -53,66 +115,92 @@
   </asset>
 
   <worldbody>
-    <light name="sun" directional="true" pos="0 0 4" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+    <light name="key" directional="true" pos="-1.5 -2.0 4.0" dir="0.35 0.45 -1"
+           diffuse="0.75 0.74 0.72" specular="0.25 0.25 0.25" castshadow="true"/>
+    <light name="fill" directional="true" pos="2.5 2.5 3.0" dir="-0.5 -0.5 -1"
+           diffuse="0.30 0.32 0.36" specular="0.05 0.05 0.05" castshadow="false"/>
 
-    <geom name="ground" type="plane" size="5 5 0.1" material="grid_mat"/>
+    <geom name="ground" type="plane" size="20 20 0.1" material="ground_mat"/>
 
-    <!-- Wheel body: the tire + hub, real onewheel size (11.5in OD x 6in wide). -->
-    <body name="wheel" pos="0 0 0.146">
-      <joint name="wheel_free" type="free"/>
-      <inertial pos="0 0 0" mass="3.5" diaginertia="0.0252 0.0373 0.0252"/>
-      <geom name="wheel_geom" type="cylinder" size="0.146 0.075" euler="90 0 0"
-            rgba="0.08 0.08 0.08 1"/>
+    <!--
+      Frame: everything that is not the hub motor — rails, enclosures, battery,
+      controller, footpads, bumpers. Free joint, spawned with the axle exactly
+      at tire radius so the model starts in contact and at rest.
 
-      <!-- Deck/shell assembly: hinged for pitch (the "toppling" DOF), carries
-           the Openwheel shells (visual only), a simple collision footprint
-           box, and the mast + rider-proxy mass that keeps the system's CoM
-           high above the axle (unstable inverted pendulum). -->
-      <body name="mast" pos="0 0 0" euler="0 5 0">
-        <joint name="mast_pitch" type="hinge" axis="0 1 0" pos="0 0 0"/>
-        <inertial pos="0 0 0.03" mass="3.0" diaginertia="0.016 0.1625 0.1735"/>
+      Mass 8.0 kg with the centre of mass 30 mm BELOW the axle. That sign is
+      the whole point: the battery and controller live low in the rails, which
+      is why a real driverless onewheel hangs stably upright instead of
+      falling over. It is a weak restoring moment (m*g*l = 2.35 N*m/rad), so
+      the board is only marginally stable — a modest push is enough to put the
+      nose down, which is exactly the regime the impulse test probes.
 
-        <!-- Openwheel shells (visual only, real assembly-frame placement). -->
-        <geom name="front_enclosure_geom" type="mesh" mesh="front_enclosure" material="shell_mat"
-              contype="0" conaffinity="0" group="2"/>
-        <geom name="rear_enclosure_geom" type="mesh" mesh="rear_enclosure" material="shell_mat"
-              contype="0" conaffinity="0" group="2"/>
-        <geom name="front_bumper_geom" type="mesh" mesh="front_bumper" rgba="0.15 0.15 0.15 1"
-              contype="0" conaffinity="0" group="2"/>
-        <geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" rgba="0.15 0.15 0.15 1"
-              contype="0" conaffinity="0" group="2"/>
-        <!-- front_footpad.stl ships pre-placed at the rear footpad location;
-             yaw it 180 deg to mirror it onto the front (see header note). -->
-        <geom name="front_footpad_geom" type="mesh" mesh="front_footpad" euler="0 0 180"
-              rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0" group="2"/>
-        <geom name="rear_footpad_geom" type="mesh" mesh="rear_footpad"
-              rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0" group="2"/>
-        <geom name="electronics_platform_geom" type="mesh" mesh="electronics_platform"
-              rgba="0.3 0.3 0.3 1" contype="0" conaffinity="0" group="2"/>
+      Pitch inertia is a box approximation over the mass-bearing span (the
+      enclosures, +/-0.35 m) rather than the full nose-to-tail 0.938 m — the
+      bumper tips are hollow ABS and carry almost nothing.
+    -->
+    <body name="frame" pos="0 0 0.1454">
+      <freejoint name="frame_free"/>
+      <inertial pos="0 0 -0.03" mass="8.0" diaginertia="0.040 0.400 0.420"/>
 
-        <!-- Simple, robust collision footprint for the deck (not the shell meshes).
-             Sized deliberately smaller than the full nose-to-tail shell length: a
-             box reaching all the way to the bumper tips (~0.4m) would dig its
-             corner into the ground and mechanically arrest the fall by ~21 deg
-             (0.146m axle height / sin(theta) = 0.40m reach). Half-length 0.16m
-             keeps the deck clear of the ground until ~66 deg of lean, well past
-             the 45 deg toppled threshold, while still contacting the ground for
-             a large enough lean (matches a real onewheel's nose eventually
-             scraping down -- just at a higher angle than the true 0.4m reach
-             would give). -->
-        <geom name="deck_collision" type="box" size="0.16 0.116 0.02" pos="0 0 0.02"
-              rgba="0.5 0.5 0.5 0.0" group="3"/>
+      <!-- IMU mounting point: on the electronics platform, just aft of the
+           axle, axes aligned with the frame (x fwd-negative, y left, z up). -->
+      <site name="imu" pos="-0.06 0 -0.007" size="0.008" group="4"/>
 
-        <!-- Mast + rider-proxy mass: keeps the CoM well above the axle. -->
-        <geom name="mast_geom" type="capsule" fromto="0 0 0.058 0 0 0.55" size="0.02"
-              rgba="0.6 0.3 0.1 1"/>
+      <!-- Openwheel shells: visual only. -->
+      <geom name="front_enclosure_geom" class="visual" type="mesh" mesh="front_enclosure" material="shell_mat"/>
+      <geom name="rear_enclosure_geom" class="visual" type="mesh" mesh="rear_enclosure" material="shell_mat"/>
+      <geom name="front_footpad_geom" class="visual" type="mesh" mesh="front_footpad" euler="0 0 180" material="footpad_mat"/>
+      <geom name="rear_footpad_geom" class="visual" type="mesh" mesh="rear_footpad" material="footpad_mat"/>
+      <geom name="electronics_platform_geom" class="visual" type="mesh" mesh="electronics_platform" material="platform_mat"/>
 
-        <body name="rider_mass" pos="0 0 0.55">
-          <inertial pos="0 0 0" mass="8.0" diaginertia="0.0205 0.0205 0.0205"/>
-          <geom name="rider_geom" type="sphere" size="0.08"
-                rgba="0.85 0.1 0.1 1"/>
-        </body>
+      <!-- Bumpers: visual AND collision. These are the geoms that define the
+           nose-strike angle, so they use their real convex hulls — no
+           stand-in box, no tuned fudge factor. `toppled` is detected as a
+           contact between either of these and the ground plane. -->
+      <geom name="front_bumper_geom" type="mesh" mesh="front_bumper" material="bumper_mat"
+            group="2" condim="3" friction="0.6 0.005 0.0001"/>
+      <geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" material="bumper_mat"
+            group="2" condim="3" friction="0.6 0.005 0.0001"/>
+
+      <!--
+        Hub wheel: 11.5 in OD x 6 in wide onewheel tire on a direct-drive hub
+        motor. 4.5 kg is mostly stator iron, magnets and tire rubber out at the
+        rim, so it is modelled as a hoop rather than a solid disc: radius of
+        gyration 0.115 m (0.79 of the 0.1454 m outer radius) over a 0.15 m
+        width, giving Iyy = m*a^2 and Ixx = Izz = m*a^2/2 + m*w^2/12.
+        Its hinge IS the motor axis.
+      -->
+      <body name="wheel" pos="0 0 0">
+        <joint name="wheel_hinge" type="hinge" axis="0 1 0" pos="0 0 0" damping="0.08"/>
+        <inertial pos="0 0 0" mass="4.5" diaginertia="0.0382 0.0595 0.0382"/>
+        <geom name="wheel_geom" type="cylinder" size="0.1454 0.075" euler="90 0 0"
+              material="tire_mat" condim="4"/>
       </body>
+
+      <!-- Cameras ride the frame's subtree CoM (translate with the board, do
+           not rotate with it) so the board stays framed as it rolls away. -->
+      <camera name="side" mode="trackcom" pos="0 2.6 0.30" xyaxes="-1 0 0 0 0 1" fovy="24"/>
+      <camera name="beauty" mode="trackcom" pos="-1.7 2.0 0.85"
+              xyaxes="-2.0 -1.7 0 1.445 -1.700 6.89" fovy="26"/>
     </body>
   </worldbody>
+
+  <!-- The single motor. Torque (current) mode, matching the smart-drive HAL
+       contract: positive current -> positive wheel velocity -> nose lifts.
+       Left at zero by the open-loop scenario; this is the hook the Rust
+       controller takes over once the MuJoCo FFI backend lands. -->
+  <actuator>
+    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-40 40" ctrllimited="true"/>
+  </actuator>
+
+  <!-- Sensor set mirrors the real board's IMU + drive telemetry, so the
+       scenario reads the same signals the controller will. -->
+  <sensor>
+    <framequat name="frame_quat" objtype="body" objname="frame"/>
+    <gyro name="frame_gyro" site="imu"/>
+    <accelerometer name="frame_accel" site="imu"/>
+    <jointpos name="wheel_pos" joint="wheel_hinge"/>
+    <jointvel name="wheel_vel" joint="wheel_hinge"/>
+    <actuatorfrc name="motor_torque" actuator="wheel_motor"/>
+  </sensor>
 </mujoco>
