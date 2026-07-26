@@ -199,6 +199,75 @@ def render_frames(result: ImpulseResult, camera: str) -> list[np.ndarray]:
         renderer.close()
 
 
+PANE_H = HEIGHT // 2
+
+
+def _pane_label(frame: np.ndarray, title: str, subtitle: str, colour) -> np.ndarray:
+    """Label one pane of the comparison. Deliberately not the full HUD.
+
+    The HUD is laid out for a 720-high frame; shrinking it to fit a pane makes
+    it unreadable, and the comparison's job is to show the two behaviours side
+    by side, not to restate every metric twice.
+    """
+    from PIL import Image, ImageDraw
+
+    img = Image.fromarray(frame)
+    d = ImageDraw.Draw(img, "RGBA")
+    f_title, f_sub = _font(26), _font(17)
+
+    d.rectangle([0, 0, WIDTH, 44], fill=(*INK, 205))
+    d.text((22, 9), title, font=f_title, fill=colour)
+    d.text((22 + d.textlength(title, font=f_title) + 18, 16), subtitle, font=f_sub, fill=CLOUD)
+    return np.asarray(img)
+
+
+def render_comparison(
+    open_loop: ImpulseResult, closed: ImpulseResult, camera: str
+) -> list[np.ndarray]:
+    """Two panes, same disturbance: uncontrolled above, controlled below.
+
+    Both panes are rendered natively at half height rather than rendered full
+    size and downscaled — downscaling a 720p frame to 360 turns the board into
+    mush exactly where the pitch angle is the thing being read.
+
+    The two runs are separate trajectories of differing length; each pane
+    replays its own and holds its final frame if it is the shorter, so the
+    comparison stays time-aligned rather than one pane running ahead.
+    """
+    import mujoco
+
+    model = load_model()
+    dt = float(model.opt.timestep)
+    stride = max(1, int(round((1.0 / FPS) / dt)))
+    n = max(len(open_loop.t), len(closed.t))
+
+    renderer = mujoco.Renderer(model, height=PANE_H, width=WIDTH)
+    data = mujoco.MjData(model)
+    try:
+        scene_opt = mujoco.MjvOption()
+        scene_opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
+
+        def pane(result: ImpulseResult, i: int, title: str, colour) -> np.ndarray:
+            j = min(i, len(result.qpos) - 1)
+            data.qpos[:] = result.qpos[j]
+            mujoco.mj_forward(model, data)
+            renderer.update_scene(data, camera=camera, scene_option=scene_opt)
+            sub = (
+                f"pitch {float(result.pitch_deg[j]):+6.2f}°   "
+                f"travel {float(result.travel_m[j]):+5.2f} m"
+            )
+            return _pane_label(renderer.render().copy(), title, sub, colour)
+
+        frames = []
+        for i in range(0, n, stride):
+            top = pane(open_loop, i, "OPEN LOOP", AMBER)
+            bottom = pane(closed, i, "CLOSED LOOP", MINT)
+            frames.append(np.vstack([top, bottom]))
+        return frames
+    finally:
+        renderer.close()
+
+
 def render_poster(result: ImpulseResult, camera: str, idx: int) -> np.ndarray:
     """One clean frame for the video poster — no transient callouts.
 
@@ -309,6 +378,12 @@ def main() -> int:
     ap.add_argument("--no-video", action="store_true", help="skip GL; plot + metrics only")
     ap.add_argument("--no-gif", action="store_true")
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    ap.add_argument(
+        "--compare",
+        action="store_true",
+        help="also film the same disturbance closed-loop, as a two-pane comparison "
+        "(requires: cargo build --release -p control-ffi)",
+    )
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -363,6 +438,42 @@ def main() -> int:
         if not args.no_gif:
             write_gif(frames, args.out_dir / f"{STEM}.gif", result)
             print(f"wrote {args.out_dir / f'{STEM}.gif'}")
+
+    if args.compare:
+        # Imported here, not at module scope: the open-loop path is the CI
+        # gate's artifact and must not start depending on a built cdylib.
+        from sim.scenarios.rust_controller import RustController
+
+        # No try/except. If the library is missing this must fail loudly --
+        # silently publishing an "open vs closed" clip whose closed pane was
+        # actually uncontrolled would be a lie in the most visible artifact
+        # the project produces.
+        with RustController() as ctl:
+            closed = run(params, model=model, controller=ctl, capture_state=True)
+            saturated = ctl.saturated_cycles
+        cm = closed.metrics
+
+        print()
+        print(f"closed-loop peak   {cm.peak_abs_pitch_deg:.2f} deg "
+              f"(open loop {m.peak_abs_pitch_deg:.2f})")
+        print(f"closed-loop strike {cm.nose_strike}")
+        print(f"closed-loop travel {cm.travel_m:.2f} m")
+        print(f"peak current       {float(abs(closed.motor_current_a).max()):.2f} A "
+              f"({saturated} saturated cycles)")
+
+        (args.out_dir / "impulse_closed_loop_metrics.json").write_text(
+            json.dumps(closed.to_json_dict(), indent=2) + "\n"
+        )
+        print(f"wrote {args.out_dir / 'impulse_closed_loop_metrics.json'}")
+
+        if not args.no_video:
+            try:
+                cmp_frames = render_comparison(result, closed, args.camera)
+            except Exception as exc:
+                print(f"\ncomparison render unavailable ({type(exc).__name__}: {exc})")
+                return 0
+            write_video(cmp_frames, args.out_dir / "impulse_compare.mp4", "libx264", 6)
+            print(f"wrote {args.out_dir / 'impulse_compare.mp4'} ({len(cmp_frames)} frames)")
 
     return 0
 

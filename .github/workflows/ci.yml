@@ -192,11 +192,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libosmesa6 libgl1 libglx-mesa0
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # --compare films the SAME disturbance closed-loop as a second pane, and
+      # that pane runs the real control law over the C ABI -- so the cdylib has
+      # to exist. The script has no fallback here on purpose: publishing an
+      # "open vs closed" clip whose closed pane was quietly uncontrolled would
+      # be a lie in the most visible artifact the project produces.
+      - name: Build the control library
+        run: cargo build --release -p control-ffi
+
       - name: Render impulse scenario
         env:
           MUJOCO_GL: osmesa
           PYOPENGL_PLATFORM: osmesa
-        run: python scripts/render_scenario.py
+        run: python scripts/render_scenario.py --compare
 
       # Fail loudly if rendering silently degraded to the plot-only fallback.
       # The script exits 0 in that case by design (a dead GL stack must not
@@ -207,6 +221,18 @@ jobs:
             echo "::error::no mp4 was rendered - offscreen GL likely failed"; exit 1; }
           test -s sim/out/impulse_poster.jpg
           test -s sim/out/impulse_metrics.json
+          test -s sim/out/impulse_compare.mp4 || {
+            echo "::error::no comparison clip - the closed-loop render failed"; exit 1; }
+          # The comparison is only worth publishing if the two panes actually
+          # differ. Equal outcomes would mean the controller did nothing and
+          # the clip is quietly claiming a result it does not have.
+          python - <<'PYCL'
+          import json, pathlib
+          cl = json.loads(pathlib.Path("sim/out/impulse_closed_loop_metrics.json").read_text())["metrics"]
+          assert not cl["nose_strike"], "closed-loop pane struck; do not publish this as a recovery"
+          assert cl["peak_abs_pitch_deg"] < 5.0, f"closed peak {cl['peak_abs_pitch_deg']:.2f} deg is not a recovery"
+          print(f"closed loop: peak |pitch| {cl['peak_abs_pitch_deg']:.2f}deg, no strike")
+          PYCL
           python - <<'PY'
           import json, pathlib
           m = json.loads(pathlib.Path("sim/out/impulse_metrics.json").read_text())["metrics"]
@@ -270,9 +296,11 @@ jobs:
             sim/out/impulse_open_loop.mp4 \
             sim/out/impulse_open_loop.webm \
             sim/out/impulse_open_loop.gif \
+            sim/out/impulse_compare.mp4 \
             sim/out/impulse_poster.jpg \
             sim/out/impulse_pitch.png \
             sim/out/impulse_metrics.json \
+            sim/out/impulse_closed_loop_metrics.json \
             sim/out/sim-run.json
 
       # Per-commit preview. Filenames are sha-stamped and the release is never
