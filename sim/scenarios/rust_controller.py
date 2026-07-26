@@ -69,6 +69,7 @@ class ObParams(ctypes.Structure):
         ("wheel_accel_tau_s", ctypes.c_float),
         ("accel_ff_gain_m_s2_per_a", ctypes.c_float),
         ("accel_trust_band_m_s2", ctypes.c_float),
+        ("accel_ff_current_source", ctypes.c_uint32),
     ]
 
 
@@ -157,6 +158,7 @@ class RustController:
         wheel_accel_tau_s: float = 0.05,
         accel_ff_gain_m_s2_per_a: float = 0.0,
         accel_trust_band_m_s2: float = 0.0,
+        accel_ff_current_source: int = 0,
         lib_path: Path | None = None,
     ) -> None:
         path = lib_path or library_path()
@@ -209,6 +211,7 @@ class RustController:
             wheel_accel_tau_s=wheel_accel_tau_s,
             accel_ff_gain_m_s2_per_a=accel_ff_gain_m_s2_per_a,
             accel_trust_band_m_s2=accel_trust_band_m_s2,
+            accel_ff_current_source=int(accel_ff_current_source),
         )
         self._handle = lib.ob_controller_new(ctypes.byref(params))
         if not self._handle:
@@ -246,12 +249,19 @@ class RustController:
         wheel_rate_rad_s: float,
         gyro_rad_s=None,
         accel_m_s2=None,
+        motor_current_a: float | None = None,
     ) -> float:
         o, c = self._obs, self._cmd
         if gyro_rad_s is not None:
             o.gyro_rad_s[0], o.gyro_rad_s[1], o.gyro_rad_s[2] = gyro_rad_s
         if accel_m_s2 is not None:
             o.accel_m_s2[0], o.accel_m_s2[1], o.accel_m_s2[2] = accel_m_s2
+        # MEASURED current -- what actually flowed during the last step, after
+        # actuation delay and current-loop lag. ICD: "measured, not commanded".
+        # Left at zero by callers that cannot supply it, which is why the
+        # feedforward does not default to trusting it.
+        if motor_current_a is not None:
+            o.motor_current_a = motor_current_a
         o.t_ns = int(t_s * 1e9)
         o.pitch_rad = pitch_rad
         o.pitch_rate_rad_s = pitch_rate_rad_s

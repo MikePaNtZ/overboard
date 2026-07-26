@@ -60,6 +60,15 @@ typedef struct {
      * Buys immunity to shoves the aiding cannot see, at the cost of running
      * open-loop on the gyro while tripped. */
     float    accel_trust_band_m_s2;
+    /* Which current the mode-2 feedforward believes.
+     *   0 = commanded (previous cycle's cmd.amps)
+     *   1 = measured  (obs.motor_current_a)
+     * HARDWARE SHOULD USE 1. A VESC derates commanded torque silently
+     * through several cutback layers; a feedforward fed the command during
+     * a cutback subtracts acceleration that is not happening, straight onto
+     * the attitude estimate. Defaults to 0 so a backend that never populates
+     * motor_current_a cannot silently feed the estimator a constant zero. */
+    uint32_t accel_ff_current_source;
 } ob_params_v1;
 
 typedef struct {

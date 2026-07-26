@@ -340,6 +340,11 @@ def run(
     # current-loop lag, gyro noise, wheel-rate quantisation (ICD 12).
     imp = ImperfectionState(profile=profile, dt_s=dt)
     m.imperfection_profile_id = profile.profile_id
+    # What actually flowed last step -- post delay, post current-loop lag. The
+    # ICD calls this "measured, not commanded" and it is NOT the same signal as
+    # the command: on hardware a VESC derates silently, and in sim the lag and
+    # delay already separate the two.
+    flowing_a = 0.0
 
     for _ in range(n_steps):
         data.xfrc_applied[frame] = 0.0
@@ -363,10 +368,12 @@ def run(
                 float(data.time), pitch, sensed_rate, sensed_wheel,
                 gyro_rad_s=imp.gyro_vec(true_gyro),
                 accel_m_s2=imp.accel_vec(true_accel),
+                motor_current_a=flowing_a,
             ))
 
         # Delay and current-loop lag live here, not in the controller.
         current = imp.apply_current(proposed)
+        flowing_a = current
 
         # ctrl is TORQUE (motor actuator, gear=1); the controller speaks amps.
         data.ctrl[0] = current * KT_NM_PER_A

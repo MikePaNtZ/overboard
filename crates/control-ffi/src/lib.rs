@@ -132,6 +132,18 @@ pub struct ObParamsV1 {
     /// Buys disturbance immunity at the cost of running open-loop on the gyro
     /// while tripped, so too narrow a band is worse than none.
     pub accel_trust_band_m_s2: f32,
+    /// Which current the mode-2 feedforward believes. **0 = commanded**
+    /// (`cmd.amps` from the previous cycle), **1 = measured**
+    /// (`obs.motor_current_a`).
+    ///
+    /// **Hardware should use 1.** The VESC derates commanded torque silently
+    /// through half a dozen cutback layers, and a feedforward fed the command
+    /// during a cutback subtracts acceleration that is not happening. Defaults
+    /// to 0 only because a backend that does not populate `motor_current_a`
+    /// would otherwise feed the estimator a constant zero — which is precisely
+    /// the "optional field quietly left at its default" failure this codebase
+    /// has already been bitten by once.
+    pub accel_ff_current_source: u32,
 }
 
 /// One cycle of plant state.
@@ -196,6 +208,9 @@ pub struct ObController {
     wheel_accel: Option<WheelAccelEstimator>,
     /// Mode 2's aiding source. Mutually exclusive with `wheel_accel`.
     accel_ff: Option<CommandFeedforward>,
+    /// True when the feedforward should believe `obs.motor_current_a` rather
+    /// than the command we issued last cycle.
+    accel_ff_measured: bool,
     /// Last current commanded, amps — the feedforward's input. One cycle old
     /// by construction: it is what we asked for on the previous tick, which is
     /// what the plant has been acting on since.
@@ -276,6 +291,7 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
         } else {
             None
         },
+        accel_ff_measured: p.accel_ff_current_source == 1,
         last_amps: 0.0,
         estimator: if p.use_estimator != 0 {
             Some(ComplementaryFilter::with_trust_band(
@@ -381,7 +397,11 @@ pub unsafe extern "C" fn ob_controller_update(
     // `estimator_accel_aiding`. At most one is Some.
     let aiding = match (ctl.wheel_accel.as_mut(), ctl.accel_ff.as_ref()) {
         (Some(w), _) => w.update(o.wheel_rate_rad_s * ctl.r_eff_m, dt_s),
-        (None, Some(ff)) => ff.predict(ctl.last_amps),
+        (None, Some(ff)) => ff.predict(if ctl.accel_ff_measured {
+            o.motor_current_a
+        } else {
+            ctl.last_amps
+        }),
         (None, None) => 0.0,
     };
 
@@ -463,6 +483,7 @@ mod tests {
             wheel_accel_tau_s: 0.05,
             accel_ff_gain_m_s2_per_a: 0.0,
             accel_trust_band_m_s2: 0.0,
+            accel_ff_current_source: 0,
         }
     }
 

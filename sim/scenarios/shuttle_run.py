@@ -317,6 +317,8 @@ def run(
     # which is the signature of a transient rather than a sensor problem.
     mujoco.mj_forward(model, data)
 
+    # Post-delay, post-lag current -- see the note in impulse_response.run.
+    flowing_a = 0.0
     ts, pos, pos_cmd, vs, vrefs, pitches, prefs, currents = [], [], [], [], [], [], [], []
     states: list[np.ndarray] = []
     commanded_pos = 0.0
@@ -344,7 +346,9 @@ def run(
                 t, pitch, rate, wheel,
                 gyro_rad_s=imp.gyro_vec(true_gyro),
                 accel_m_s2=imp.accel_vec(true_accel),
+                motor_current_a=flowing_a,
             )))
+            flowing_a = current
             data.ctrl[0] = current * KT_NM_PER_A
             mujoco.mj_step(model, data)
 
