@@ -61,7 +61,6 @@ class ObParams(ctypes.Structure):
         ("kp_v_rad_per_m_s", ctypes.c_float),
         ("ki_v_rad_per_m", ctypes.c_float),
         ("max_pitch_ref_rad", ctypes.c_float),
-        ("v_ref_m_s", ctypes.c_float),
         ("r_eff_m", ctypes.c_float),
         ("com_above_axle", ctypes.c_uint32),
     ]
@@ -75,6 +74,7 @@ class ObObs(ctypes.Structure):
         ("pitch_rate_rad_s", ctypes.c_float),
         ("wheel_rate_rad_s", ctypes.c_float),
         ("motor_current_a", ctypes.c_float),
+        ("v_ref_m_s", ctypes.c_float),
     ]
 
 
@@ -139,6 +139,7 @@ class RustController:
         ki_v_rad_per_m: float = 0.0,
         max_pitch_ref_rad: float = DEFAULT_MAX_PITCH_REF_RAD,
         v_ref_m_s: float = 0.0,
+        v_ref_fn=None,
         r_eff_m: float = DEFAULT_R_EFF_M,
         com_above_axle: bool = True,
         lib_path: Path | None = None,
@@ -181,7 +182,6 @@ class RustController:
             kp_v_rad_per_m_s=kp_v_rad_per_m_s,
             ki_v_rad_per_m=ki_v_rad_per_m,
             max_pitch_ref_rad=max_pitch_ref_rad,
-            v_ref_m_s=v_ref_m_s,
             r_eff_m=r_eff_m,
             com_above_axle=1 if com_above_axle else 0,
         )
@@ -201,6 +201,11 @@ class RustController:
         #: for now it is evidence about whether the gains have any headroom.
         self.saturated_cycles = 0
         self.cycles = 0
+        #: Speed setpoint, m/s. A constant, or driven per-cycle by `v_ref_fn`.
+        #: Settable so a command sequence does not have to rebuild the
+        #: controller and throw away the integrator that holds position.
+        self.v_ref_m_s = v_ref_m_s
+        self.v_ref_fn = v_ref_fn
         #: Last pitch reference the outer loop asked for, radians.
         self.pitch_ref_rad = 0.0
         #: Largest magnitude it ever asked for -- shows whether the outer loop
@@ -219,6 +224,7 @@ class RustController:
         o.pitch_rad = pitch_rad
         o.pitch_rate_rad_s = pitch_rate_rad_s
         o.wheel_rate_rad_s = wheel_rate_rad_s
+        o.v_ref_m_s = self.v_ref_fn(t_s) if self.v_ref_fn else self.v_ref_m_s
 
         rc = self._lib.ob_controller_update(self._handle, ctypes.byref(o), ctypes.byref(c))
         if rc != _OK:

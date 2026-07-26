@@ -68,8 +68,6 @@ pub struct ObParamsV1 {
     pub ki_v_rad_per_m: f32,
     /// Clamp on the pitch the outer loop may ask for, radians.
     pub max_pitch_ref_rad: f32,
-    /// Ground-speed setpoint, m/s. Zero is station keeping.
-    pub v_ref_m_s: f32,
     /// Wheel radius used to turn wheel rate into ground speed, metres.
     pub r_eff_m: f32,
     /// **1 = centre of mass ABOVE the axle** (a ridden board), 0 = below (the
@@ -98,6 +96,14 @@ pub struct ObObsV1 {
     pub wheel_rate_rad_s: f32,
     /// Current actually flowing, amps — not an echo of what was commanded.
     pub motor_current_a: f32,
+    /// Ground-speed setpoint for THIS cycle, m/s. Zero is station keeping.
+    ///
+    /// Per-cycle rather than fixed at construction, so a command sequence can
+    /// change it without rebuilding the controller — which would discard the
+    /// integrator, and the integrator is the thing that remembers where home
+    /// is. Its running integral tracks position against `∫v_ref`, so a profile
+    /// that integrates to zero net displacement returns to the start for free.
+    pub v_ref_m_s: f32,
 }
 
 /// The resulting command.
@@ -120,7 +126,6 @@ pub struct ObController {
     regulator: PitchRegulator,
     outer: Option<VelocityLoop>,
     envelope: Envelope,
-    v_ref_m_s: f32,
     r_eff_m: f32,
     last_t_ns: Option<u64>,
     /// Carried between cycles so the outer loop can hold off integrating while
@@ -174,7 +179,6 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
     let boxed = Box::new(ObController {
         regulator: PitchRegulator::new(p.kp_a_per_rad, p.kd_a_per_rad_s),
         outer,
-        v_ref_m_s: p.v_ref_m_s,
         r_eff_m: if p.r_eff_m > 0.0 { p.r_eff_m } else { 0.14605 },
         last_t_ns: None,
         last_saturated: false,
@@ -263,7 +267,7 @@ pub unsafe extern "C" fn ob_controller_update(
     let pitch_ref = match ctl.outer.as_mut() {
         Some(outer) => {
             let v = o.wheel_rate_rad_s * ctl.r_eff_m;
-            outer.update(v, ctl.v_ref_m_s, dt_s, ctl.last_saturated)
+            outer.update(v, o.v_ref_m_s, dt_s, ctl.last_saturated)
         }
         None => 0.0,
     };
@@ -300,7 +304,6 @@ mod tests {
             kp_v_rad_per_m_s: 0.0,
             ki_v_rad_per_m: 0.0,
             max_pitch_ref_rad: 0.087,
-            v_ref_m_s: 0.0,
             r_eff_m: 0.14605,
             com_above_axle: 1,
         }
@@ -314,6 +317,7 @@ mod tests {
             pitch_rate_rad_s: rate,
             wheel_rate_rad_s: 0.0,
             motor_current_a: 0.0,
+            v_ref_m_s: 0.0,
         }
     }
 

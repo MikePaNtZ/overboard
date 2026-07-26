@@ -28,7 +28,6 @@ typedef struct {
     float    kp_v_rad_per_m_s;
     float    ki_v_rad_per_m;
     float    max_pitch_ref_rad;
-    float    v_ref_m_s;
     float    r_eff_m;
     /* 1 = centre of mass ABOVE the axle (ridden), 0 = below (driverless).
      * The pitch-to-velocity coupling genuinely inverts between the two; this
@@ -43,6 +42,7 @@ typedef struct {
     float    pitch_rate_rad_s;  /* nose-up positive */
     float    wheel_rate_rad_s;  /* positive = forward */
     float    motor_current_a;   /* measured, not commanded */
+    float    v_ref_m_s;         /* speed setpoint for THIS cycle */
 } ob_obs_v1;
 
 typedef struct {
