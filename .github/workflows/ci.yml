@@ -132,6 +132,47 @@ jobs:
         run: pytest tests/ -v
 
   # ---------------------------------------------------------------------
+  # Policy gate. Stdlib-only Python, no install step, a couple of seconds.
+  #
+  # Checks the decision record has not drifted from its own index, that every
+  # top-level directory has a named owner, and that public-facing markdown
+  # neither uses the absolutes this project committed to never saying nor
+  # makes claims without a requirement ID behind them. Full rationale, and
+  # why the capability-language check is advisory rather than hard, is in
+  # docs/decisions/ADR-0003-policy-ci-gate.md.
+  #
+  # Deliberately NOT a required status check yet: it has to pass green at
+  # least once first. Required checks stay `rust` and `sim`. It is also not a
+  # `needs:` of the publish job -- a policy failure should not be able to
+  # suppress an artifact whose physics passed.
+  #
+  # Run it locally before opening a PR: python3 .github/policy_check.py
+  # ---------------------------------------------------------------------
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # The fence is opened and closed around the run so the summary stays
+      # readable on failure too. PIPESTATUS rather than the pipeline's own
+      # status: `tee` succeeds even when the check does not, and a policy gate
+      # that reports green because its logger worked would be worse than none.
+      - name: Policy gate
+        run: |
+          { echo '### Policy gate'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          python3 .github/policy_check.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+  # ---------------------------------------------------------------------
   # Film the scenario and publish it, always behind a green gate -- the landing
   # page eventually consumes this artifact, so a clip must never be published
   # for a commit whose physics did not pass.
