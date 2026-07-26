@@ -122,3 +122,15 @@ correctness one.
 - `scripts/` -- Python viewer/render entry points for the MuJoCo sim.
 - `tests/` -- the sim-in-the-loop acceptance gate (pytest).
 - `docs/` -- Markdown+Mermaid mirrors of the design docs (Notion is the source of truth).
+- `notebooks/` -- the maths, with the debugging stories. Load archived datasets; see `notebooks/README.md`.
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE). The vendored Openwheel meshes are MIT under
+their own terms; attribution and a documented upstream README/LICENSE
+discrepancy are in `sim/models/meshes/openwheel/NOTICE.md`.
+
+**This controls a powered, rideable vehicle.** The warranty disclaimer is not
+boilerplate here: the control software is experimental, has never been
+validated against hardware, and is published as an engineering record rather
+than as something fit to ride.
