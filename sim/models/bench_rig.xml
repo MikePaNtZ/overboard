@@ -1,0 +1,210 @@
+<mujoco model="overboard_bench_rig">
+  <!--
+    Overboard bench rig plant model — wave-0, desk-scale.
+
+    A sensored outrunner bolted face-on to a plate, the plate clamped to a desk
+    edge, and a disc of known inertia on the shaft. One hinge, one actuator.
+    That is the whole vehicle here, and it is deliberately the simplest plant
+    that still exercises the real signal path.
+
+    WHY THIS MODEL EXISTS, AND WHAT IT IS NOT FOR
+    --------------------------------------------
+    It is NOT a scale model of the board and it does not predict anything about
+    riding. It exists for two jobs:
+
+      1. Fit a motor model (kt, rotor inertia, friction) from measurements, so
+         the identification *method* is proven on hardware we own before it is
+         pointed at a hub motor we do not.
+
+      2. Measure the imperfection profile of the Pi -> CAN -> VESC path:
+         actuation delay, current-loop lag, wheel-rate quantum and update rate,
+         IMU noise. Those live in sim/scenarios/imperfections.py, where every
+         value in STAGE0_PLACEHOLDER is currently an ICD 12 placeholder rather
+         than a fitted number. Replacing that profile is what closes SR-SIM-3,
+         and none of it needs a board.
+
+    WHAT TRANSFERS TO THE BOARD, AND WHAT DOES NOT
+    ----------------------------------------------
+    This distinction is the whole point of the rig, so it is stated here rather
+    than left to be inferred:
+
+      TRANSFERS      the imperfection profile. Same Pi, same CAN stack, same
+                     Little FOCer, same RT kernel. Delay and quantisation are
+                     properties of that path, not of the motor hanging off it.
+
+      DOES NOT       every motor number. The bench motor's kt is ~0.05 N*m/A;
+                     the hub motor's is guessed at 0.7. They are different
+                     machines and one says nothing about the other. Anyone
+                     reading a fitted bench kt into plant.py's KT_NM_PER_A has
+                     made a category error.
+
+    GEOMETRY
+    --------
+    Desk top is z = 0 and the desk edge is x = 0; the rig hangs off +x. The
+    motor axis sits at x = 0.06, i.e. 60 mm PAST the edge, so the disc (75 mm
+    radius) swings in free air. That overhang is load-bearing, not styling: a
+    plate clamped flush would put the disc over the desk surface, which kills
+    the pendulum upgrade and lets a shed set screw take a chunk out of the desk.
+
+    The hinge axis is Y (lateral), so the disc turns in the X-Z plane. That is
+    the same plane the board pitches in, which is what makes the later swap of
+    the disc for an arm-and-mass a genuine inverted pendulum rather than a
+    turntable.
+
+    MASS AND INERTIA COME FROM GEOMETRY
+    -----------------------------------
+    No <inertial> block is given. MuJoCo derives body mass and inertia from the
+    geoms and their densities, exactly the way the onewheel model derives its
+    nose-strike angle from collision hulls instead of a tuned constant. The
+    disc is 6061 aluminium at 2700 kg/m^3, r = 75 mm, t = 12 mm, which is
+    0.5726 kg and 1.6103e-3 kg*m^2 about the axis. As compiled, the joint-space
+    inertias are:
+
+        J_bare   = 2.4065e-4 kg*m^2   (rotor can + hub)
+        J_loaded = 1.8510e-3 kg*m^2
+        J_disc   = 1.6103e-3 kg*m^2   == 1/2*m*r^2 exactly, because every
+                                         rotor geom is centred on the axis
+
+    The ratio matters more than either number: J_disc / J_bare = 6.69. The
+    two-run identification (spin up bare, spin up loaded, solve for kt and
+    J_rotor) is only well conditioned when the added inertia is comparable to
+    or larger than the unknown one. At ~6.7x the two acceleration slopes differ
+    by 7.4x, well clear of measurement noise. A disc that merely nudged the
+    total would produce two nearly identical ramps and an ill-posed fit.
+
+    The rotor is balanced: COM sits exactly on the shaft axis, so there is no
+    angle-dependent gravity torque to contaminate the friction fit.
+
+    Both of these are nameplate/geometry estimates awaiting measurement, which
+    is the point of the exercise. The scenario reports fitted values against
+    them, and a large disagreement on J_rotor is a real finding about the
+    motor, not a modelling error to be tuned away.
+
+    ACTUATOR RANGE IS DERIVED, AND THAT IS A KNOWN TRAP
+    ---------------------------------------------------
+    ctrlrange below is +/- 2.0 N*m, from a 40 A envelope limit times a
+    NAMEPLATE kt of 0.0503 N*m/A (a 190 kv 6374: kt = 9.5493 / kv).
+
+    The onewheel model has already been bitten by exactly this pattern — its
+    ctrlrange of +/-28 N*m was derived from an unfitted kt guess and silently
+    contradicted the >=30 N*m the sizing work requires. So, explicitly: this
+    limit is a CURRENT envelope expressed in torque, it is not a requirement,
+    and nothing downstream may read it as one. When the rig returns a measured
+    kt, this number is recomputed from it rather than left to drift.
+
+    FRICTION
+    --------
+    damping is viscous (N*m*s/rad); frictionloss is Coulomb (N*m). Both are
+    placeholders, and separating them is a deliverable of the spin-down test —
+    a single lumped friction term fits a decelerating flywheel badly, because
+    Coulomb dominates at low speed and viscous at high speed. Getting this
+    wrong shows up as a residual that changes sign across the speed range.
+  -->
+
+  <compiler angle="degree" autolimits="true"/>
+  <option timestep="0.0005" integrator="implicitfast"/>
+
+  <default>
+    <geom contype="0" conaffinity="0"/>
+  </default>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.086 0.137 0.180"
+             rgb2="0.129 0.196 0.247" width="300" height="300"/>
+    <material name="grid_mat" texture="grid" texrepeat="6 6" reflectance="0.05"/>
+    <material name="ink"   rgba="0.086 0.137 0.180 1"/>
+    <material name="cloud" rgba="0.957 0.973 0.969 1"/>
+    <material name="amber" rgba="0.949 0.635 0.290 1"/>
+    <material name="mint"  rgba="0.165 0.682 0.592 1"/>
+  </asset>
+
+  <worldbody>
+    <light name="key"  pos="0.6 -0.7 0.9" dir="-0.5 0.6 -0.8" directional="true"
+           diffuse="0.75 0.74 0.72" specular="0.25 0.25 0.25" castshadow="true"/>
+    <light name="fill" pos="-0.5 0.6 0.5" dir="0.4 -0.5 -0.5" directional="true"
+           diffuse="0.22 0.24 0.26" specular="0 0 0" castshadow="false"/>
+
+    <!-- Desk. Static, visual only. Top at z=0, edge at x=0. -->
+    <geom name="desk" type="box" size="0.30 0.25 0.02" pos="-0.30 0 -0.02"
+          material="grid_mat"/>
+
+    <!-- Plate. A panel in the X-Z plane, thin in Y, clamped flat to the desk
+         over x < 0 and reaching out past the edge to carry the motor.
+         Visual only: it is ground, and modelling its compliance would be a
+         claim the rig cannot yet support. If bench data shows a structural
+         resonance inside the control bandwidth, that assumption is what to
+         revisit first. -->
+    <geom name="plate" type="box" size="0.080 0.003 0.100" pos="0.030 -0.045 0.100"
+          material="cloud"/>
+
+    <!-- Motor stator, static half. Bolted to the plate face, axis along Y. -->
+    <geom name="stator" type="cylinder" size="0.0315 0.0125" euler="90 0 0"
+          pos="0.060 -0.0325 0.120" material="ink"/>
+
+    <!-- The one moving body: rotor + shaft hub + flywheel disc.
+         Hinge about Y, on the motor axis, 60 mm past the desk edge.
+
+         EVERY ROTOR GEOM IS CENTRED ON THE SHAFT AXIS AND OFFSET ONLY ALONG Y.
+         That is not a stylistic choice. An earlier revision of this file
+         offset them along X — perpendicular to the hinge — which models a
+         flywheel bolted on eccentrically. In hardware that is a violently
+         unbalanced rotor; in the model it silently inflated the joint inertia
+         by a parallel-axis term (1.94e-3 instead of the disc's true 1.61e-3)
+         and would have corrupted the very identification this rig exists to
+         perform. Offsets along the axis of rotation contribute nothing to
+         inertia about that axis, which is what makes the disc's contribution
+         exactly 1/2*m*r^2 and therefore trustworthy. -->
+    <body name="rotor" pos="0.060 0 0.120">
+      <joint name="shaft" type="hinge" axis="0 1 0" damping="1e-4"
+             frictionloss="5e-3"/>
+
+      <!-- Rotor can. density set to land near 2.4e-4 kg*m^2 about the axis. -->
+      <geom name="rotor_can" type="cylinder" size="0.0315 0.018" euler="90 0 0"
+            pos="0 0 0" density="4300" material="ink"/>
+
+      <!-- Set-screw hub. Small, but it is real mass on the shaft. -->
+      <geom name="hub" type="cylinder" size="0.011 0.010" euler="90 0 0"
+            pos="0 0.028 0" density="2700" material="mint"/>
+
+      <!-- Flywheel: 6061 aluminium, r = 75 mm, t = 12 mm.
+           This is the KNOWN inertia in the two-run identification. Its value
+           comes from mass on a kitchen scale and radius with a ruler, which is
+           why it is trustworthy in a way the rotor's is not. -->
+      <geom name="flywheel" type="cylinder" size="0.075 0.006" euler="90 0 0"
+            pos="0 0.046 0" density="2700" material="amber"/>
+
+      <!-- Index mark, so rotation is legible in a render and a strobe or phone
+           video can cross-check shaft speed against reported ERPM.
+
+           MASSLESS ON PURPOSE. In hardware this is paint or a strip of tape.
+           Given mass, it sits off-axis and applies a gravity torque of order
+           2e-3 N*m that varies with shaft angle — the same order as the
+           Coulomb friction term the spin-down test is trying to identify, so
+           it would show up as a systematic bias in the fit and be
+           indistinguishable from real friction. -->
+      <geom name="index" type="box" size="0.004 0.006 0.020" pos="0 0.046 0.052"
+            mass="0" material="cloud"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Torque in, at the shaft. The Rust stack drives this seam exactly as it
+         drives wheel_motor in the onewheel model, so the CAN/HAL path under
+         test is the same one that will run the board.
+
+         ctrlrange is a derived CURRENT envelope (40 A x nameplate 0.0503
+         N*m/A), NOT a requirement. See the header. -->
+    <motor name="shaft_motor" joint="shaft" gear="1" ctrlrange="-2.0 2.0"
+           ctrllimited="true"/>
+  </actuator>
+
+  <sensor>
+    <!-- Truth channels. The scenario degrades these through an
+         ImperfectionProfile before the controller sees them; reading them
+         directly is only legitimate for computing residuals against measured
+         hardware data. -->
+    <jointpos name="shaft_angle" joint="shaft"/>
+    <jointvel name="shaft_rate"  joint="shaft"/>
+    <actuatorfrc name="shaft_torque" actuator="shaft_motor"/>
+  </sensor>
+</mujoco>
