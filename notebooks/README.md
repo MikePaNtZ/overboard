@@ -1,0 +1,45 @@
+# Notebooks
+
+Three notebooks that explain the maths behind the controls work and tell the
+story of getting it wrong along the way.
+
+| | |
+|---|---|
+| `01-equations-of-motion.ipynb` | What kind of plant this is, and why `mgl`'s sign decides everything |
+| `02-closed-loop-control.ipynb` | Inner loop, outer loop, and the traps between them |
+| `03-attitude-estimation.ipynb` | Why the accelerometer lies, and what to do about it |
+
+## They load data, they do not generate it
+
+Each notebook reads archived datasets from `sim/out/experiments/`. Produce them
+first:
+
+```sh
+.venv/bin/python scripts/analyse_control.py     # notebooks 1 and 2
+.venv/bin/python scripts/analyse_estimator.py   # notebook 3
+```
+
+Keeping generation in scripts rather than in the notebooks is deliberate: the
+scripts run in CI's environment, they diff cleanly in review, and a notebook
+that re-runs physics on every open is a notebook nobody opens.
+
+## On the provenance of the numbers
+
+Notebook 3's datasets were captured **during** the estimator work. Notebooks 1
+and 2 read datasets **regenerated afterwards** — the plant and control sweeps
+originally ran in throwaway scripts and only their conclusions were written
+down.
+
+That regeneration is legitimate rather than a reconstruction: every scenario is
+deterministic and seeded, so re-running a configuration reproduces it
+bit-for-bit. They are the same numbers the decisions were made on. Each
+notebook says which it is, because the distinction matters.
+
+## Running them
+
+```sh
+.venv/bin/pip install -r requirements-sim.txt
+.venv/bin/jupyter lab notebooks/
+```
+
+Nothing in CI depends on them.
