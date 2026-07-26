@@ -71,6 +71,8 @@ def git_sha() -> str:
 _MINT = "0.165 0.682 0.592 1"
 _AMBER = "0.949 0.635 0.290 1"
 _CLOUD = "0.957 0.973 0.969 1"
+_AMBER_DK = "0.769 0.408 0.094 1"
+_INK = "0.086 0.137 0.180 1"
 
 
 def rider_geoms(style: str, com_height: float) -> str:
@@ -115,6 +117,7 @@ def rider_geoms(style: str, com_height: float) -> str:
     # Thin limbs, because the reference is a LINE drawing. The first version
     # used 0.055 and read as plumbing.
     LIMB, ARM = 0.032, 0.026
+    hx = -0.04                  # head/torso lean, into the direction of travel
     parts = [
         # feet, fore and aft of the wheel on the two footpads
         g("foot_f", f"-0.27 0 {ankle}", f"-0.15 0 {ankle}", 0.038),
@@ -125,24 +128,66 @@ def rider_geoms(style: str, com_height: float) -> str:
         g("shin_r", f"0.21 0 {ankle}", f"0.17 0 {knee}", LIMB),
         g("thigh_r", f"0.17 0 {knee}", f"0.05 0 {hip}", LIMB),
         # spine, leaning very slightly into the direction of travel
-        g("torso", f"0 0 {hip}", f"-0.04 0 {sh}", 0.052),
-        # arms out and up: a balancing pose, and the bit that gives it character
-        # Kept BELOW head height on purpose: raised arms project straight
-        # across the face from the side camera and the figure loses its head.
-        g("uarm_l", f"-0.03 0.05 {sh}", f"-0.07 0.25 {sh - 0.04}", ARM),
-        g("farm_l", f"-0.07 0.25 {sh - 0.04}", f"-0.05 0.47 {sh + 0.05}", ARM),
-        g("uarm_r", f"-0.03 -0.05 {sh}", f"-0.07 -0.26 {sh - 0.10}", ARM),
-        g("farm_r", f"-0.07 -0.26 {sh - 0.10}", f"-0.04 -0.46 {sh + 0.01}", ARM),
-        # neck
-        g("neck", f"-0.04 0 {sh}", f"-0.04 0 {head - 0.10}", 0.030),
+        g("torso", f"0 0 {hip}", f"{hx} 0 {sh}", 0.052),
+
+        # ARMS RUN FORE AND AFT, along the travel axis -- not across it.
+        # A onewheel stance is sideways: the feet straddle the wheel along the
+        # board's long axis, so the shoulders line up with that axis too and
+        # the arms swing along it. Arms held out square to the direction of
+        # travel is a scooter stance, and nobody rides like that.
+        # Elbows carry a modest bend; enough to read as an arm, not a pose.
+        g("uarm_f", f"{hx-0.06} 0.02 {sh}", f"-0.28 0.09 {sh - 0.13}", ARM),
+        g("farm_f", f"-0.28 0.09 {sh - 0.13}", f"-0.40 0.14 {sh - 0.02}", ARM),
+        g("uarm_r", f"{hx+0.06} -0.02 {sh}", f"0.26 -0.06 {sh - 0.15}", ARM),
+        g("farm_r", f"0.26 -0.06 {sh - 0.15}", f"0.38 -0.02 {sh - 0.05}", ARM),
+
+        g("neck", f"{hx} 0 {sh}", f"{hx} 0 {head - 0.10}", 0.030),
         # head: ~20% of total height, per the landing-page figure
-        f'<geom name="rider_head" type="sphere" size="0.135" pos="-0.04 0 {head}" '
+        f'<geom name="rider_head" type="sphere" size="0.135" pos="{hx} 0 {head}" '
         f'rgba="{_CLOUD}" contype="0" conaffinity="0" group="1"/>',
-        # helmet, because this is a project with a hardware deadman in it
-        f'<geom name="rider_helmet" type="ellipsoid" size="0.150 0.150 0.120" '
-        f'pos="-0.04 0 {head + 0.045}" rgba="{_AMBER}" contype="0" conaffinity="0" '
-        f'group="1"/>',
+
+        # --- helmet: a shell that stops above the brow, plus a peak ---------
+        # Sat high and back so it reads as worn rather than as a bucket over
+        # the whole head; the face has to stay visible or the smile is wasted.
+        f'<geom name="rider_helmet" type="ellipsoid" size="0.147 0.150 0.125" '
+        f'pos="{hx - 0.005} -0.008 {head + 0.052}" rgba="{_AMBER}" '
+        f'contype="0" conaffinity="0" group="1"/>',
+        f'<geom name="rider_peak" type="ellipsoid" size="0.085 0.075 0.016" '
+        f'pos="{hx} 0.105 {head + 0.045}" rgba="{_AMBER_DK}" '
+        f'contype="0" conaffinity="0" group="1"/>',
+
     ]
+
+    # --- face: two eyes and a smile, projected ONTO the head sphere ---------
+    # Cartoonish on purpose. It also does a job: at video scale the face is the
+    # fastest way to see which way the rider is pointing.
+    #
+    # Features are placed by projecting onto the sphere rather than at a fixed
+    # depth. A flat depth buries the middle of an arc inside the head -- which
+    # is exactly what happened to the first smile, and it vanished.
+    import math
+
+    HEAD_R = 0.135
+
+    def on_face(name, dx, dz, size):
+        dy = math.sqrt(max(HEAD_R**2 - dx**2 - dz**2, 1e-6))
+        return (f'<geom name="rider_{name}" type="sphere" size="{size}" '
+                f'pos="{hx + dx:.4f} {dy:.4f} {head + dz:.4f}" rgba="{_INK}" '
+                f'contype="0" conaffinity="0" group="1"/>')
+
+    parts.append(on_face("eye_l", -0.050, 0.020, 0.024))
+    parts.append(on_face("eye_r", 0.050, 0.020, 0.024))
+
+    # Smile: an arc of beads. MuJoCo has no torus and a capsule is straight, so
+    # the curve is sampled -- five beads reads as a grin at video scale.
+    # Six beads over a wider arc. The face is seen at an angle in every camera,
+    # so the far half foreshortens badly -- a narrow mouth reads as a smirk.
+    for i in range(6):
+        a = math.pi * (0.26 + 0.48 * i / 5.0)
+        parts.append(on_face(f"smile{i}",
+                             0.078 * math.cos(a),
+                             -0.030 - 0.042 * math.sin(a),
+                             0.0165))
     return "".join(parts)
 
 
