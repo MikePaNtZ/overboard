@@ -10,6 +10,24 @@ story of getting it wrong along the way.
 | `03-attitude-estimation.ipynb` | Why the accelerometer lies, and what to do about it |
 | `04-estimator-in-the-loop.ipynb` | Bode plots: why an accurate estimator still crashed the board, and the fix |
 
+## Read them without cloning
+
+GitHub renders `.ipynb` natively, so these are readable in the browser with all
+figures:
+
+- [01 · Equations of motion](https://github.com/MikePaNtZ/overboard/blob/master/notebooks/01-equations-of-motion.ipynb)
+- [02 · Closed-loop control](https://github.com/MikePaNtZ/overboard/blob/master/notebooks/02-closed-loop-control.ipynb)
+- [03 · Attitude estimation](https://github.com/MikePaNtZ/overboard/blob/master/notebooks/03-attitude-estimation.ipynb)
+- [04 · Estimator in the loop](https://github.com/MikePaNtZ/overboard/blob/master/notebooks/04-estimator-in-the-loop.ipynb)
+
+**They are committed with their outputs.** That is a deliberate exception to the
+usual "strip outputs before committing" habit: the whole point of these is to be
+*read*, and an unexecuted notebook renders on GitHub as code with no figures at
+all — which is what notebooks 1–3 did until 2026-07-26. The cost is a noisier
+diff; the benefit is that the analysis is legible to someone who will never run
+it. Re-execute before committing a change, or the prose and the plots drift
+apart.
+
 ## They load data, they do not generate it
 
 Each notebook reads archived datasets from `sim/out/experiments/`. Produce them
