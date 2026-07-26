@@ -96,6 +96,15 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: write        # rolling release upload
+    env:
+      # On `pull_request`, `github.sha` is the EPHEMERAL MERGE COMMIT, which
+      # exists in no branch and cannot be checked out. Stamping artifacts with
+      # it makes them untraceable -- the opposite of the point. Every consumer
+      # of a sha in this job wants the head commit, so resolve it once here.
+      ARTIFACT_SHA: >-
+        ${{ github.event_name == 'pull_request'
+            && github.event.pull_request.head.sha
+            || github.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -150,8 +159,8 @@ jobs:
           # the scenario's internal schema.
           pathlib.Path("sim/out/sim-run.json").write_text(json.dumps({
               "schema": 1,
-              "commit": os.environ["GITHUB_SHA"][:7],
-              "commit_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/commit/{os.environ['GITHUB_SHA']}",
+              "commit": os.environ["ARTIFACT_SHA"][:7],
+              "commit_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/commit/{os.environ['ARTIFACT_SHA']}",
               "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
               "scenario": "impulse disturbance response",
               "regime": "open-loop (no controller)",
@@ -169,7 +178,7 @@ jobs:
         with:
           # Scenario-neutral: later increments of the closed-loop epic add
           # test-stand scenarios to the same sim/out/ directory.
-          name: sim-artifacts-${{ github.sha }}
+          name: sim-artifacts-${{ env.ARTIFACT_SHA }}
           path: sim/out/
           retention-days: 30
 
@@ -211,10 +220,9 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.sha }}
           BRANCH: ${{ github.head_ref }}
         run: |
-          short="${SHA:0:7}"
+          short="${ARTIFACT_SHA:0:7}"
           mkdir -p preview
           for f in sim/out/*; do
             [ -f "$f" ] || continue
