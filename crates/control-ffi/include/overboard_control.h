@@ -39,11 +39,27 @@ typedef struct {
      * to the error stays measurable on its own. */
     uint32_t use_estimator;
     float    estimator_tau_s;
-    /* 1 = subtract wheel-odometry forward acceleration from the accelerometer
-     * before deriving tilt. Without it the implied tilt is wrong by
-     * atan(a/g) -- about 5 deg at the outer loop's acceleration limit. */
+    /* Source of the forward-acceleration correction subtracted from the
+     * accelerometer before deriving tilt. Some correction is mandatory:
+     * without one the implied tilt is wrong by atan(a/g) -- about 5 deg at the
+     * outer loop's acceleration limit, correlated with what is being
+     * regulated.
+     *   0 = off             diagnostic only; does not survive the shuttle
+     *   1 = wheel odometry  sees any acceleration, but quantised and lagged;
+     *                       needs estimator_tau_s >= 10 s to be flyable
+     *   2 = command feedforward   predicts a from the commanded current via
+     *                       accel_ff_gain_m_s2_per_a. No lag; blind to slope
+     *                       and slip. Best on the bench. */
     uint32_t estimator_accel_aiding;
-    float    wheel_accel_tau_s;
+    float    wheel_accel_tau_s;          /* mode 1 only */
+    /* Mode 2 only: amps -> m/s^2, standing in for k_t / (r_eff * m).
+     * MEASURE THIS ON THE BENCH. Zero falls back to the ridden-board value. */
+    float    accel_ff_gain_m_s2_per_a;
+    /* Skip the accelerometer correction when the aiding-corrected specific
+     * force is further than this from g, m/s^2. Zero disables the gate.
+     * Buys immunity to shoves the aiding cannot see, at the cost of running
+     * open-loop on the gyro while tripped. */
+    float    accel_trust_band_m_s2;
 } ob_params_v1;
 
 typedef struct {

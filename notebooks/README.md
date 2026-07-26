@@ -1,6 +1,6 @@
 # Notebooks
 
-Three notebooks that explain the maths behind the controls work and tell the
+Four notebooks that explain the maths behind the controls work and tell the
 story of getting it wrong along the way.
 
 | | |
@@ -8,6 +8,7 @@ story of getting it wrong along the way.
 | `01-equations-of-motion.ipynb` | What kind of plant this is, and why `mgl`'s sign decides everything |
 | `02-closed-loop-control.ipynb` | Inner loop, outer loop, and the traps between them |
 | `03-attitude-estimation.ipynb` | Why the accelerometer lies, and what to do about it |
+| `04-estimator-in-the-loop.ipynb` | Bode plots: why an accurate estimator still crashed the board, and the fix |
 
 ## They load data, they do not generate it
 
@@ -17,6 +18,7 @@ first:
 ```sh
 .venv/bin/python scripts/analyse_control.py     # notebooks 1 and 2
 .venv/bin/python scripts/analyse_estimator.py   # notebook 3
+.venv/bin/python scripts/analyse_estimator_phase.py  # notebook 4
 ```
 
 Keeping generation in scripts rather than in the notebooks is deliberate: the
@@ -25,7 +27,12 @@ that re-runs physics on every open is a notebook nobody opens.
 
 ## On the provenance of the numbers
 
-Notebook 3's datasets were captured **during** the estimator work. Notebooks 1
+Notebook 4 is **generated** from `scripts/make_notebook_04.py` rather than
+hand-edited, then executed against the archived data. A notebook is JSON with
+embedded outputs, and hand-merging one is how you get a file that opens but does
+not run; keeping the prose in a diffable `.py` avoids that.
+
+Notebooks 3 and 4's datasets were captured **during** the estimator work. Notebooks 1
 and 2 read datasets **regenerated afterwards** — the plant and control sweeps
 originally ran in throwaway scripts and only their conclusions were written
 down.

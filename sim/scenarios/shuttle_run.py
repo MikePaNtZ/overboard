@@ -41,7 +41,7 @@ import numpy as np
 
 from .imperfections import STAGE0_PLACEHOLDER, ImperfectionProfile, ImperfectionState
 from .impulse_response import KT_NM_PER_A, frame_pitch_rad
-from .plant import MODEL_PATH, build_model, plant_summary
+from .plant import MODEL_PATH, build_model, imu_readings, plant_summary
 
 #: Cruise speed for every leg, m/s. Modest on purpose: the outer loop's pitch
 #: reference is clamped at 5 deg, which caps acceleration at about
@@ -330,7 +330,21 @@ def run(
             rate = imp.gyro(float(data.qvel[4]))
             wheel = imp.wheel_rate(float(data.qvel[6]), t)
 
-            current = imp.apply_current(float(ctl(t, pitch, rate, wheel)))
+            # The RAW IMU, which an estimator needs and the truth-fed pitch
+            # above does not. Omitting these is not a missing feature but a
+            # silent corruption: `RustController.__call__` leaves the
+            # observation's gyro/accel at their initialised ZEROS, so a
+            # complementary filter reads atan2(0, -0) forever and returns a
+            # constant ~180 deg. It still runs, still reports, and still looks
+            # like an estimator that cannot hold the board up -- which is
+            # exactly how it was misread for a while. The impulse scenario has
+            # always passed them; this one did not.
+            true_gyro, true_accel = imu_readings(model, data)
+            current = imp.apply_current(float(ctl(
+                t, pitch, rate, wheel,
+                gyro_rad_s=imp.gyro_vec(true_gyro),
+                accel_m_s2=imp.accel_vec(true_accel),
+            )))
             data.ctrl[0] = current * KT_NM_PER_A
             mujoco.mj_step(model, data)
 

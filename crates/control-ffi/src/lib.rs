@@ -34,8 +34,8 @@
 use board_types::ImuSample;
 use board_types::{Command, Faults, Params, Saturation};
 use control_core::{
-    Attitude, ComplementaryFilter, Estimator, PitchRegulator, PlantCoupling, VelocityLoop,
-    WheelAccelEstimator,
+    Attitude, CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator, PlantCoupling,
+    VelocityLoop, WheelAccelEstimator,
 };
 use safety::Envelope;
 
@@ -99,15 +99,39 @@ pub struct ObParamsV1 {
     pub use_estimator: u32,
     /// Complementary-filter crossover, seconds.
     pub estimator_tau_s: f32,
-    /// 1 = subtract the wheel-odometry forward acceleration from the
-    /// accelerometer before deriving tilt.
+    /// Where the forward-acceleration correction comes from. Subtracting it
+    /// from the accelerometer before deriving tilt is not optional: without
+    /// any correction the implied tilt is wrong by `atan(a/g)` whenever the
+    /// board accelerates — around 5° at the outer loop's limit, the same size
+    /// as the excursion being regulated and correlated with it.
     ///
-    /// Without it the accelerometer's implied tilt is wrong by `atan(a/g)`
-    /// whenever the board accelerates — around 5° at the outer loop's limit,
-    /// the same size as the excursion being regulated and correlated with it.
+    /// - **0 — off.** Diagnostic only; the loop does not survive the shuttle.
+    /// - **1 — wheel odometry.** Differentiates the reported wheel speed.
+    ///   Sees real acceleration whatever causes it, but is quantised and
+    ///   lagged, and the residual it leaves is what destabilised the loop at
+    ///   τ = 1 s. Needs τ ≥ 10 s to be flyable, which costs return accuracy.
+    /// - **2 — command feedforward.** Predicts acceleration from the current
+    ///   just commanded, via `accel_ff_gain_m_s2_per_a`. No lag, no
+    ///   quantisation; blind to slopes and slip. Best on the bench.
+    ///
+    /// See [`control_core::CommandFeedforward`] for the trade in full.
     pub estimator_accel_aiding: u32,
-    /// Low-pass on the wheel-speed derivative, seconds.
+    /// Low-pass on the wheel-speed derivative, seconds. Mode 1 only.
     pub wheel_accel_tau_s: f32,
+    /// Amps → m/s² for mode 2: one fitted constant standing in for
+    /// `k_t / (r_eff · m)`. Zero falls back to the ridden-board value.
+    ///
+    /// **This is a number to measure on the bench, not to trust from a
+    /// datasheet** — it absorbs `k_t`, the loaded rolling radius and the total
+    /// mass including the rider, none of which are known to better than about
+    /// 10% before hardware arrives.
+    pub accel_ff_gain_m_s2_per_a: f32,
+    /// Skip the accelerometer correction when the aiding-corrected specific
+    /// force is further than this from g, m/s². Zero disables the gate.
+    ///
+    /// Buys disturbance immunity at the cost of running open-loop on the gyro
+    /// while tripped, so too narrow a band is worse than none.
+    pub accel_trust_band_m_s2: f32,
 }
 
 /// One cycle of plant state.
@@ -170,6 +194,12 @@ pub struct ObController {
     /// reported but never reaches the regulator.
     estimate_active: bool,
     wheel_accel: Option<WheelAccelEstimator>,
+    /// Mode 2's aiding source. Mutually exclusive with `wheel_accel`.
+    accel_ff: Option<CommandFeedforward>,
+    /// Last current commanded, amps — the feedforward's input. One cycle old
+    /// by construction: it is what we asked for on the previous tick, which is
+    /// what the plant has been acting on since.
+    last_amps: f32,
     outer: Option<VelocityLoop>,
     envelope: Envelope,
     r_eff_m: f32,
@@ -225,7 +255,7 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
     let boxed = Box::new(ObController {
         regulator: PitchRegulator::new(p.kp_a_per_rad, p.kd_a_per_rad_s),
         estimate_active: p.use_estimator == 1,
-        wheel_accel: if p.estimator_accel_aiding != 0 {
+        wheel_accel: if p.estimator_accel_aiding == 1 {
             Some(WheelAccelEstimator::new(if p.wheel_accel_tau_s > 0.0 {
                 p.wheel_accel_tau_s
             } else {
@@ -234,12 +264,28 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
         } else {
             None
         },
+        accel_ff: if p.estimator_accel_aiding == 2 {
+            Some(CommandFeedforward::new(
+                if p.accel_ff_gain_m_s2_per_a > 0.0 {
+                    p.accel_ff_gain_m_s2_per_a
+                } else {
+                    // kt 0.7 N·m/A / (r_eff 0.14605 m × 82.5 kg ridden).
+                    0.0581
+                },
+            ))
+        } else {
+            None
+        },
+        last_amps: 0.0,
         estimator: if p.use_estimator != 0 {
-            Some(ComplementaryFilter::new(if p.estimator_tau_s > 0.0 {
-                p.estimator_tau_s
-            } else {
-                1.0
-            }))
+            Some(ComplementaryFilter::with_trust_band(
+                if p.estimator_tau_s > 0.0 {
+                    p.estimator_tau_s
+                } else {
+                    1.0
+                },
+                p.accel_trust_band_m_s2.max(0.0),
+            ))
         } else {
             None
         },
@@ -330,10 +376,13 @@ pub unsafe extern "C" fn ob_controller_update(
     };
     ctl.last_t_ns = Some(o.t_ns);
 
-    // Forward acceleration from wheel odometry, for aiding the accelerometer.
-    let aiding = match ctl.wheel_accel.as_mut() {
-        Some(w) => w.update(o.wheel_rate_rad_s * ctl.r_eff_m, dt_s),
-        None => 0.0,
+    // Forward acceleration, for aiding the accelerometer. Measured from wheel
+    // odometry, or predicted from the last command -- see the mode notes on
+    // `estimator_accel_aiding`. At most one is Some.
+    let aiding = match (ctl.wheel_accel.as_mut(), ctl.accel_ff.as_ref()) {
+        (Some(w), _) => w.update(o.wheel_rate_rad_s * ctl.r_eff_m, dt_s),
+        (None, Some(ff)) => ff.predict(ctl.last_amps),
+        (None, None) => 0.0,
     };
 
     // Attitude: fused from the raw IMU, or truth straight off the observation.
@@ -385,6 +434,11 @@ pub unsafe extern "C" fn ob_controller_update(
     cmd.pitch_ref_rad = pitch_ref;
     cmd.pitch_used_rad = attitude.pitch_rad;
     ctl.last_saturated = sat == Saturation::Yes;
+    // The POST-envelope current, not the regulator's proposal: the plant only
+    // ever sees the clamped value, so feeding the proposal to the feedforward
+    // would over-predict acceleration for exactly as long as the loop is
+    // saturated -- which is when the attitude estimate matters most.
+    ctl.last_amps = cmd.amps;
     OB_OK
 }
 
@@ -407,6 +461,8 @@ mod tests {
             estimator_tau_s: 1.0,
             estimator_accel_aiding: 0,
             wheel_accel_tau_s: 0.05,
+            accel_ff_gain_m_s2_per_a: 0.0,
+            accel_trust_band_m_s2: 0.0,
         }
     }
 
