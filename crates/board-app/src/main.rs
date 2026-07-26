@@ -1,15 +1,16 @@
-//! `board-app` wires `control-core` + `safety` to a `hal::BoardIo` backend
-//! and runs a fixed-step loop.
+//! `board-app` wires `control-core` + `safety` to a `hal` backend and runs the
+//! ICD §5.2 control loop.
 //!
 //! Today both `--backend sim` and `--backend null` map to the same
-//! `sim-backend` stub (synthetic zeros, incrementing clock) — MuJoCo FFI and
-//! a real hardware backend are future milestones (see `sim-backend`'s
-//! module docs and TODOs). This binary exists to prove the seam (`hal`) and
-//! the wiring (control-core -> safety -> backend) end-to-end.
+//! `sim-backend` stub, which advances a synthetic clock rather than stepping
+//! MuJoCo — the FFI backend and a real hardware backend are later increments.
+//! This binary exists to prove the seam and the wiring end to end:
+//! observe → compute → clamp → apply, with `wait_observe()` the only call that
+//! advances time.
 
 use board_types::Params;
 use control_core::Controller;
-use hal::BoardIo;
+use hal::{BoardActuate, BoardObserve};
 use safety::Envelope;
 use sim_backend::SimBackend;
 use std::process::ExitCode;
@@ -86,24 +87,81 @@ fn main() -> ExitCode {
         args.backend, args.cycles
     );
 
+    // Placeholder limits so the clamp stages have something to enforce. Real
+    // values are a Stage-0 output; these exist only so the envelope is not
+    // trivially inert while the plant is still a stub.
+    let params = Params {
+        max_current_a: 40.0,
+        max_abs_pitch_rad: 0.5,
+        ..Params::default()
+    };
+
     // Both "sim" and "null" currently resolve to the same stub backend.
-    let mut backend = SimBackend::new();
-    let mut controller = Controller::new(Params::default());
-    let mut envelope = Envelope::new(Params::default());
+    let mut backend = SimBackend::with_params(params);
+    let mut controller = Controller::new(params);
+    let mut envelope = Envelope::new(params);
+
+    if let Err(e) = backend.open() {
+        eprintln!("error: backend open failed: {e:?}");
+        return ExitCode::FAILURE;
+    }
+
+    // The disarm handle is deliberately held for the whole run: it is the
+    // capability a watchdog or panic hook would use, and dropping it here
+    // would throw away the only safe-state path (ICD §9.2).
+    let _disarm = match backend.arm() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: backend arm failed: {e:?}");
+            return ExitCode::FAILURE;
+        }
+    };
     envelope.arm();
 
-    let mut cmd = board_types::Command::ZERO;
+    // The ICD §5.2 loop, in order: observe (advances time) -> compute (pure)
+    // -> apply (enqueues, does not advance time).
     for i in 0..args.cycles {
-        let obs = backend.cycle(&cmd);
-        let raw_cmd = controller.step(&obs);
-        cmd = envelope.apply(raw_cmd, board_types::Faults(obs.fault_word));
+        let obs = match backend.wait_observe() {
+            Ok(obs) => obs,
+            // Transient means skip this cycle and keep running; Fatal and a
+            // protocol violation both end the run.
+            Err(board_types::IoError::Transient) => continue,
+            Err(e) => {
+                eprintln!("error: wait_observe failed at cycle {i}: {e:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let proposed = controller.update(&obs);
+        let (cmd, envelope_saturated) =
+            envelope.apply(proposed, board_types::Faults(obs.fault_word));
+
+        let applied = match backend.apply(&cmd) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("error: apply failed at cycle {i}: {e:?}");
+                return ExitCode::FAILURE;
+            }
+        };
 
         if i % 20 == 0 || i == args.cycles.saturating_sub(1) {
             println!(
-                "heartbeat: cycle={} t_ns={} applied_current={:.3}A",
-                obs.cycle, obs.timestamp_ns, obs.applied_current.0
+                "heartbeat: cycle={} t_recv_ns={} imu_samples={} measured={:.3}A \
+                 commanded={:?} sat={:?}/{:?}",
+                obs.cycle,
+                obs.t_recv_ns,
+                obs.imu_count,
+                obs.motor_current_a,
+                applied.commanded,
+                envelope_saturated,
+                applied.saturated,
             );
         }
+    }
+
+    if let Err(e) = backend.close() {
+        eprintln!("error: backend close failed: {e:?}");
+        return ExitCode::FAILURE;
     }
 
     println!(

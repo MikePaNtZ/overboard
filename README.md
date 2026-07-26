@@ -90,10 +90,10 @@ correctness one.
 ## Layout
 
 - `crates/board-types` -- shared types (`Command`, `Observation`, `Faults`, `Params`), `no_std`-friendly.
-- `crates/hal` -- the `BoardIo` seam between control-core and a backend (sim or hardware).
+- `crates/hal` -- the `BoardObserve` / `BoardActuate` seam between control-core and a backend (sim or hardware).
 - `crates/control-core` -- pure/deterministic control logic (stub: zero command for now).
 - `crates/safety` -- pure safety envelope (stub: arm/disarm passthrough).
-- `crates/sim-backend` -- `hal::BoardIo` backend (stub today; MuJoCo FFI is the next milestone).
+- `crates/sim-backend` -- `hal` backend (stub today; MuJoCo FFI is the next increment).
 - `crates/board-app` -- the binary that wires it all together.
 - `sim/models` -- MuJoCo MJCF models (the shared physics asset). The onewheel's
   visual shells are imported from [Openwheel](https://github.com/bytesizedengineering/Openwheel)
