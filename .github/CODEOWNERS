@@ -1,0 +1,102 @@
+# CODEOWNERS — path ownership map for the Overboard org
+#
+# STATUS: PROPOSED. See docs/decisions/ADR-0002-path-ownership-map.md and the
+# Escalations row it names. This file is the current working assumption; a role
+# that disagrees with a boundary files a row rather than editing around it.
+#
+# GitHub CODEOWNERS can only name real accounts, and this org has exactly one
+# human. So @MikePaNtZ is the reviewer on every rule, and the ROLE is carried in
+# the `# role:` tag above each block. Those tags are the authoritative map that
+# the `policy` CI job parses and that the "do not edit paths another role owns"
+# rule refers to. Do not remove them.
+#
+# Known roles (the policy check rejects any other value):
+#   CEO, COO, CMO, Sr. Mechanical & Systems, Senior Controls,
+#   Digital Content Production
+#
+# Last matching pattern wins, so specific rules go BELOW general ones.
+
+# --------------------------------------------------------------------------
+# Default. Anything not explicitly claimed belongs to the CEO, which is the
+# right default because unclaimed territory is a scoping question, not a
+# technical one.
+# --------------------------------------------------------------------------
+# role: CEO
+*                               @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# Project rules, public front door, and the licence. Public claims and the
+# licence are one-way doors; both stay with the CEO.
+# --------------------------------------------------------------------------
+# role: CEO
+/README.md                      @MikePaNtZ
+# role: CEO
+/CLAUDE.md                      @MikePaNtZ
+# role: CEO
+/LICENSE                        @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# Cross-role operations: the decision record, the escalation machinery, and CI.
+# --------------------------------------------------------------------------
+# role: COO
+/.github/                       @MikePaNtZ
+# role: COO
+/docs/                          @MikePaNtZ
+# role: COO
+/docs/decisions/                @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# The control law and the Rust workspace it lives in.
+# --------------------------------------------------------------------------
+# role: Senior Controls
+/crates/                        @MikePaNtZ
+# role: Senior Controls
+/Cargo.toml                     @MikePaNtZ
+# role: Senior Controls
+/Cargo.lock                     @MikePaNtZ
+# role: Senior Controls
+/rust-toolchain.toml            @MikePaNtZ
+# role: Senior Controls
+/notebooks/                     @MikePaNtZ
+# role: Senior Controls
+/tests/                         @MikePaNtZ
+# role: Senior Controls
+/sim/                           @MikePaNtZ
+# role: Senior Controls
+/scripts/                       @MikePaNtZ
+# role: Senior Controls
+/requirements-sim.txt           @MikePaNtZ
+# role: Senior Controls
+/docs/sim-impulse-response.md   @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# Plant models, the bench rig, and the sim-to-hardware fidelity contract.
+# Per the Sr. Mechanical & Systems handoff: this role owns where model numbers
+# come from and which are measured versus asserted. The control law is NOT
+# owned here, which is why the split runs through sim/ rather than around it.
+# --------------------------------------------------------------------------
+# role: Sr. Mechanical & Systems
+/sim/models/                    @MikePaNtZ
+# role: Sr. Mechanical & Systems
+/sim/scenarios/bench_*.py       @MikePaNtZ
+# role: Sr. Mechanical & Systems
+/tests/test_bench_*.py          @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# Renders and published media. Per the Digital Content Production handoff this
+# role does NOT own the landing page's markup or CSS — that lives in the
+# overboard-web repo under a separate session.
+# --------------------------------------------------------------------------
+# role: Digital Content Production
+/scripts/render_scenario.py     @MikePaNtZ
+# role: Digital Content Production
+/docs/web-artifact-pipeline.md  @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# UNRESOLVED — flagged, not assigned.
+#
+# /overboard-logo.html is a brand asset sitting in a controls-only repo, which
+# the project rules say should not happen (brand lives in overboard-web). It
+# falls to the CEO default above until the CMO and CEO settle where it goes.
+# Raised in ADR-0002; not moved here, because moving it is CMO turf.
+# --------------------------------------------------------------------------
