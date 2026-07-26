@@ -62,7 +62,62 @@ def git_sha() -> str:
         return "unknown"
 
 
-def build_model(ballast_mass: float, ballast_height: float, clamp_a: float):
+#: Rider-proxy colours. Deliberately flat and unlifelike -- see `rider_geoms`.
+_SUIT = "0.129 0.208 0.259 0.92"
+_SKIN = "0.949 0.635 0.290 0.92"
+
+
+def rider_geoms(style: str, com_height: float) -> str:
+    """Visual-only geometry for the rider proxy, in the ballast body's frame.
+
+    **This changes no physics.** The ballast body carries an explicit
+    `<inertial>`, so geoms contribute no mass whatever their shape, and every
+    geom here is `contype=0 conaffinity=0`, so none of them collide. Adding
+    them leaves the metrics bit-identical, which the caller asserts.
+
+    On the choice of a stylised mannequin over a realistic human mesh: the
+    model has **no rider dynamics at all**. This is a rigid lump bolted to the
+    frame -- it does not articulate, shift weight, or absorb anything at the
+    ankles and knees, which is most of what a real rider does. A photoreal
+    figure in a clip that gets shared would imply a fidelity the physics does
+    not have. A mannequin reads as *proxy* rather than *simulated rider*, which
+    is the honest signal, and it costs no third-party asset or licence in a
+    repo that has an unresolved licensing gap already (SR-OSS-1).
+
+    Geometry is posed for a onewheel stance: feet fore and aft of the wheel,
+    knees bent, body facing across the direction of travel.
+    """
+    if style == "sphere":
+        return (f'<geom name="rider_mass" type="sphere" size="0.12" '
+                f'rgba="{_SKIN}" contype="0" conaffinity="0" group="1"/>')
+
+    # Deck is at the axle, which is `com_height` below this body's origin.
+    deck = -com_height
+    hip = deck + 0.46          # knees bent; a onewheel stance is a crouch
+    sh = hip + 0.46            # shoulder
+    g = lambda n, kind, frm, to, r, c: (  # noqa: E731
+        f'<geom name="rider_{n}" type="{kind}" fromto="{frm} {to}" size="{r}" '
+        f'rgba="{c}" contype="0" conaffinity="0" group="1"/>'
+    )
+    parts = [
+        # legs: feet fore/aft of the wheel, splayed out to the footpads
+        g("shin_f", "capsule", f"-0.20 0 {deck+0.02}", f"-0.09 0 {hip-0.02}", 0.055, _SUIT),
+        g("shin_r", "capsule", f"0.20 0 {deck+0.02}", f"0.09 0 {hip-0.02}", 0.055, _SUIT),
+        g("foot_f", "capsule", f"-0.26 0 {deck+0.02}", f"-0.14 0 {deck+0.02}", 0.045, _SUIT),
+        g("foot_r", "capsule", f"0.14 0 {deck+0.02}", f"0.26 0 {deck+0.02}", 0.045, _SUIT),
+        # torso, leaning very slightly forward as a rider does
+        g("torso", "capsule", f"0 0 {hip}", f"-0.03 0 {sh}", 0.105, _SUIT),
+        # arms out for balance, across the board's long axis
+        g("arm_l", "capsule", f"-0.02 0.10 {sh-0.02}", f"-0.16 0.34 {sh-0.16}", 0.042, _SUIT),
+        g("arm_r", "capsule", f"-0.02 -0.10 {sh-0.02}", f"-0.16 -0.34 {sh-0.16}", 0.042, _SUIT),
+        f'<geom name="rider_head" type="sphere" size="0.095" pos="-0.03 0 {sh+0.15}" '
+        f'rgba="{_SKIN}" contype="0" conaffinity="0" group="1"/>',
+    ]
+    return "".join(parts)
+
+
+def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
+                rider_style: str = "figure"):
     """The stock model, optionally with a rigid rider-proxy mass above the axle.
 
     A rigid ballast is NOT a rider: a real one is compliant at the ankles and
@@ -88,16 +143,17 @@ def build_model(ballast_mass: float, ballast_height: float, clamp_a: float):
             f'<inertial pos="0 0 0" mass="{ballast_mass}" '
             f'diaginertia="{ballast_mass * 0.15:.4f} {ballast_mass * 0.15:.4f} '
             f'{ballast_mass * 0.08:.4f}"/>'
-            f'<geom name="ballast_viz" type="sphere" size="0.12" '
-            f'rgba="0.949 0.635 0.290 0.45" contype="0" conaffinity="0" group="1"/>'
-            f'</body>\n'
+            + rider_geoms(rider_style, ballast_height)
+            + f'</body>\n'
         )
         xml = xml.replace('      <site name="imu"', body + '      <site name="imu"', 1)
         # Widen the field of view. The cameras are framed for a 0.3 m-tall
         # board; a ballast 0.75 m above the axle falls outside them, and a clip
         # that crops out the mass whose whole point is being there is worse
         # than no clip.
-        xml = xml.replace('fovy="26"', 'fovy="52"').replace('fovy="24"', 'fovy="50"')
+        # 50 deg chosen by sweeping the render, not derived: it is the widest
+        # framing that still keeps the board readable under the rider.
+        xml = xml.replace('fovy="26"', 'fovy="50"').replace('fovy="24"', 'fovy="48"')
 
     # Load from a string with the meshes supplied in-memory, rather than
     # writing a temporary MJCF next to the real one. A temp file in the model
@@ -167,12 +223,15 @@ def main() -> int:
     ap.add_argument("--impulse", type=float, default=NOMINAL_IMPULSE_NS)
     ap.add_argument("--seconds", type=float, default=6.0)
     ap.add_argument("--camera", default="beauty", choices=("beauty", "side"))
+    ap.add_argument("--rider-style", default="figure", choices=("figure", "sphere"),
+                    help="visual proxy for the ballast; changes no physics")
     ap.add_argument("--render", action="store_true", help="film it")
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    model = build_model(args.ballast_mass, args.ballast_height, args.clamp_a)
+    model = build_model(args.ballast_mass, args.ballast_height, args.clamp_a,
+                        args.rider_style)
     plant = plant_summary(model)
 
     ra, a = one_run(model, args.kp, args.kd, args.clamp_a, args.impulse, args.seconds)
@@ -216,8 +275,11 @@ def main() -> int:
 
         try:
             if rb is not None:
-                frames = render_comparison(ra, rb, args.camera,
-                                           top_label=tag(a), bottom_label=tag(b), model=model)
+                # Side-by-side once a rider is aboard: the subject is then
+                # taller than it is wide, and full-height panes frame it.
+                frames = render_comparison(
+                    ra, rb, args.camera, top_label=tag(a), bottom_label=tag(b),
+                    model=model, layout="h" if args.ballast_mass > 0 else "v")
             else:
                 frames = render_frames(ra, args.camera)
         except Exception as exc:

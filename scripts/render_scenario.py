@@ -202,7 +202,8 @@ def render_frames(result: ImpulseResult, camera: str) -> list[np.ndarray]:
 PANE_H = HEIGHT // 2
 
 
-def _pane_label(frame: np.ndarray, title: str, subtitle: str, colour) -> np.ndarray:
+def _pane_label(frame: np.ndarray, title: str, subtitle: str, colour,
+                width: int = WIDTH) -> np.ndarray:
     """Label one pane of the comparison. Deliberately not the full HUD.
 
     The HUD is laid out for a 720-high frame; shrinking it to fit a pane makes
@@ -215,9 +216,15 @@ def _pane_label(frame: np.ndarray, title: str, subtitle: str, colour) -> np.ndar
     d = ImageDraw.Draw(img, "RGBA")
     f_title, f_sub = _font(26), _font(17)
 
-    d.rectangle([0, 0, WIDTH, 44], fill=(*INK, 205))
-    d.text((22, 9), title, font=f_title, fill=colour)
-    d.text((22 + d.textlength(title, font=f_title) + 18, 16), subtitle, font=f_sub, fill=CLOUD)
+    d.rectangle([0, 0, width, 44], fill=(*INK, 205))
+    d.text((18, 9), title, font=f_title, fill=colour)
+    # Subtitle drops to a second line if the pane is too narrow to hold both.
+    tw = d.textlength(title, font=f_title)
+    if 18 + tw + 14 + d.textlength(subtitle, font=f_sub) < width - 10:
+        d.text((18 + tw + 14, 16), subtitle, font=f_sub, fill=CLOUD)
+    else:
+        d.rectangle([0, 44, width, 72], fill=(*INK, 175))
+        d.text((18, 49), subtitle, font=f_sub, fill=CLOUD)
     return np.asarray(img)
 
 
@@ -228,6 +235,7 @@ def render_comparison(
     top_label: str = "OPEN LOOP",
     bottom_label: str = "CLOSED LOOP",
     model=None,
+    layout: str = "v",
 ) -> list[np.ndarray]:
     """Two panes, same disturbance: uncontrolled above, controlled below.
 
@@ -250,7 +258,13 @@ def render_comparison(
     stride = max(1, int(round((1.0 / FPS) / dt)))
     n = max(len(open_loop.t), len(closed.t))
 
-    renderer = mujoco.Renderer(model, height=PANE_H, width=WIDTH)
+    # A tall subject (a board with a rider on it) does not fit a 360-high
+    # pane: fovy is the VERTICAL field of view, so a short pane can only frame
+    # a tall thing by zooming out until it is too small to read. Side-by-side
+    # panes are full height, which is the right layout the moment the subject
+    # is taller than it is wide.
+    pane_w, pane_h = ((WIDTH, PANE_H) if layout == "v" else (WIDTH // 2, HEIGHT))
+    renderer = mujoco.Renderer(model, height=pane_h, width=pane_w)
     data = mujoco.MjData(model)
     try:
         scene_opt = mujoco.MjvOption()
@@ -265,13 +279,14 @@ def render_comparison(
                 f"pitch {float(result.pitch_deg[j]):+6.2f}°   "
                 f"travel {float(result.travel_m[j]):+5.2f} m"
             )
-            return _pane_label(renderer.render().copy(), title, sub, colour)
+            return _pane_label(renderer.render().copy(), title, sub, colour, width=pane_w)
 
         frames = []
         for i in range(0, n, stride):
             top = pane(open_loop, i, top_label, AMBER)
             bottom = pane(closed, i, bottom_label, MINT)
-            frames.append(np.vstack([top, bottom]))
+            frames.append(np.vstack([top, bottom]) if layout == "v"
+                          else np.hstack([top, bottom]))
         return frames
     finally:
         renderer.close()
