@@ -5,7 +5,136 @@
 //! fuzzed with no backend in the loop.
 #![no_std]
 
-use board_types::{Command, Observation, Params};
+use board_types::{Command, ImuSample, Observation, Params};
+
+/// A pitch estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Attitude {
+    /// Nose-up positive, radians (ICD §10.1).
+    pub pitch_rad: f32,
+    pub pitch_rate_rad_s: f32,
+}
+
+/// Turns raw inertial samples into an attitude.
+///
+/// Behind a trait so the ESKF can replace the complementary filter for the
+/// free-board phase without touching the control law, and so the acceptance
+/// criteria are stated on the **interface** — a pitch-error bound — rather than
+/// on any particular algorithm. SR-CTRL-4 was amended for exactly this reason:
+/// a requirement that names an algorithm cannot be met by a better one.
+pub trait Estimator {
+    /// Consume **every** sample since the last cycle, oldest first (DR-CTRL-2).
+    ///
+    /// Sub-sampling a ≥1 kHz IMU at a 500 Hz loop aliases the estimator's
+    /// primary input, so taking only the newest is a defect rather than an
+    /// optimisation.
+    fn update(&mut self, samples: &[ImuSample]) -> Attitude;
+    fn reset(&mut self);
+}
+
+/// Complementary filter: high-pass the gyro, low-pass the accelerometer.
+///
+/// ```text
+/// θ̂ = α(θ̂ + ω·dt) + (1−α)·θ_accel,    α = τ/(τ + dt)
+/// ```
+///
+/// # Why the accelerometer is only trusted slowly
+///
+/// It measures **specific force**, so under longitudinal acceleration `a` the
+/// tilt it implies is wrong by `atan(a/g)`. The outer loop's 5° reference clamp
+/// permits about 0.86 m/s², which is roughly **5° of apparent tilt error** —
+/// the same size as the excursion being regulated, and *correlated with it*
+/// rather than random. So the accelerometer is believed only about which way is
+/// down on average over seconds; everything faster comes from the gyro.
+///
+/// # Choosing τ
+///
+/// Gyro bias `b` leaves a steady-state error of `b·τ`, so a long τ trades
+/// bias error for acceleration rejection. At the ICD §12 placeholder bias of
+/// 0.002 rad/s: τ = 1 s costs 0.11°, τ = 5 s costs 0.57° and would blow the
+/// 0.5° RMS budget on bias alone.
+///
+/// **No bias estimator in v1** — at 0.11° against a 0.5° budget it would be
+/// solving a problem that is not binding, while adding an integrator that
+/// interacts with the accel corruption in ways worth measuring separately.
+#[derive(Debug, Clone, Copy)]
+pub struct ComplementaryFilter {
+    tau_s: f32,
+    pitch_rad: f32,
+    pitch_rate_rad_s: f32,
+    last_t_ns: Option<u64>,
+    initialised: bool,
+}
+
+impl ComplementaryFilter {
+    pub const fn new(tau_s: f32) -> Self {
+        ComplementaryFilter {
+            tau_s,
+            pitch_rad: 0.0,
+            pitch_rate_rad_s: 0.0,
+            last_t_ns: None,
+            initialised: false,
+        }
+    }
+
+    /// Tilt implied by gravity alone, nose-up positive.
+    ///
+    /// Derivation, not assumption: with θ nose-up about +Y, gravity in the body
+    /// frame is `(g·sinθ, 0, −g·cosθ)`, so `θ = atan2(a_x, −a_z)`. Checked
+    /// against the sim rather than trusted.
+    fn accel_pitch(accel: [f32; 3]) -> f32 {
+        libm::atan2f(accel[0], -accel[2])
+    }
+}
+
+impl Estimator for ComplementaryFilter {
+    fn update(&mut self, samples: &[ImuSample]) -> Attitude {
+        for s in samples {
+            let theta_accel = Self::accel_pitch(s.accel_m_s2);
+
+            // First sample: snap to the accelerometer rather than starting at
+            // zero. Starting at zero and filtering in would take ~τ to become
+            // correct, and the controller would be acting on a known-wrong
+            // attitude for the whole of it.
+            if !self.initialised {
+                self.pitch_rad = theta_accel;
+                self.initialised = true;
+                self.last_t_ns = Some(s.t_sample_ns);
+                self.pitch_rate_rad_s = s.gyro_rad_s[1];
+                continue;
+            }
+
+            // dt from the sample's own timestamp, never assumed (ICD §5.2).
+            let dt = match self.last_t_ns {
+                Some(prev) => s.t_sample_ns.saturating_sub(prev) as f32 * 1e-9,
+                None => 0.0,
+            };
+            self.last_t_ns = Some(s.t_sample_ns);
+
+            // gyro[1] IS the nose-up pitch rate (ICD §10.1) — no flip.
+            self.pitch_rate_rad_s = s.gyro_rad_s[1];
+
+            if dt <= 0.0 {
+                continue;
+            }
+            let alpha = self.tau_s / (self.tau_s + dt);
+            let predicted = self.pitch_rad + self.pitch_rate_rad_s * dt;
+            self.pitch_rad = alpha * predicted + (1.0 - alpha) * theta_accel;
+        }
+
+        Attitude {
+            pitch_rad: self.pitch_rad,
+            pitch_rate_rad_s: self.pitch_rate_rad_s,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.pitch_rad = 0.0;
+        self.pitch_rate_rad_s = 0.0;
+        self.last_t_ns = None;
+        self.initialised = false;
+    }
+}
 
 /// Inner-loop pitch regulator — the balance law itself.
 ///
@@ -345,6 +474,181 @@ mod tests {
         // save in the wrong direction.
         let r = PitchRegulator::new(KP, KD);
         assert_eq!(r.update(0.07, 0.3, 0.0), -r.update(-0.07, -0.3, 0.0));
+    }
+
+    // ---- ComplementaryFilter --------------------------------------------
+
+    const G: f32 = 9.81;
+
+    fn sample(t_ns: u64, pitch: f32, rate: f32) -> ImuSample {
+        // Gravity in the body frame at pitch theta: (g sin, 0, -g cos).
+        ImuSample {
+            gyro_rad_s: [0.0, rate, 0.0],
+            accel_m_s2: [G * libm::sinf(pitch), 0.0, -G * libm::cosf(pitch)],
+            t_sample_ns: t_ns,
+        }
+    }
+
+    #[test]
+    fn a_level_board_reads_level() {
+        let mut f = ComplementaryFilter::new(1.0);
+        let a = f.update(&[sample(0, 0.0, 0.0)]);
+        assert!(a.pitch_rad.abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_accelerometer_sign_matches_the_icd_convention() {
+        // Nose UP must read POSITIVE. Getting this backwards inverts the whole
+        // balance law, which is the defect class the ICD calls most dangerous.
+        let mut f = ComplementaryFilter::new(1.0);
+        let up = f.update(&[sample(0, 0.15, 0.0)]);
+        assert!(up.pitch_rad > 0.1, "nose-up read {}", up.pitch_rad);
+
+        let mut g = ComplementaryFilter::new(1.0);
+        let down = g.update(&[sample(0, -0.15, 0.0)]);
+        assert!(down.pitch_rad < -0.1, "nose-down read {}", down.pitch_rad);
+    }
+
+    #[test]
+    fn it_initialises_from_the_accelerometer_rather_than_from_zero() {
+        // Starting at zero and filtering in would leave the controller acting
+        // on a known-wrong attitude for about tau.
+        let mut f = ComplementaryFilter::new(5.0);
+        let a = f.update(&[sample(0, 0.20, 0.0)]);
+        assert!(
+            (a.pitch_rad - 0.20).abs() < 1e-3,
+            "snapped to {}",
+            a.pitch_rad
+        );
+    }
+
+    #[test]
+    fn the_gyro_is_passed_through_as_the_rate() {
+        let mut f = ComplementaryFilter::new(1.0);
+        f.update(&[sample(0, 0.0, 0.0)]);
+        let a = f.update(&[sample(2_000_000, 0.0, 0.37)]);
+        assert_eq!(a.pitch_rate_rad_s, 0.37);
+    }
+
+    #[test]
+    fn it_tracks_a_steady_rotation_using_the_gyro() {
+        // 0.5 rad/s for 1 s, with a consistent accelerometer. Should end near
+        // 0.5 rad -- the gyro carries it, the accel confirms it.
+        let mut f = ComplementaryFilter::new(1.0);
+        let (dt_ns, dt) = (2_000_000u64, 0.002f32);
+        let mut theta = 0.0f32;
+        f.update(&[sample(0, theta, 0.5)]);
+        for k in 1..=500 {
+            theta += 0.5 * dt;
+            f.update(&[sample(k * dt_ns, theta, 0.5)]);
+        }
+        let a = f.update(&[sample(501 * dt_ns, theta, 0.5)]);
+        assert!(
+            (a.pitch_rad - theta).abs() < 0.02,
+            "got {} want {theta}",
+            a.pitch_rad
+        );
+    }
+
+    #[test]
+    fn gyro_only_drift_is_pulled_out_by_the_accelerometer() {
+        // A biased gyro on a stationary, level board. Integrating alone would
+        // ramp without bound; the accelerometer must hold it near zero.
+        let mut f = ComplementaryFilter::new(1.0);
+        let bias = 0.05f32; // rad/s, deliberately large
+        let dt_ns = 2_000_000u64;
+        let mut last = 0.0;
+        for k in 0..5_000 {
+            let mut s = sample(k * dt_ns, 0.0, bias);
+            s.gyro_rad_s[1] = bias;
+            last = f.update(&[s]).pitch_rad;
+        }
+        // Steady state is bias*tau, NOT unbounded: 0.05 * 1.0 = 0.05 rad.
+        assert!(last < 0.08, "drifted to {last}");
+        assert!(
+            last > 0.02,
+            "expected the predicted bias*tau offset, got {last}"
+        );
+    }
+
+    #[test]
+    fn a_longer_tau_leaves_a_proportionally_larger_bias_error() {
+        // The trade the design doc states, asserted rather than described.
+        let bias = 0.05f32;
+        let dt_ns = 2_000_000u64;
+        let settle = |tau: f32| {
+            let mut f = ComplementaryFilter::new(tau);
+            let mut last = 0.0;
+            for k in 0..20_000 {
+                let mut s = sample(k * dt_ns, 0.0, bias);
+                s.gyro_rad_s[1] = bias;
+                last = f.update(&[s]).pitch_rad;
+            }
+            last
+        };
+        let (short, long) = (settle(0.5), settle(2.0));
+        assert!(
+            long > short * 2.0,
+            "tau=2 gave {long}, tau=0.5 gave {short}"
+        );
+    }
+
+    #[test]
+    fn it_consumes_every_sample_in_a_batch() {
+        // DR-CTRL-2, stated as the aliasing case it actually is.
+        //
+        // A CONSTANT rate would not catch this: dt comes from each sample's own
+        // timestamp, so integrating one 2 ms step or four 0.5 ms steps gives
+        // the same total, and a filter that dropped samples would still pass.
+        // The batch matters when the rate VARIES inside the cycle -- here all
+        // the motion happens in the first sub-sample and the board is still by
+        // the last, so taking only the newest sees no rotation at all.
+        let dt_ns = 500_000u64;
+        let rates = [4.0f32, 0.0, 0.0, 0.0];
+        let batch: [ImuSample; 4] = core::array::from_fn(|i| {
+            let mut s = sample((i as u64 + 1) * dt_ns, 0.0, rates[i]);
+            s.gyro_rad_s[1] = rates[i];
+            s
+        });
+
+        // tau large so the accelerometer does not immediately pull it back --
+        // this is a test about integration, not about fusion.
+        let mut all = ComplementaryFilter::new(1000.0);
+        all.update(&[sample(0, 0.0, 0.0)]);
+        let a = all.update(&batch);
+
+        let mut newest = ComplementaryFilter::new(1000.0);
+        newest.update(&[sample(0, 0.0, 0.0)]);
+        let b = newest.update(&batch[3..]);
+
+        // Truth: 4 rad/s for 0.5 ms = 2 mrad. Newest-only sees rate 0.
+        assert!(
+            (a.pitch_rad - 0.002).abs() < 2e-4,
+            "batch integrated {}",
+            a.pitch_rad
+        );
+        assert!(
+            b.pitch_rad.abs() < 1e-4,
+            "newest-only should see no rotation, got {}",
+            b.pitch_rad
+        );
+    }
+
+    #[test]
+    fn an_empty_batch_holds_the_last_estimate() {
+        let mut f = ComplementaryFilter::new(1.0);
+        let a = f.update(&[sample(0, 0.1, 0.0)]);
+        let b = f.update(&[]);
+        assert_eq!(a.pitch_rad, b.pitch_rad);
+    }
+
+    #[test]
+    fn reset_clears_the_estimate() {
+        let mut f = ComplementaryFilter::new(1.0);
+        f.update(&[sample(0, 0.2, 0.1)]);
+        f.reset();
+        let a = f.update(&[sample(0, 0.0, 0.0)]);
+        assert!(a.pitch_rad.abs() < 1e-5);
     }
 
     // ---- VelocityLoop ---------------------------------------------------

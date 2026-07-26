@@ -31,8 +31,11 @@
 //! honoured on the *scenario* side, which applies a command one step after the
 //! state that produced it.
 
+use board_types::ImuSample;
 use board_types::{Command, Faults, Params, Saturation};
-use control_core::{PitchRegulator, PlantCoupling, VelocityLoop};
+use control_core::{
+    Attitude, ComplementaryFilter, Estimator, PitchRegulator, PlantCoupling, VelocityLoop,
+};
 use safety::Envelope;
 
 /// Bumped only for an incompatible change to the *function* signatures.
@@ -75,6 +78,26 @@ pub struct ObParamsV1 {
     /// genuinely inverts between them, and getting it wrong makes the outer
     /// loop positive feedback. See `control_core::PlantCoupling`.
     pub com_above_axle: u32,
+
+    // --- estimator -------------------------------------------------------
+    /// 0 = off (regulate on the observation's `pitch_rad`), 1 = active
+    /// (regulate on the fused estimate), **2 = shadow** (fuse and report, but
+    /// still regulate on `pitch_rad`).
+    ///
+    /// Shadow mirrors ICD §6.6's shadow mode for the ridden board, and exists
+    /// for the same reason: it measures what the estimator WOULD have done
+    /// without letting it affect the outcome. Without it, estimator accuracy
+    /// and closed-loop stability can only be measured together, and a filter
+    /// that is accurate but destabilising looks identical to one that is
+    /// simply inaccurate.
+    ///
+    /// The truth path is kept deliberately. The regulator was tuned against a
+    /// perfect attitude, and keeping that path is what makes the estimator's
+    /// contribution to the error measurable **on its own** rather than tangled
+    /// with the gains.
+    pub use_estimator: u32,
+    /// Complementary-filter crossover, seconds.
+    pub estimator_tau_s: f32,
 }
 
 /// One cycle of plant state.
@@ -96,6 +119,10 @@ pub struct ObObsV1 {
     pub wheel_rate_rad_s: f32,
     /// Current actually flowing, amps — not an echo of what was commanded.
     pub motor_current_a: f32,
+    /// Raw body-frame gyro, rad/s. `[1]` IS the nose-up pitch rate (ICD §10.1).
+    pub gyro_rad_s: [f32; 3],
+    /// Raw body-frame specific force, m/s².
+    pub accel_m_s2: [f32; 3],
     /// Ground-speed setpoint for THIS cycle, m/s. Zero is station keeping.
     ///
     /// Per-cycle rather than fixed at construction, so a command sequence can
@@ -119,11 +146,19 @@ pub struct ObCmdV1 {
     /// What the outer loop asked the inner loop to hold, radians. Reported so
     /// a run can be diagnosed without instrumenting the library.
     pub pitch_ref_rad: f32,
+    /// The attitude the controller actually acted on. Equals the observation's
+    /// `pitch_rad` when the estimator is off; reported always, so the harness
+    /// can score estimator error against truth without a second code path.
+    pub pitch_used_rad: f32,
 }
 
 /// Opaque controller handle.
 pub struct ObController {
     regulator: PitchRegulator,
+    estimator: Option<ComplementaryFilter>,
+    /// True only in mode 1. In shadow mode the estimate is computed and
+    /// reported but never reaches the regulator.
+    estimate_active: bool,
     outer: Option<VelocityLoop>,
     envelope: Envelope,
     r_eff_m: f32,
@@ -178,6 +213,16 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
 
     let boxed = Box::new(ObController {
         regulator: PitchRegulator::new(p.kp_a_per_rad, p.kd_a_per_rad_s),
+        estimate_active: p.use_estimator == 1,
+        estimator: if p.use_estimator != 0 {
+            Some(ComplementaryFilter::new(if p.estimator_tau_s > 0.0 {
+                p.estimator_tau_s
+            } else {
+                1.0
+            }))
+        } else {
+            None
+        },
         outer,
         r_eff_m: if p.r_eff_m > 0.0 { p.r_eff_m } else { 0.14605 },
         last_t_ns: None,
@@ -252,6 +297,7 @@ pub unsafe extern "C" fn ob_controller_update(
         cmd.amps = 0.0;
         cmd.saturated = saturation_code(Saturation::No);
         cmd.pitch_ref_rad = 0.0;
+        cmd.pitch_used_rad = 0.0;
         return OB_ERR_NOT_FINITE;
     }
 
@@ -264,6 +310,19 @@ pub unsafe extern "C" fn ob_controller_update(
     };
     ctl.last_t_ns = Some(o.t_ns);
 
+    // Attitude: fused from the raw IMU, or truth straight off the observation.
+    let attitude = match ctl.estimator.as_mut() {
+        Some(est) => est.update(&[ImuSample {
+            gyro_rad_s: o.gyro_rad_s,
+            accel_m_s2: o.accel_m_s2,
+            t_sample_ns: o.t_ns,
+        }]),
+        None => Attitude {
+            pitch_rad: o.pitch_rad,
+            pitch_rate_rad_s: o.pitch_rate_rad_s,
+        },
+    };
+
     let pitch_ref = match ctl.outer.as_mut() {
         Some(outer) => {
             let v = o.wheel_rate_rad_s * ctl.r_eff_m;
@@ -272,9 +331,17 @@ pub unsafe extern "C" fn ob_controller_update(
         None => 0.0,
     };
 
-    let proposed = ctl
-        .regulator
-        .update(o.pitch_rad, o.pitch_rate_rad_s, pitch_ref);
+    // NOTE: `attitude`, not `o.pitch_rad`. An earlier revision computed the
+    // estimate, reported it in `pitch_used_rad`, and then regulated on truth
+    // anyway -- so the estimator was fully observable and entirely inert, and
+    // the error metric looked healthy the whole time.
+    // `test_the_estimator_is_actually_in_the_control_path` exists to catch it.
+    let (pitch_in, rate_in) = if ctl.estimate_active {
+        (attitude.pitch_rad, attitude.pitch_rate_rad_s)
+    } else {
+        (o.pitch_rad, o.pitch_rate_rad_s)
+    };
+    let proposed = ctl.regulator.update(pitch_in, rate_in, pitch_ref);
     let (bounded, sat) = ctl
         .envelope
         .apply(Command::MotorCurrent { amps: proposed }, Faults::NONE);
@@ -287,6 +354,7 @@ pub unsafe extern "C" fn ob_controller_update(
     };
     cmd.saturated = saturation_code(sat);
     cmd.pitch_ref_rad = pitch_ref;
+    cmd.pitch_used_rad = attitude.pitch_rad;
     ctl.last_saturated = sat == Saturation::Yes;
     OB_OK
 }
@@ -306,6 +374,8 @@ mod tests {
             max_pitch_ref_rad: 0.087,
             r_eff_m: 0.14605,
             com_above_axle: 1,
+            use_estimator: 0,
+            estimator_tau_s: 1.0,
         }
     }
 
@@ -317,6 +387,8 @@ mod tests {
             pitch_rate_rad_s: rate,
             wheel_rate_rad_s: 0.0,
             motor_current_a: 0.0,
+            gyro_rad_s: [0.0, rate, 0.0],
+            accel_m_s2: [0.0, 0.0, -9.81],
             v_ref_m_s: 0.0,
         }
     }
@@ -327,6 +399,7 @@ mod tests {
             amps: f32::NAN,
             saturated: 99,
             pitch_ref_rad: f32::NAN,
+            pitch_used_rad: f32::NAN,
         }
     }
 

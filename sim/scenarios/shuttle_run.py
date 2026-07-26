@@ -309,6 +309,14 @@ def run(
         imperfection_profile_id=profile.profile_id,
     )
 
+    # Populate sensordata BEFORE the first read. Sensors are computed during
+    # mj_step, so on the first control cycle they would otherwise be zeros --
+    # and an all-zero accelerometer makes atan2 return a garbage attitude that
+    # the estimator then has to spend ~tau unwinding. It showed up as a fixed
+    # 3.15 deg peak error, identical across every noise profile and crossover,
+    # which is the signature of a transient rather than a sensor problem.
+    mujoco.mj_forward(model, data)
+
     ts, pos, pos_cmd, vs, vrefs, pitches, prefs, currents = [], [], [], [], [], [], [], []
     states: list[np.ndarray] = []
     commanded_pos = 0.0

@@ -63,6 +63,8 @@ class ObParams(ctypes.Structure):
         ("max_pitch_ref_rad", ctypes.c_float),
         ("r_eff_m", ctypes.c_float),
         ("com_above_axle", ctypes.c_uint32),
+        ("use_estimator", ctypes.c_uint32),
+        ("estimator_tau_s", ctypes.c_float),
     ]
 
 
@@ -74,6 +76,8 @@ class ObObs(ctypes.Structure):
         ("pitch_rate_rad_s", ctypes.c_float),
         ("wheel_rate_rad_s", ctypes.c_float),
         ("motor_current_a", ctypes.c_float),
+        ("gyro_rad_s", ctypes.c_float * 3),
+        ("accel_m_s2", ctypes.c_float * 3),
         ("v_ref_m_s", ctypes.c_float),
     ]
 
@@ -84,6 +88,7 @@ class ObCmd(ctypes.Structure):
         ("amps", ctypes.c_float),
         ("saturated", ctypes.c_uint32),
         ("pitch_ref_rad", ctypes.c_float),
+        ("pitch_used_rad", ctypes.c_float),
     ]
 
 
@@ -142,6 +147,8 @@ class RustController:
         v_ref_fn=None,
         r_eff_m: float = DEFAULT_R_EFF_M,
         com_above_axle: bool = True,
+        use_estimator=False,
+        estimator_tau_s: float = 1.0,
         lib_path: Path | None = None,
     ) -> None:
         path = lib_path or library_path()
@@ -184,6 +191,10 @@ class RustController:
             max_pitch_ref_rad=max_pitch_ref_rad,
             r_eff_m=r_eff_m,
             com_above_axle=1 if com_above_axle else 0,
+            # 0 off / 1 active / 2 shadow. `True` means active; pass 2 for
+            # shadow, which fuses and reports without driving.
+            use_estimator=int(use_estimator),
+            estimator_tau_s=estimator_tau_s,
         )
         self._handle = lib.ob_controller_new(ctypes.byref(params))
         if not self._handle:
@@ -208,6 +219,7 @@ class RustController:
         self.v_ref_fn = v_ref_fn
         #: Last pitch reference the outer loop asked for, radians.
         self.pitch_ref_rad = 0.0
+        self.pitch_used_rad = 0.0
         #: Largest magnitude it ever asked for -- shows whether the outer loop
         #: is living against its clamp.
         self.peak_abs_pitch_ref_rad = 0.0
@@ -218,8 +230,14 @@ class RustController:
         pitch_rad: float,
         pitch_rate_rad_s: float,
         wheel_rate_rad_s: float,
+        gyro_rad_s=None,
+        accel_m_s2=None,
     ) -> float:
         o, c = self._obs, self._cmd
+        if gyro_rad_s is not None:
+            o.gyro_rad_s[0], o.gyro_rad_s[1], o.gyro_rad_s[2] = gyro_rad_s
+        if accel_m_s2 is not None:
+            o.accel_m_s2[0], o.accel_m_s2[1], o.accel_m_s2[2] = accel_m_s2
         o.t_ns = int(t_s * 1e9)
         o.pitch_rad = pitch_rad
         o.pitch_rate_rad_s = pitch_rate_rad_s
@@ -234,6 +252,8 @@ class RustController:
         if c.saturated == 1:
             self.saturated_cycles += 1
         self.pitch_ref_rad = float(c.pitch_ref_rad)
+        #: The attitude the controller acted on -- truth, or the estimate.
+        self.pitch_used_rad = float(c.pitch_used_rad)
         self.peak_abs_pitch_ref_rad = max(self.peak_abs_pitch_ref_rad,
                                           abs(self.pitch_ref_rad))
         return float(c.amps)

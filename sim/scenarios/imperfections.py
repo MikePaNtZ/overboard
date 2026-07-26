@@ -76,6 +76,13 @@ class ImperfectionProfile:
     gyro_noise_rad_s: float = 0.0
     gyro_bias_rad_s: float = 0.0
 
+    #: Accelerometer white noise, m/s² (1σ). **Live as of the estimator** — it
+    #: was deferred while pitch came from truth, because it had no path to the
+    #: controller. Now it lands directly on the attitude the balance law acts
+    #: on, which is a far more consequential place than gyro noise on the D
+    #: term.
+    accel_noise_m_s2: float = 0.0
+
     #: Wheel-rate resolution and refresh. ERPM is an integer arriving at a
     #: finite rate, so the outer loop sees a staircase, not a smooth signal.
     wheel_rate_quantum_rad_s: float = 0.0
@@ -93,6 +100,7 @@ class ImperfectionProfile:
             and self.current_loop_tau_s == 0.0
             and self.gyro_noise_rad_s == 0.0
             and self.gyro_bias_rad_s == 0.0
+            and self.accel_noise_m_s2 == 0.0
             and self.wheel_rate_quantum_rad_s == 0.0
         )
 
@@ -126,6 +134,10 @@ STAGE0_PLACEHOLDER = ImperfectionProfile(
     wheel_rate_quantum_rad_s=0.00698,
     wheel_rate_update_hz=500.0,
     max_current_a=40.0,
+    #: ICM-42688-P accel noise density x2 per ICD §12, integrated over a
+    #: 250 Hz band. Small in absolute terms, but it enters the attitude
+    #: estimate through an atan2 and is not attenuated by the plant.
+    accel_noise_m_s2=0.02,
 )
 
 
@@ -160,6 +172,24 @@ class ImperfectionState:
             + p.gyro_bias_rad_s
             + self._rng.normal(0.0, p.gyro_noise_rad_s)
         )
+
+    def gyro_vec(self, true_gyro: np.ndarray) -> np.ndarray:
+        """Whole gyro vector. Only `[1]` reaches the controller today, but the
+        estimator takes a vector and noising one component would quietly make
+        the other two suspiciously perfect."""
+        p = self.profile
+        out = np.asarray(true_gyro, dtype=float).copy()
+        if p.gyro_noise_rad_s > 0.0:
+            out += self._rng.normal(0.0, p.gyro_noise_rad_s, size=3)
+        out[1] += p.gyro_bias_rad_s
+        return out
+
+    def accel_vec(self, true_accel: np.ndarray) -> np.ndarray:
+        p = self.profile
+        out = np.asarray(true_accel, dtype=float).copy()
+        if p.accel_noise_m_s2 > 0.0:
+            out += self._rng.normal(0.0, p.accel_noise_m_s2, size=3)
+        return out
 
     def wheel_rate(self, true_rate_rad_s: float, t_s: float) -> float:
         """Wheel rate as the drive reports it: quantised, and held between

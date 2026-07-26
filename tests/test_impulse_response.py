@@ -196,14 +196,14 @@ def test_motor_sign_matches_icd(model):
     flipped the sign of the balance law the moment a controller was attached.
     """
     fwd = run(ImpulseParams(magnitude_ns=0.0, sim_seconds=1.5), model=model,
-              controller=lambda t, p, pr, w: +6.0)
+              controller=lambda t, p, pr, w, **_: +6.0)
     assert fwd.metrics.travel_m > 0.1, "positive current must drive the board FORWARD"
     assert fwd.pitch_deg[-1] > 1.0, "positive current must pitch the nose UP"
     assert fwd.wheel_rate_rads[-1] > 0, "forward roll must be positive joint velocity"
 
     # ...and the mirror, so the test cannot pass on a model that ignores sign.
     rev = run(ImpulseParams(magnitude_ns=0.0, sim_seconds=1.5), model=model,
-              controller=lambda t, p, pr, w: -6.0)
+              controller=lambda t, p, pr, w, **_: -6.0)
     assert rev.metrics.travel_m < -0.1
     assert rev.pitch_deg[-1] < -1.0
 
@@ -221,7 +221,7 @@ def test_balance_law_sign_is_stabilising(model):
 
     Gains are in AMPS PER RADIAN, because the hook takes radians.
     """
-    def pd(t, pitch_rad, pitch_rate_rad_s, wheel_rate):
+    def pd(t, pitch_rad, pitch_rate_rad_s, wheel_rate, **_):
         amps = -(80.0 * pitch_rad + 11.0 * pitch_rate_rad_s)
         return max(-40.0, min(40.0, amps))
 
@@ -242,7 +242,7 @@ def test_inverting_the_balance_law_drives_the_board_over(model):
     someone flips a sign somewhere and the stabilising test starts passing for
     the wrong reason, this one stops passing.
     """
-    def inverted_pd(t, pitch_rad, pitch_rate_rad_s, wheel_rate):
+    def inverted_pd(t, pitch_rad, pitch_rate_rad_s, wheel_rate, **_):
         amps = +(80.0 * pitch_rad + 11.0 * pitch_rate_rad_s)
         return max(-40.0, min(40.0, amps))
 
