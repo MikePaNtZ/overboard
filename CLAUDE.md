@@ -2,6 +2,35 @@
 
 Extends the global `~/.claude/CLAUDE.md`. Project: a DIY **lean-to-steer self-balancing board** (rideable inverted pendulum) — Rust real-time control on PREEMPT_RT Linux, off-the-shelf smart drive (torque mode) + hoverboard hub motors, sim-first. A deferred companion **PX4 drone** lives in its own Notion doc. Full context: memory `[[balance-board-project]]`.
 
+## Repo boundary
+- **This repo is controls only** — Rust, sim, hardware, design docs. The public landing page and all
+  brand/marketing assets live in the sibling repo **`overboard-web`** (`~/projects/overboard-web`).
+  Keep them separate: no HTML/marketing here, no control code there.
+- The two are coupled by **facts, not code**. When a capability ships or a phase turns over, the
+  `overboard-web` page status must be updated in the same pass (Requirements `SR-WEB-4`, and the
+  lock-step rule in [M0](https://app.notion.com/p/3a8472a5fb6981ffbf73ee8297e62f07)).
+- Local multi-repo work: open `~/projects/overboard.code-workspace` to get both folders at once.
+
+## Git workflow — feature branches + PR, CI is the gate (HARD)
+- **Never commit to `master`.** All work goes on a feature branch (`feat/…`, `fix/…`, `docs/…`)
+  and lands via PR. `master` is protected: linear history, no force-push, no deletion.
+- **CI success is the merge gate.** `rust` and `sim` are required status checks and the branch
+  must be up to date with `master` before merging. A red build cannot be merged.
+- Required approvals are set to **0 deliberately** — GitHub forbids approving your own PR, so on a
+  solo repo any non-zero count would permanently block every merge. Mike still reviews; CI is the
+  hard gate. Add approvals if a second contributor ever joins.
+- `publish-sim-artifact` is deliberately **not** a required check: it only runs on push to `master`,
+  so requiring it would hang every PR forever waiting for a check that never reports.
+- `enforce_admins` is off, so Mike can break glass in an emergency. Claude must not.
+- Open the PR with a body that states what changed and *why*, and call out any acceptance criteria
+  that moved. Wait for CI, then merge (squash) — do not merge red or bypass protection.
+
+## Public artifacts
+- Both repos are **public**. CI publishes the sim render + metrics to the rolling `sim-latest`
+  release on every green `master` push; that URL is the single source for the README embed, the
+  Notion design doc video, and (later) the landing page. Never check binaries into git —
+  `sim/out/` is gitignored and the artifacts are regenerated every build.
+
 ## Docs & source of truth
 - **Notion is the PRIMARY home** for vision, design, and project/roadmap docs. The repo `docs/` holds **Markdown+Mermaid mirrors that track the implementation**; Notion may drift during heavy dev. Run a periodic cleanup pass to reconcile Notion vision/early-design with what shipped.
 - **No production code** until the design-doc set passes the ready-to-code gate (numeric acceptance criteria — see D0).

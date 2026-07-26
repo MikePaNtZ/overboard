@@ -16,15 +16,16 @@ loop does not step MuJoCo yet (a later milestone, tracked as a TODO in
 `crates/sim-backend`), so the scenario is open-loop — which makes it the
 baseline the controller has to beat.
 
-> 🎬 **Watch it:** the rendered clip (mp4/webm/gif), poster, plot and metrics are
-> published to the rolling [`sim-latest`](https://github.com/MikePaNtZ/overboard/releases/tag/sim-latest)
-> release on every green mainline push, and an interactive replay is embedded in the
-> [Notion design doc](https://app.notion.com/p/3a8472a5fb6981d8b9e6f749517498dd).
->
-> The clip is deliberately *not* inlined here. `sim/out/` is gitignored — the artifacts
-> are regenerated every build and committing a 2 MB binary per push would bloat history.
-> Linking the release asset instead would render broken while this repo is **private**
-> (GitHub's image proxy cannot authenticate). Inline it once the repo goes public.
+<!-- Served live from the rolling `sim-latest` release, which CI republishes on
+     every green mainline push — so this is always the current mainline's result,
+     never a stale checked-in copy. `sim/out/` stays gitignored: the artifacts are
+     regenerated every build and committing 2 MB per push would bloat history. -->
+[![Impulse disturbance response](https://github.com/MikePaNtZ/overboard/releases/download/sim-latest/impulse_open_loop.gif)](https://github.com/MikePaNtZ/overboard/releases/download/sim-latest/impulse_open_loop.mp4)
+
+<sub>▶ [Full 1280×720 clip](https://github.com/MikePaNtZ/overboard/releases/download/sim-latest/impulse_open_loop.mp4) ·
+[response plot](https://github.com/MikePaNtZ/overboard/releases/download/sim-latest/impulse_pitch.png) ·
+[metrics](https://github.com/MikePaNtZ/overboard/releases/download/sim-latest/impulse_metrics.json) ·
+[all artifacts](https://github.com/MikePaNtZ/overboard/releases/tag/sim-latest)</sub>
 
 A driverless onewheel at rest is **stable** — the battery and hub motor put the
 centre of mass below the axle. So it is kicked with a 20 N·s impulse, and with
