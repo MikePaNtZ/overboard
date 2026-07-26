@@ -136,6 +136,27 @@ and `workflow_dispatch` (manual).
 
 ---
 
+## 3.5 Repo visibility — decide this before building C1
+
+**Both `overboard` and `overboard-web` are currently private.** That does not
+break the pipeline, but it changes one step and rules out a few shortcuts:
+
+- The deploy workflow must fetch the release assets **authenticated** (`gh
+  release download -R MikePaNtZ/overboard` with a PAT), not with a plain
+  `curl`. Fine — it already needs a token for the dispatch, so it is the same
+  credential. Design unchanged, one extra flag.
+- **Anything that renders a release asset by URL will 404 for anyone**,
+  including GitHub's own image proxy. That is why the clip is not inlined in
+  the repo README, and why the Notion doc embeds an interactive replay of the
+  trajectory rather than the mp4 — Notion cannot fetch a private asset either.
+- Once the site is public, the *clip itself* becomes public regardless of repo
+  visibility, since Pages serves it from the deploy bundle. Worth being
+  deliberate about: the first public artifact is a video of the board failing.
+
+If the repo goes public, several things get simpler at once (README inline,
+direct Notion video embed, unauthenticated deploy fetch). Worth deciding
+deliberately rather than by default.
+
 ## 4. Constraints the implementation must respect
 
 - **`file://` must keep working.** The web repo's rule is no build step, no
