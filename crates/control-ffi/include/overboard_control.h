@@ -39,6 +39,11 @@ typedef struct {
      * to the error stays measurable on its own. */
     uint32_t use_estimator;
     float    estimator_tau_s;
+    /* 1 = subtract wheel-odometry forward acceleration from the accelerometer
+     * before deriving tilt. Without it the implied tilt is wrong by
+     * atan(a/g) -- about 5 deg at the outer loop's acceleration limit. */
+    uint32_t estimator_accel_aiding;
+    float    wheel_accel_tau_s;
 } ob_params_v1;
 
 typedef struct {

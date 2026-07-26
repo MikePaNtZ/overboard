@@ -28,7 +28,15 @@ pub trait Estimator {
     /// Sub-sampling a ≥1 kHz IMU at a 500 Hz loop aliases the estimator's
     /// primary input, so taking only the newest is a defect rather than an
     /// optimisation.
-    fn update(&mut self, samples: &[ImuSample]) -> Attitude;
+    /// `forward_accel_m_s2` is the board's known longitudinal acceleration,
+    /// from wheel odometry. Pass 0.0 for no aiding.
+    ///
+    /// This is what makes the accelerometer usable on a vehicle that
+    /// accelerates: it measures **specific force**, so `f_x = a + g·sinθ`, and
+    /// subtracting a known `a` recovers the gravity term. Without it the
+    /// implied tilt is wrong by `atan(a/g)` exactly when the board is working
+    /// hardest — about 5° at the outer loop's acceleration limit.
+    fn update(&mut self, samples: &[ImuSample], forward_accel_m_s2: f32) -> Attitude;
     fn reset(&mut self);
 }
 
@@ -77,20 +85,30 @@ impl ComplementaryFilter {
         }
     }
 
-    /// Tilt implied by gravity alone, nose-up positive.
+    /// Tilt implied by the accelerometer, with the known linear acceleration
+    /// removed.
     ///
     /// Derivation, not assumption: with θ nose-up about +Y, gravity in the body
-    /// frame is `(g·sinθ, 0, −g·cosθ)`, so `θ = atan2(a_x, −a_z)`. Checked
-    /// against the sim rather than trusted.
-    fn accel_pitch(accel: [f32; 3]) -> f32 {
-        libm::atan2f(accel[0], -accel[2])
+    /// frame is `(g·sinθ, 0, −g·cosθ)`. An accelerometer measures SPECIFIC
+    /// FORCE, so under forward acceleration `a` the x channel reads
+    /// `a + g·sinθ`. Subtracting `a` recovers the gravity term:
+    ///
+    /// ```text
+    /// θ = atan2(f_x − a, −f_z)
+    /// ```
+    ///
+    /// Checked against the sim rather than trusted — the model's body frame is
+    /// z-up while the ICD's is z-down, and a derivation that looked right had
+    /// the x sign backwards.
+    fn accel_pitch(accel: [f32; 3], forward_accel_m_s2: f32) -> f32 {
+        libm::atan2f(accel[0] - forward_accel_m_s2, -accel[2])
     }
 }
 
 impl Estimator for ComplementaryFilter {
-    fn update(&mut self, samples: &[ImuSample]) -> Attitude {
+    fn update(&mut self, samples: &[ImuSample], forward_accel_m_s2: f32) -> Attitude {
         for s in samples {
-            let theta_accel = Self::accel_pitch(s.accel_m_s2);
+            let theta_accel = Self::accel_pitch(s.accel_m_s2, forward_accel_m_s2);
 
             // First sample: snap to the accelerometer rather than starting at
             // zero. Starting at zero and filtering in would take ~τ to become
@@ -178,6 +196,59 @@ impl PitchRegulator {
     /// output hides saturation from the anti-windup that needs to see it.
     pub fn update(&self, pitch_rad: f32, pitch_rate_rad_s: f32, pitch_ref_rad: f32) -> f32 {
         -(self.kp_a_per_rad * (pitch_rad - pitch_ref_rad) + self.kd_a_per_rad_s * pitch_rate_rad_s)
+    }
+}
+
+/// Forward acceleration from wheel speed, for aiding the estimator.
+///
+/// A plain difference of the reported speed is unusable: ERPM arrives
+/// quantised (1 ERPM ≈ 7 mrad/s) and held at a finite rate, so differencing it
+/// produces a staircase of spikes rather than an acceleration. This
+/// differentiates through a first-order low pass, which is the standard
+/// dirty-derivative and costs phase in exchange for being finite.
+///
+/// The phase cost is affordable *here* specifically because the aiding term
+/// only has to be right on the timescale the accelerometer is believed on —
+/// the estimator's crossover, around 1 s — not at the control loop's
+/// bandwidth.
+#[derive(Debug, Clone, Copy)]
+pub struct WheelAccelEstimator {
+    tau_s: f32,
+    last_v: Option<f32>,
+    accel: f32,
+}
+
+impl WheelAccelEstimator {
+    pub const fn new(tau_s: f32) -> Self {
+        WheelAccelEstimator {
+            tau_s,
+            last_v: None,
+            accel: 0.0,
+        }
+    }
+
+    /// Filtered `dv/dt`, m/s². `dt_s <= 0` holds the previous value.
+    pub fn update(&mut self, v_m_s: f32, dt_s: f32) -> f32 {
+        let prev = match self.last_v {
+            Some(p) => p,
+            None => {
+                self.last_v = Some(v_m_s);
+                return 0.0;
+            }
+        };
+        self.last_v = Some(v_m_s);
+        if dt_s <= 0.0 {
+            return self.accel;
+        }
+        let raw = (v_m_s - prev) / dt_s;
+        let alpha = dt_s / (self.tau_s + dt_s);
+        self.accel += alpha * (raw - self.accel);
+        self.accel
+    }
+
+    pub fn reset(&mut self) {
+        self.last_v = None;
+        self.accel = 0.0;
     }
 }
 
@@ -492,7 +563,7 @@ mod tests {
     #[test]
     fn a_level_board_reads_level() {
         let mut f = ComplementaryFilter::new(1.0);
-        let a = f.update(&[sample(0, 0.0, 0.0)]);
+        let a = f.update(&[sample(0, 0.0, 0.0)], 0.0);
         assert!(a.pitch_rad.abs() < 1e-5);
     }
 
@@ -501,11 +572,11 @@ mod tests {
         // Nose UP must read POSITIVE. Getting this backwards inverts the whole
         // balance law, which is the defect class the ICD calls most dangerous.
         let mut f = ComplementaryFilter::new(1.0);
-        let up = f.update(&[sample(0, 0.15, 0.0)]);
+        let up = f.update(&[sample(0, 0.15, 0.0)], 0.0);
         assert!(up.pitch_rad > 0.1, "nose-up read {}", up.pitch_rad);
 
         let mut g = ComplementaryFilter::new(1.0);
-        let down = g.update(&[sample(0, -0.15, 0.0)]);
+        let down = g.update(&[sample(0, -0.15, 0.0)], 0.0);
         assert!(down.pitch_rad < -0.1, "nose-down read {}", down.pitch_rad);
     }
 
@@ -514,7 +585,7 @@ mod tests {
         // Starting at zero and filtering in would leave the controller acting
         // on a known-wrong attitude for about tau.
         let mut f = ComplementaryFilter::new(5.0);
-        let a = f.update(&[sample(0, 0.20, 0.0)]);
+        let a = f.update(&[sample(0, 0.20, 0.0)], 0.0);
         assert!(
             (a.pitch_rad - 0.20).abs() < 1e-3,
             "snapped to {}",
@@ -525,8 +596,8 @@ mod tests {
     #[test]
     fn the_gyro_is_passed_through_as_the_rate() {
         let mut f = ComplementaryFilter::new(1.0);
-        f.update(&[sample(0, 0.0, 0.0)]);
-        let a = f.update(&[sample(2_000_000, 0.0, 0.37)]);
+        f.update(&[sample(0, 0.0, 0.0)], 0.0);
+        let a = f.update(&[sample(2_000_000, 0.0, 0.37)], 0.0);
         assert_eq!(a.pitch_rate_rad_s, 0.37);
     }
 
@@ -537,12 +608,12 @@ mod tests {
         let mut f = ComplementaryFilter::new(1.0);
         let (dt_ns, dt) = (2_000_000u64, 0.002f32);
         let mut theta = 0.0f32;
-        f.update(&[sample(0, theta, 0.5)]);
+        f.update(&[sample(0, theta, 0.5)], 0.0);
         for k in 1..=500 {
             theta += 0.5 * dt;
-            f.update(&[sample(k * dt_ns, theta, 0.5)]);
+            f.update(&[sample(k * dt_ns, theta, 0.5)], 0.0);
         }
-        let a = f.update(&[sample(501 * dt_ns, theta, 0.5)]);
+        let a = f.update(&[sample(501 * dt_ns, theta, 0.5)], 0.0);
         assert!(
             (a.pitch_rad - theta).abs() < 0.02,
             "got {} want {theta}",
@@ -561,7 +632,7 @@ mod tests {
         for k in 0..5_000 {
             let mut s = sample(k * dt_ns, 0.0, bias);
             s.gyro_rad_s[1] = bias;
-            last = f.update(&[s]).pitch_rad;
+            last = f.update(&[s], 0.0).pitch_rad;
         }
         // Steady state is bias*tau, NOT unbounded: 0.05 * 1.0 = 0.05 rad.
         assert!(last < 0.08, "drifted to {last}");
@@ -582,7 +653,7 @@ mod tests {
             for k in 0..20_000 {
                 let mut s = sample(k * dt_ns, 0.0, bias);
                 s.gyro_rad_s[1] = bias;
-                last = f.update(&[s]).pitch_rad;
+                last = f.update(&[s], 0.0).pitch_rad;
             }
             last
         };
@@ -614,12 +685,12 @@ mod tests {
         // tau large so the accelerometer does not immediately pull it back --
         // this is a test about integration, not about fusion.
         let mut all = ComplementaryFilter::new(1000.0);
-        all.update(&[sample(0, 0.0, 0.0)]);
-        let a = all.update(&batch);
+        all.update(&[sample(0, 0.0, 0.0)], 0.0);
+        let a = all.update(&batch, 0.0);
 
         let mut newest = ComplementaryFilter::new(1000.0);
-        newest.update(&[sample(0, 0.0, 0.0)]);
-        let b = newest.update(&batch[3..]);
+        newest.update(&[sample(0, 0.0, 0.0)], 0.0);
+        let b = newest.update(&batch[3..], 0.0);
 
         // Truth: 4 rad/s for 0.5 ms = 2 mrad. Newest-only sees rate 0.
         assert!(
@@ -637,17 +708,17 @@ mod tests {
     #[test]
     fn an_empty_batch_holds_the_last_estimate() {
         let mut f = ComplementaryFilter::new(1.0);
-        let a = f.update(&[sample(0, 0.1, 0.0)]);
-        let b = f.update(&[]);
+        let a = f.update(&[sample(0, 0.1, 0.0)], 0.0);
+        let b = f.update(&[], 0.0);
         assert_eq!(a.pitch_rad, b.pitch_rad);
     }
 
     #[test]
     fn reset_clears_the_estimate() {
         let mut f = ComplementaryFilter::new(1.0);
-        f.update(&[sample(0, 0.2, 0.1)]);
+        f.update(&[sample(0, 0.2, 0.1)], 0.0);
         f.reset();
-        let a = f.update(&[sample(0, 0.0, 0.0)]);
+        let a = f.update(&[sample(0, 0.0, 0.0)], 0.0);
         assert!(a.pitch_rad.abs() < 1e-5);
     }
 

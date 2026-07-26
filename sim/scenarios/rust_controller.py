@@ -65,6 +65,8 @@ class ObParams(ctypes.Structure):
         ("com_above_axle", ctypes.c_uint32),
         ("use_estimator", ctypes.c_uint32),
         ("estimator_tau_s", ctypes.c_float),
+        ("estimator_accel_aiding", ctypes.c_uint32),
+        ("wheel_accel_tau_s", ctypes.c_float),
     ]
 
 
@@ -149,6 +151,8 @@ class RustController:
         com_above_axle: bool = True,
         use_estimator=False,
         estimator_tau_s: float = 1.0,
+        estimator_accel_aiding: bool = True,
+        wheel_accel_tau_s: float = 0.05,
         lib_path: Path | None = None,
     ) -> None:
         path = lib_path or library_path()
@@ -195,6 +199,8 @@ class RustController:
             # shadow, which fuses and reports without driving.
             use_estimator=int(use_estimator),
             estimator_tau_s=estimator_tau_s,
+            estimator_accel_aiding=1 if estimator_accel_aiding else 0,
+            wheel_accel_tau_s=wheel_accel_tau_s,
         )
         self._handle = lib.ob_controller_new(ctypes.byref(params))
         if not self._handle:

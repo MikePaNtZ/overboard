@@ -35,6 +35,7 @@ use board_types::ImuSample;
 use board_types::{Command, Faults, Params, Saturation};
 use control_core::{
     Attitude, ComplementaryFilter, Estimator, PitchRegulator, PlantCoupling, VelocityLoop,
+    WheelAccelEstimator,
 };
 use safety::Envelope;
 
@@ -98,6 +99,15 @@ pub struct ObParamsV1 {
     pub use_estimator: u32,
     /// Complementary-filter crossover, seconds.
     pub estimator_tau_s: f32,
+    /// 1 = subtract the wheel-odometry forward acceleration from the
+    /// accelerometer before deriving tilt.
+    ///
+    /// Without it the accelerometer's implied tilt is wrong by `atan(a/g)`
+    /// whenever the board accelerates — around 5° at the outer loop's limit,
+    /// the same size as the excursion being regulated and correlated with it.
+    pub estimator_accel_aiding: u32,
+    /// Low-pass on the wheel-speed derivative, seconds.
+    pub wheel_accel_tau_s: f32,
 }
 
 /// One cycle of plant state.
@@ -159,6 +169,7 @@ pub struct ObController {
     /// True only in mode 1. In shadow mode the estimate is computed and
     /// reported but never reaches the regulator.
     estimate_active: bool,
+    wheel_accel: Option<WheelAccelEstimator>,
     outer: Option<VelocityLoop>,
     envelope: Envelope,
     r_eff_m: f32,
@@ -214,6 +225,15 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
     let boxed = Box::new(ObController {
         regulator: PitchRegulator::new(p.kp_a_per_rad, p.kd_a_per_rad_s),
         estimate_active: p.use_estimator == 1,
+        wheel_accel: if p.estimator_accel_aiding != 0 {
+            Some(WheelAccelEstimator::new(if p.wheel_accel_tau_s > 0.0 {
+                p.wheel_accel_tau_s
+            } else {
+                0.05
+            }))
+        } else {
+            None
+        },
         estimator: if p.use_estimator != 0 {
             Some(ComplementaryFilter::new(if p.estimator_tau_s > 0.0 {
                 p.estimator_tau_s
@@ -310,13 +330,22 @@ pub unsafe extern "C" fn ob_controller_update(
     };
     ctl.last_t_ns = Some(o.t_ns);
 
+    // Forward acceleration from wheel odometry, for aiding the accelerometer.
+    let aiding = match ctl.wheel_accel.as_mut() {
+        Some(w) => w.update(o.wheel_rate_rad_s * ctl.r_eff_m, dt_s),
+        None => 0.0,
+    };
+
     // Attitude: fused from the raw IMU, or truth straight off the observation.
     let attitude = match ctl.estimator.as_mut() {
-        Some(est) => est.update(&[ImuSample {
-            gyro_rad_s: o.gyro_rad_s,
-            accel_m_s2: o.accel_m_s2,
-            t_sample_ns: o.t_ns,
-        }]),
+        Some(est) => est.update(
+            &[ImuSample {
+                gyro_rad_s: o.gyro_rad_s,
+                accel_m_s2: o.accel_m_s2,
+                t_sample_ns: o.t_ns,
+            }],
+            aiding,
+        ),
         None => Attitude {
             pitch_rad: o.pitch_rad,
             pitch_rate_rad_s: o.pitch_rate_rad_s,
@@ -376,6 +405,8 @@ mod tests {
             com_above_axle: 1,
             use_estimator: 0,
             estimator_tau_s: 1.0,
+            estimator_accel_aiding: 0,
+            wheel_accel_tau_s: 0.05,
         }
     }
 
