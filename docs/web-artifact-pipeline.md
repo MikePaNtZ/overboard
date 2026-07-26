@@ -107,7 +107,7 @@ and `workflow_dispatch` (manual).
   "regime": "open-loop (no controller)",
   "impulse_ns": 20.0,
   "nose_strike_angle_deg": 18.57,
-  "peak_pitch_deg": 18.64,
+  "peak_abs_pitch_deg": 18.64,
   "t_strike_s": 1.646,
   "speed_at_strike_ms": 1.0,
   "travel_m": 4.03,

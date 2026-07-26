@@ -211,7 +211,7 @@ jobs:
           import json, pathlib
           m = json.loads(pathlib.Path("sim/out/impulse_metrics.json").read_text())["metrics"]
           assert m["nose_strike"], "published clip must show the documented outcome"
-          print(f"strike {m['t_strike_s']:.3f}s  peak {m['peak_pitch_deg']:.2f}deg")
+          print(f"strike {m['t_strike_s']:.3f}s  peak |pitch| {m['peak_abs_pitch_deg']:.2f}deg")
           PY
 
       - name: Record provenance for downstream consumers
@@ -233,7 +233,7 @@ jobs:
               "regime": "open-loop (no controller)",
               "impulse_ns": doc["params"]["magnitude_ns"],
               "nose_strike_angle_deg": round(m["nose_strike_angle_deg"], 2),
-              "peak_pitch_deg": round(m["peak_pitch_deg"], 2),
+              "peak_abs_pitch_deg": round(m["peak_abs_pitch_deg"], 2),
               "t_strike_s": round(m["t_strike_s"], 3) if m["t_strike_s"] else None,
               "speed_at_strike_ms": round(m["speed_at_strike_ms"], 2) if m["speed_at_strike_ms"] else None,
               "travel_m": round(m["travel_m"], 2),
