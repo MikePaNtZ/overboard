@@ -61,6 +61,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from .imperfections import STAGE0_PLACEHOLDER, ImperfectionProfile, ImperfectionState
+
 MODEL_PATH = Path(__file__).resolve().parents[2] / "sim" / "models" / "overboard_onewheel.xml"
 
 #: Forward is -X in the Openwheel assembly frame (the front enclosure spans
@@ -135,14 +137,10 @@ class ImpulseParams:
     settle_band_deg: float = 2.0
     """Pitch band the board must stay inside to count as settled."""
 
-    actuation_delay_cycles: int = 1
-    """Steps between a command being computed and it reaching the plant.
-
-    ICD 5.2: actuation delay is ADDITIVE on top of the structural loop delay,
-    not inclusive of it. One step at the 2 ms timestep is the placeholder for
-    the ICD 12 figure of ~1 ms; it is a parameter so the sensitivity can be
-    swept once a controller exists. Zero reproduces the old behaviour and
-    should only be used to demonstrate what the delay costs."""
+    # Actuation delay used to live here as a whole-cycle count. It now belongs
+    # to the imperfection profile (ICD 12), in seconds, alongside the rest of
+    # the signal-path imperfections -- two places to configure the same physics
+    # is how they end up disagreeing.
 
 
 @dataclass
@@ -175,6 +173,7 @@ class ImpulseMetrics:
     control_effort_a_s: float = 0.0
 
     # --- provenance ---
+    imperfection_profile_id: str = ""
     travel_m: float = 0.0
     final_pitch_deg: float = 0.0
     model_sha256: str = ""
@@ -282,6 +281,7 @@ def run(
     model: mujoco.MjModel | None = None,
     controller=None,
     capture_state: bool = False,
+    profile: ImperfectionProfile = STAGE0_PLACEHOLDER,
 ) -> ImpulseResult:
     """Run one impulse scenario.
 
@@ -329,13 +329,10 @@ def run(
     states: list[np.ndarray] = []
     x0 = float(data.xpos[frame][0])
 
-    # Commands awaiting their actuation delay. A command computed this cycle
-    # becomes effective `actuation_delay_cycles` steps later, matching the ICD
-    # 5.2 rule that actuation delay is ADDITIVE on top of the loop delay.
-    # Without this the loop applies a command to the very step whose state
-    # produced it -- zero delay, which is the classic way to tune a controller
-    # that only works in simulation.
-    pipeline = [0.0] * params.actuation_delay_cycles
+    # The signal path between the plant and the controller: actuation delay,
+    # current-loop lag, gyro noise, wheel-rate quantisation (ICD 12).
+    imp = ImperfectionState(profile=profile, dt_s=dt)
+    m.imperfection_profile_id = profile.profile_id
 
     for _ in range(n_steps):
         data.xfrc_applied[frame] = 0.0
@@ -343,18 +340,21 @@ def run(
             data.xfrc_applied[frame][:3] = force
             data.xfrc_applied[frame][3:] = torque
 
+        # WHAT THE CONTROLLER SEES vs WHAT ACTUALLY HAPPENED. The controller is
+        # handed the corrupted signals; the trajectory below records TRUTH.
+        # Logging the sensor's version would make it impossible to tell a plant
+        # problem from a sensing one, which is most of what these runs are for.
         pitch = frame_pitch_rad(model, data)
-        pitch_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
-        wheel_rate = float(data.qvel[6])
+        true_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
+        sensed_rate = imp.gyro(true_rate)
+        sensed_wheel = imp.wheel_rate(float(data.qvel[6]), float(data.time))
 
         proposed = 0.0
         if controller is not None:
-            proposed = float(controller(float(data.time), pitch, pitch_rate, wheel_rate))
+            proposed = float(controller(float(data.time), pitch, sensed_rate, sensed_wheel))
 
-        if pipeline:
-            current, pipeline = pipeline[0], pipeline[1:] + [proposed]
-        else:
-            current = proposed
+        # Delay and current-loop lag live here, not in the controller.
+        current = imp.apply_current(proposed)
 
         # ctrl is TORQUE (motor actuator, gear=1); the controller speaks amps.
         data.ctrl[0] = current * KT_NM_PER_A
