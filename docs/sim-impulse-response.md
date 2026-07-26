@@ -84,15 +84,30 @@ the open-loop scenario never actuates — but it would have inverted the balance
 law the moment a controller was attached. The hinge is now on `-Y`, and
 `test_motor_sign_matches_icd` asserts both the forward case and its mirror.
 
-**Still open — pitch reporting disagrees.** This scenario reports pitch
-**nose-down-positive** (so the strike is at +18.6°, the natural reading here);
-the ICD is **nose-up-positive**. They are exact negations, so the same physical
-law is written `current ≈ +K·pitch` here and `−K·pitch` in the ICD. Measured,
-not argued: `+K·pitch` holds the board upright through the nominal impulse
-(peak 0.21°, no strike), while the ICD's literal `−K·pitch` drives it to 180°.
+**Decided — pitch reporting disagreed; the sim moves.** This scenario reports
+pitch **nose-down-positive** (so the strike is at +18.6°, the natural reading
+here); the ICD is **nose-up-positive**. They are exact negations, so the same
+physical law is written `current ≈ +K·pitch` here and `−K·pitch` in the ICD.
+Measured, not argued: `+K·pitch` holds the board upright through the nominal
+impulse (peak 0.21°, no strike), while the ICD's literal `−K·pitch` drives it
+to 180°.
 
-Resolving this means deciding **which document moves** — an ICD amendment, not
-a unilateral code change — and it must happen before the Rust controller lands.
+This was left open as "which document moves". **It is now closed: the sim
+moves.** ICD §10 is normative and derives the convention from a free-body
+argument rather than asserting it — and it has already been wrong once (v0.2
+inverted the polarity gate), which is precisely why §10.3 makes the sim the
+arbiter and requires the gate to be asserted in CI rather than documented.
+
+⚠️ **Decided, not yet done.** The flip lands in increment I1 of the seam PR,
+not here, because it has to move together with the MJCF actuator comments and
+`test_motor_sign_matches_icd` — left behind, those become stale-and-wrong,
+which is worse than a documented inconsistency. It carries a test asserting
+the trajectory is bit-identical with the pitch series exactly negated, proving
+it is a reporting change and not a physics change.
+
+Converting at the seam only, and letting the two conventions coexist, was
+considered and rejected: one repo, one convention. That is the trap ICD §10
+exists to prevent.
 
 ## 3. Measured behaviour
 
