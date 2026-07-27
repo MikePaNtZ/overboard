@@ -46,6 +46,35 @@
     plate clamped flush would put the disc over the desk surface, which kills
     the pendulum upgrade and lets a shed set screw take a chunk out of the desk.
 
+    THE MOUNT IS TWO GEOMS, NOT ONE, AND THAT FOLLOWS FROM THE MOTOR'S MOUNTING
+    FACE
+    ----------------------------------------------------------------------------
+    The hinge axis is Y, so the motor's mounting face -- the disc it bolts to
+    -- has to lie in the X-Z plane (face normal along Y) for the shaft to come
+    out along Y. A panel clamped flat to a horizontal desk lies in the X-Y
+    plane instead (face normal along Z); no single flat panel can be both at
+    once, so a single-box model is a claim that one part of it does two
+    incompatible things. It is the same defect as a comment asserting a
+    reflection is a rotation (see the frame-map note in plant.py) -- geometry
+    and prose disagreeing about what a shape is.
+
+    So the mount is a base plate + a riser, matching the buildable bracket
+    (base the clamps grip, riser carrying the motor, joined at the desk edge):
+
+      base_plate   x in [-0.10, 0], thin in Z (6 mm, the 1/4" stock), lying
+                   flat on the desk top (z in [0, 0.006]). This is the part
+                   the two bench clamps grip (Stage-0A Sec 3.2).
+
+      riser        x in [0, 0.12], thin in Y (6 mm), standing from the desk
+                   top to z = 0.2. Its face is in the X-Z plane, which is what
+                   lets the motor face-mount to it with the shaft along Y.
+                   The motor axis at x = 0.06 sits mid-riser, past the edge.
+
+    Both are visual only (contype/conaffinity 0, not a body with an
+    <inertial>), so this is a rendering and buildability fix with no dynamics
+    to preserve: neither geom contributes to any moving body's mass or
+    inertia, both before this change and after.
+
     The hinge axis is Y (lateral), so the disc turns in the X-Z plane. That is
     the same plane the board pitches in, which is what makes the later swap of
     the disc for an arm-and-mass a genuine inverted pendulum rather than a
@@ -128,13 +157,19 @@
     <geom name="desk" type="box" size="0.30 0.25 0.02" pos="-0.30 0 -0.02"
           material="grid_mat"/>
 
-    <!-- Plate. A panel in the X-Z plane, thin in Y, clamped flat to the desk
-         over x < 0 and reaching out past the edge to carry the motor.
-         Visual only: it is ground, and modelling its compliance would be a
-         claim the rig cannot yet support. If bench data shows a structural
-         resonance inside the control bandwidth, that assumption is what to
-         revisit first. -->
-    <geom name="plate" type="box" size="0.080 0.003 0.100" pos="0.030 -0.045 0.100"
+    <!-- Base plate. Flat on the desk top (thin in Z), x in [-0.10, 0] -- the
+         part the two bench clamps grip. Visual only: it is ground, and
+         modelling its compliance would be a claim the rig cannot yet
+         support. If bench data shows a structural resonance inside the
+         control bandwidth, that assumption is what to revisit first. -->
+    <geom name="base_plate" type="box" size="0.050 0.045 0.003" pos="-0.050 -0.045 0.003"
+          material="cloud"/>
+
+    <!-- Riser. A panel in the X-Z plane, thin in Y, standing from the desk
+         top out past the edge to carry the motor -- see the header for why
+         this has to be a separate geom from the base plate rather than one
+         panel doing both jobs. Visual only, same as the base plate. -->
+    <geom name="riser" type="box" size="0.060 0.003 0.100" pos="0.060 -0.045 0.100"
           material="cloud"/>
 
     <!-- Motor stator, static half. Bolted to the plate face, axis along Y. -->
