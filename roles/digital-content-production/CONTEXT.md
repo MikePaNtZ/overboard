@@ -7,7 +7,7 @@
 ## Current sub-goals
 - **Blocking the first public announcement:** produce a clip showing the *weighted* board. The
   whole argument is that mass is the variable; a clip of an empty board does not show it.
-  Must be Lane A (from a real run), not concept art.
+  Must be a **Sim Replay** (generated from a real run), not **Concept**.
 - Building the sim-run → video pipeline.
 
 ## ⚠️ Standing risk for this role
@@ -26,3 +26,9 @@ _Nothing recorded yet by this role._
 ## Known dead ends
 
 _Nothing recorded yet._
+
+## Vocabulary
+
+Categories are **Footage · Sim Replay · Hardware Replay · Concept**, defined once in
+[Shared Vocabulary (canonical)](https://app.notion.com/p/3aa472a5fb6981ebaaa7cf2e996f1e8b). A Replay always names its source — there is no bare
+"Replay". **"Lane A / Lane B" is retired**; if you see it anywhere, it is stale.
