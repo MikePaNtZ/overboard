@@ -96,6 +96,14 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      # ICD §6.3 / DR-MODE-1: board-app-ridden must have zero motion
+      # authority, proven by the dependency graph rather than asserted by a
+      # reviewer. canary-ridden is the positive control -- the gate has to
+      # actually flag it, or the check itself has silently stopped working
+      # (issue #1).
+      - name: crate-exclusion boundary gate
+        run: cargo run -p xtask -- gate
+
   # ---------------------------------------------------------------------
   # Sim-in-the-loop gate. Physics only -- no GL, no rendering, ~2 seconds.
   # Runs on every push and PR, and its failure fails the build.
