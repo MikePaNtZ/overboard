@@ -46,6 +46,24 @@ CELLS = [
 md(r"""
 # 4 · Closing the loop on the estimator — a frequency-domain diagnosis
 
+> ### Read this first — the premise of this notebook was a bug
+>
+> This notebook was written to explain why an accurate estimator crashed the
+> board. **It did not.** The crash was a $\mathrm{det} = -1$ reflection in the
+> sim's IMU→ICD frame map, which inverted the accelerometer's $x$ channel; it
+> was corrected on 2026-07-27. Closing the loop now costs *margin*, not the
+> board.
+>
+> The notebook is kept, re-executed against corrected data, because the
+> frequency-domain method in it is sound and reusable, and because how a
+> confident wrong diagnosis got built is worth more as a worked example than a
+> tidy story would be. **The conclusions at the bottom are the re-derived ones;
+> the framing here is the original.** Where they conflict, the bottom wins.
+>
+> The estimator does still lose the board — on a **hill**, not on this
+> manoeuvre. `tests/test_hill.py` gates that: truth pitch holds a 15% descent,
+> the estimate puts the tail down at 1.1 s.
+
 Notebook 3 left the estimator in an uncomfortable place. It tracked truth to
 **0.104° RMS** standing still and **0.663° RMS** through a manoeuvre, comfortably
 inside the 0.5°-ish budget — and the moment it was allowed to drive the
@@ -54,8 +72,13 @@ controller, the board fell over.
 That should not follow. The same loop shrugs off **40 ms of pure actuation
 delay**, twenty times the ICD's estimate. A sub-degree attitude error has no
 business destabilising it. So the error is not too *big*; it must be the wrong
-*shape*. This notebook is the measurement that says what shape, and the fix that
-follows from it.
+*shape*.
+
+That reasoning was correct, and it was aimed at a phantom. The error was not the
+wrong shape — it was the wrong *sign*, in a frame conversion two layers below
+the filter. Everything downstream of that premise is preserved below as it was
+written, because the failure mode it demonstrates — building a sophisticated
+diagnosis on an unexamined assumption — is the thing worth learning.
 
 It is also, honestly, a notebook about being wrong four times in a row. Two of
 the wrong turns produced plots that looked completely convincing, which is the
@@ -439,15 +462,52 @@ controller over the FFI — no replica anywhere in the path:
 | configuration | return error | falls over |
 |---|---|---|
 | estimator off (truth pitch) | 0.0648 m | no |
-| wheel aiding, $\tau$ = 1 s *(the original)* | — | **yes** |
-| wheel aiding, $\tau$ = 10 s | 0.9479 m | no |
-| **command feedforward, $\tau$ = 2 s** | **0.0226 m** | **no** |
+| **wheel aiding, $\tau$ = 1 s** *(the original)* | **0.1480 m** | **no** |
+| command feedforward, $\tau$ = 2 s | 0.2331 m | no |
+| wheel aiding, $\tau$ = 2 s | 0.2783 m | no |
+| wheel aiding, $\tau$ = 10 s | 0.9567 m | no |
 
-The board now completes the shuttle run on a fused attitude estimate and
-finishes **closer to home than it does on perfect truth pitch** — 2.3 cm against
-6.5 cm. That last part is a coincidence of this particular tuning rather than a
-triumph, but it does mean the estimator is no longer the limiting factor on this
-scenario.
+> ### ⚠️ This table used to say the opposite, and the correction matters
+>
+> Every number above was re-measured on **2026-07-27**. The previous version of
+> this notebook reported wheel aiding at $\tau$ = 1 s as **falling over**, and
+> command feedforward at $\tau$ = 2 s as the fix, at 0.0226 m.
+>
+> Both were artefacts. `plant.imu_readings` converted MuJoCo axes to the ICD
+> body frame with $\mathrm{diag}(+1,+1,-1)$ — **determinant $-1$**, a reflection
+> rather than a rotation. It inverted the accelerometer's $x$ channel, so the
+> filter fused a nose-up-positive gyro against a nose-down-positive
+> accelerometer. The reading error is exactly $-2\theta$: zero at upright, which
+> is why it survived validation, and unbounded once feedback drives $\theta$.
+>
+> Corrected to $\mathrm{diag}(-1,+1,-1)$, **nothing in this table falls over**,
+> and the ordering reverses: the configuration this notebook was written to
+> condemn is now the best one.
+
+**What that does to the conclusion.** The story this notebook told — wheel
+odometry is fatal at short $\tau$, command feedforward is the fix — does not
+survive. What survives is narrower and less flattering:
+
+* Every aiding configuration completes the run. None of them fall over.
+* **Wheel aiding at the original $\tau$ = 1 s is the best of them**, at 14.8 cm.
+* Command feedforward still beats wheel odometry **at matched $\tau$ = 2 s**
+  (23.3 cm against 27.8 cm), so the mechanism argued for below is real — but a
+  4.5 cm edge at one crossover is not the same claim as "the fix".
+* The $\tau$ trade is intact and is the durable result: 14.8 cm at $\tau$ = 1 s
+  against 95.7 cm at $\tau$ = 10 s, because a gyro bias $b$ leaves a steady
+  attitude error $b\tau$ that the outer loop turns into drift.
+* None of them reach the 0.10 m acceptance criterion. Truth pitch does, at
+  6.5 cm. **The estimator is still the limiting factor on this scenario** — the
+  previous version of this notebook claimed it had stopped being one, on the
+  strength of a number produced by the reflection.
+
+The lesson is not about complementary filters. A frame conversion is a
+*definition*, and this one was **fitted to data** — "determined empirically
+against `framequat` truth", validated near upright, where a $-2\theta$ error is
+invisible — while citing a test named `test_imu_frame_matches_truth` that was
+never written. `tests/test_frame_conformance.py` is that test now, and it checks
+the determinant, because a reflection is catchable with linear algebra and
+without knowing any physics.
 """),
 
 md(r"""
