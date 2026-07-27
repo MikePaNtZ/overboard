@@ -91,7 +91,69 @@ class ImperfectionProfile:
     #: Current cap, amps. Chosen so saturation is reachable.
     max_current_a: float = 40.0
 
+    # -- proportional cutback ---------------------------------------------
+    #
+    # THE MECHANISM THE SIM COULD NOT SHOW. `control-core`'s feedforward
+    # docstring states the gap in as many words: a VESC "derates commanded
+    # torque through at least six cutback layers — battery voltage sag,
+    # input-current limits, FET and motor temperature, ERPM limits… it would
+    # appear under load, on a hill, at low state of charge, with a rider
+    # aboard. The sim cannot show it, because the sim has no cutback."
+    #
+    # This is that row. It models the SPEED-dependent layer only (ERPM /
+    # duty-cycle), because that is the one a descent actually exercises: the
+    # faster the wheel spins, the less current the drive will pass, and a
+    # balancer descending at speed needs that current precisely when it is
+    # least available. The thermal and voltage-sag layers are real and are
+    # NOT modelled here — they need a battery and a thermal state the sim
+    # does not carry.
+    #
+    # **Every number is a placeholder awaiting Stage-0 bench measurement**,
+    # like every other row in this class. The SHAPE is the claim; the
+    # breakpoints are not.
+
+    #: Wheel rate at which cutback begins, rad/s. Zero disables cutback
+    #: entirely, which is why it is the default: adding this row must not
+    #: silently move any existing scenario's baseline.
+    derate_onset_rad_s: float = 0.0
+
+    #: Wheel rate at and above which only `derate_floor_frac` of the cap
+    #: remains. Linear in between.
+    derate_full_rad_s: float = 0.0
+
+    #: Fraction of `max_current_a` still available in full cutback. 1.0 is no
+    #: cutback; 0.0 would be a drive that stops passing current altogether,
+    #: which no real VESC does.
+    derate_floor_frac: float = 1.0
+
     seed: int = 12345
+
+    def models_cutback(self) -> bool:
+        """True if this profile derates with speed.
+
+        Callers use this to decide whether `apply_current` needs a wheel rate.
+        """
+        return self.derate_onset_rad_s > 0.0 and self.derate_floor_frac < 1.0
+
+    def available_current_a(self, wheel_rate_rad_s: float) -> float:
+        """The cap the drive will actually honour at this wheel speed.
+
+        Symmetric in direction: cutback is about how fast the wheel is
+        turning, not which way. Braking into a descent is exactly the case
+        where that matters.
+        """
+        if not self.models_cutback():
+            return self.max_current_a
+        w = abs(float(wheel_rate_rad_s))
+        if w <= self.derate_onset_rad_s:
+            return self.max_current_a
+        span = self.derate_full_rad_s - self.derate_onset_rad_s
+        if span <= 0.0:
+            frac = self.derate_floor_frac
+        else:
+            t = min(1.0, (w - self.derate_onset_rad_s) / span)
+            frac = 1.0 + t * (self.derate_floor_frac - 1.0)
+        return self.max_current_a * frac
 
     def is_ideal(self) -> bool:
         """True if this models nothing. CI must refuse to gate on such a run."""
@@ -102,6 +164,7 @@ class ImperfectionProfile:
             and self.gyro_bias_rad_s == 0.0
             and self.accel_noise_m_s2 == 0.0
             and self.wheel_rate_quantum_rad_s == 0.0
+            and not self.models_cutback()
         )
 
     def to_dict(self) -> dict:
@@ -140,6 +203,40 @@ STAGE0_PLACEHOLDER = ImperfectionProfile(
     accel_noise_m_s2=0.02,
 )
 
+#: STAGE-0 plus the speed-dependent cutback layer. **Use this for anything
+#: that descends.**
+#:
+#: Kept as a separate profile rather than folded into
+#: `STAGE0_PLACEHOLDER` on purpose: adding cutback to the shared profile
+#: would move every existing CI baseline in one commit, and a baseline that
+#: moves for two reasons at once cannot be reviewed. The `profile_id` is
+#: stamped into every manifest (ICD §6.2), so a run can never be read without
+#: knowing whether cutback was modelled.
+#:
+#: Breakpoints, all **placeholders awaiting Stage-0 bench measurement** — the
+#: shape is the claim, not the numbers. At r_eff = 0.14605 m:
+#:
+#:   onset  27 rad/s  ≈ 4 m/s  (~14 km/h), where duty starts to bind
+#:   full   55 rad/s  ≈ 8 m/s  (~29 km/h), a plausible top speed
+#:   floor  0.35      → 14 A of the 40 A cap still available
+#:
+#: **Sr. Mechanical & Systems owns whether these match the real drive.** They
+#: are shaped to be defensible, not measured.
+STAGE0_CUTBACK = ImperfectionProfile(
+    profile_id="stage0-cutback-v1",
+    actuation_delay_s=0.001,
+    current_loop_tau_s=0.001,
+    gyro_noise_rad_s=0.004,
+    gyro_bias_rad_s=0.002,
+    wheel_rate_quantum_rad_s=0.00698,
+    wheel_rate_update_hz=500.0,
+    max_current_a=40.0,
+    accel_noise_m_s2=0.02,
+    derate_onset_rad_s=27.0,
+    derate_full_rad_s=55.0,
+    derate_floor_frac=0.35,
+)
+
 
 @dataclass
 class ImperfectionState:
@@ -154,6 +251,10 @@ class ImperfectionState:
     _rng: np.random.Generator = field(init=False)
     _cmd_history: list = field(init=False, default_factory=list)
     _applied_a: float = field(init=False, default=0.0)
+    #: Cap the drive honoured on the last `apply_current` call, amps. Scenarios
+    #: report it so a run that was cutback-limited can be told apart from one
+    #: that simply did not ask for much current.
+    _available_a: float = field(init=False, default=0.0)
     _held_wheel_rate: float = field(init=False, default=0.0)
     _last_wheel_update_s: float = field(init=False, default=-1e9)
 
@@ -209,15 +310,39 @@ class ImperfectionState:
 
     # -- actuation ---------------------------------------------------------
 
-    def apply_current(self, commanded_a: float) -> float:
-        """Current the plant actually sees, after transport delay and the
-        current loop's own dynamics.
+    def apply_current(
+        self, commanded_a: float, wheel_rate_rad_s: float | None = None
+    ) -> float:
+        """Current the plant actually sees, after cutback, transport delay and
+        the current loop's own dynamics.
 
-        Delay first, then the lag: they are physically in series that way
-        round, and swapping them changes the phase the controller sees.
+        Cutback first — the drive decides what it is willing to pass before
+        anything else happens to the signal — then delay, then the lag. Delay
+        and lag are physically in series that way round, and swapping them
+        changes the phase the controller sees.
+
+        `wheel_rate_rad_s` is REQUIRED when the profile models cutback, and
+        omitting it raises rather than defaulting. This codebase has twice
+        shipped a result that was wrong because an optional argument was left
+        at its default and the code degraded quietly instead of failing: the
+        shuttle that never passed its IMU, and the analysis loop whose
+        estimator was never in the loop at all. A cutback model that silently
+        stops cutting back when a caller forgets an argument would be the
+        third, and it would do it on the one scenario built to find nosedives.
         """
         p = self.profile
-        commanded_a = max(-p.max_current_a, min(p.max_current_a, commanded_a))
+        if p.models_cutback():
+            if wheel_rate_rad_s is None:
+                raise ValueError(
+                    f"profile {p.profile_id!r} models cutback, so apply_current() "
+                    "needs wheel_rate_rad_s. Refusing to silently apply no cutback "
+                    "-- pass the wheel rate, or use a profile without cutback."
+                )
+            cap = p.available_current_a(wheel_rate_rad_s)
+        else:
+            cap = p.max_current_a
+        self._available_a = cap
+        commanded_a = max(-cap, min(cap, commanded_a))
 
         # FRACTIONAL transport delay, interpolated between the two straddling
         # samples.
