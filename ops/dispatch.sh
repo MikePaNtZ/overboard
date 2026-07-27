@@ -56,7 +56,22 @@ fi
 python3 ops/usage.py --check || fail "daily usage ceiling reached -- do not dispatch.
          Raise OPS_USAGE_CEILING_M deliberately, or wait."
 
-# --- 5. Dispatchability ---------------------------------------------------
+# --- 5. Agent-type fit ----------------------------------------------------
+# Learned the hard way: sonnet-executor has Read/Write/Edit/Bash/Grep/Glob and
+# NOTHING ELSE -- no ToolSearch, no WebSearch, no MCP. A research or Notion
+# task handed to it fails instantly, having spent ~22k tokens discovering that
+# its own toolbox is empty. Match the agent type to the work BEFORE spawning.
+cat <<'FIT'
+
+  AGENT-TYPE FIT -- check before you spawn:
+    repo edits, tests, builds, refactors ....... sonnet-executor  (no web, no MCP)
+    web research, Notion, anything needing MCP .. general-purpose  (all tools)
+    read-only search across many files ......... Explore
+    a bounded judgement call ................... opus5-oracle     (read-only)
+  Wrong type = a guaranteed no-op that still costs a full agent boot.
+FIT
+
+# --- 6. Dispatchability ---------------------------------------------------
 # A work request without an acceptance criterion is a decision or a handoff in
 # disguise (ADR-0004). Checked by eye against the issue body; reminded here.
 for issue in "$@"; do
