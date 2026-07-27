@@ -1,0 +1,19 @@
+[package]
+name = "board-app-ridden"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "board-app-ridden"
+path = "src/main.rs"
+
+# Deliberately short list. No `hal-actuate`, no `sim-backend` (it implements
+# `hal_actuate::BoardActuate` and would pull the crate in transitively), no
+# wire-encoding crate. `crates/xtask`'s gate asserts `hal-actuate` stays
+# unreachable from here.
+[dependencies]
+board-types = { workspace = true }
+hal = { workspace = true }
+control-core = { workspace = true }
+safety = { workspace = true }

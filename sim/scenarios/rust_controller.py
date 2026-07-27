@@ -6,7 +6,8 @@ will eventually run on the Pi -- `control_core::PitchRegulator` behind
 be kept in step with it.
 
 The physics calls the controller here, which is the reverse of the hardware
-arrangement (where `board-app` owns the loop and calls `BoardActuate`). That is
+arrangement (where `board-app-driverless` owns the loop and calls
+`BoardActuate`). That is
 deliberate and cheap to undo: Python owns MuJoCo, the collision geometry, the
 determinism and the metrics, and re-implementing all of that in Rust would buy
 no control knowledge. Only the direction of the call differs; the law and the

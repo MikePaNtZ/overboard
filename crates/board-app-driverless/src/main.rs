@@ -1,5 +1,10 @@
-//! `board-app` wires `control-core` + `safety` to a `hal` backend and runs the
-//! ICD §5.2 control loop.
+//! `board-app-driverless` wires `control-core` + `safety` to a `hal` +
+//! `hal-actuate` backend and runs the ICD §5.2 control loop.
+//!
+//! This is the binary with motion authority (ICD §6.3, DR-MODE-1) — it links
+//! `hal-actuate`. Its ridden counterpart is `board-app-ridden`, which cannot
+//! link `hal-actuate` at all; `crates/xtask` gates that at the dependency
+//! graph, not at review time.
 //!
 //! Today both `--backend sim` and `--backend null` map to the same
 //! `sim-backend` stub, which advances a synthetic clock rather than stepping
@@ -10,7 +15,8 @@
 
 use board_types::Params;
 use control_core::Controller;
-use hal::{BoardActuate, BoardObserve};
+use hal::BoardObserve;
+use hal_actuate::BoardActuate;
 use safety::Envelope;
 use sim_backend::SimBackend;
 use std::process::ExitCode;
@@ -23,10 +29,10 @@ struct Args {
 }
 
 fn print_help() {
-    println!("board-app - Overboard control loop runner");
+    println!("board-app-driverless - Overboard control loop runner (motion authority)");
     println!();
     println!("USAGE:");
-    println!("    board-app [OPTIONS]");
+    println!("    board-app-driverless [OPTIONS]");
     println!();
     println!("OPTIONS:");
     println!("    --backend <sim|null>   Board I/O backend to use (default: sim).");
@@ -83,7 +89,7 @@ fn main() -> ExitCode {
     };
 
     println!(
-        "board-app starting: backend={} cycles={}",
+        "board-app-driverless starting: backend={} cycles={}",
         args.backend, args.cycles
     );
 
@@ -165,7 +171,7 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "board-app: completed {} cycles, exiting cleanly",
+        "board-app-driverless: completed {} cycles, exiting cleanly",
         args.cycles
     );
     ExitCode::SUCCESS

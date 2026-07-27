@@ -9,8 +9,8 @@
 //! value is being singular.
 //!
 //! So the physics calls the controller, not the other way round. That is the
-//! opposite of the eventual hardware arrangement, where `board-app` owns the
-//! loop and calls `BoardActuate` — and that is fine, because **the portable
+//! opposite of the eventual hardware arrangement, where `board-app-driverless`
+//! owns the loop and calls `BoardActuate` — and that is fine, because **the portable
 //! part is [`control_core::PitchRegulator`] and [`safety::Envelope`]**, both of
 //! which are exercised here exactly as they will be on hardware. Only the
 //! direction of the call differs, and switching it later means deleting this

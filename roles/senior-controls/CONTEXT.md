@@ -20,7 +20,23 @@
 
 ## Decisions made (append as you go)
 
-_Nothing recorded yet by this role._
+- **Issue #1, crate-exclusion boundary (PR TBD).** Split `hal` -> `hal` (observe) +
+  `hal-actuate` (motion authority); split `board-app` -> `board-app-ridden` +
+  `board-app-driverless`; added `vesc-wire` (decode-only), `vesc-tx` (encode-only),
+  `canary-ridden` (positive control) and `xtask` (the `cargo metadata`
+  dependency-graph gate). `board-app-ridden` has no observe-only hardware
+  backend yet, so it runs against a local `ShadowBackend` placeholder —
+  intentional, not an oversight; a real one is later, unrelated work.
+  **Deliberately left undone, flagged rather than fixed silently:** `vesc-wire`
+  / `vesc-tx` carry no real VESC byte layouts — there is no hardware yet to
+  verify one against, and fabricating protocol constants from memory into a
+  crate that will gate real actuation was judged worse than leaving them
+  honest stubs. ICD §6.3's "drop symbol scanning" line is a Notion-only edit
+  this session had no Notion access to make. `README.md` still says
+  `cargo run -p board-app` — stale after the split, but `README.md` is CEO
+  turf, not mine to edit.
+
+_Older: nothing recorded before this entry._
 
 ## Known dead ends
 

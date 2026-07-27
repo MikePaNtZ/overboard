@@ -15,9 +15,9 @@
 //! - [`BoardObserve::wait_observe`] is the **sole** time-advancing call. In sim
 //!   it steps physics to the next control instant; on hardware it blocks on the
 //!   IMU/timer.
-//! - [`BoardActuate::apply`] enqueues and **never** advances time. Actuation
-//!   delay is **additive** on top of the structural loop delay, not inclusive
-//!   of it.
+//! - `hal_actuate::BoardActuate::apply` enqueues and **never** advances time.
+//!   Actuation delay is **additive** on top of the structural loop delay, not
+//!   inclusive of it.
 //! - Zero or one `apply()` per `wait_observe()`. **Zero is legal** — it is the
 //!   shadow-mode loop shape (§6.6).
 //!
@@ -28,21 +28,18 @@
 //!
 //! # Motion authority
 //!
-//! [`BoardObserve`] and [`BoardActuate`] are separate traits so a binary can
-//! link the first without the second: shadow mode then fails to compile if it
-//! ever tries to actuate, rather than being prevented by a runtime check
-//! (DR-MODE-1).
-//!
-//! > **Deferred:** ICD §6.3 requires `BoardActuate` implementations and the
-//! > wire encoders to live in a *separate crate* the ridden binary does not
-//! > depend on, with CI asserting the dependency graph. That is not yet done —
-//! > there is no rider, no hardware and no ridden profile to protect. The trait
-//! > split here is the part that has present value; the crate split must land
-//! > **before the ballasted-dummy bench gate**, and DR-MODE-1 stays unmet until
-//! > it does.
+//! Observing and actuating are separate **crates**, not just separate traits:
+//! `BoardObserve` lives here; `BoardActuate` and `Disarm` live in
+//! `hal-actuate`, which the ridden binary must not depend on (ICD §6.3,
+//! DR-MODE-1). A trait split alone does not survive `cargo build
+//! --all-features` or a transitive dependency — cargo features unify across
+//! the whole graph, but **absence of a dependency does not unify**. The
+//! `xtask` gate asserts `hal-actuate` is unreachable from `board-app-ridden`
+//! by walking `cargo metadata`'s resolve graph over normal edges; see
+//! `crates/xtask`.
 #![no_std]
 
-use board_types::{Applied, Command, DisarmReason, IoError, Observation, RunMetadata};
+use board_types::{IoError, Observation, RunMetadata};
 
 /// Observation and metadata. The ridden binary links exactly this and nothing
 /// more.
@@ -59,38 +56,6 @@ pub trait BoardObserve {
 
     /// Backend-owned run provenance for the MCAP header (ICD §6.2).
     fn run_metadata(&self) -> RunMetadata;
-}
-
-/// A disarm capability that outlives the control thread.
-///
-/// ICD §9.2 requires disarm to be callable from a wedged or panicking loop,
-/// from a watchdog thread, a signal handler or a panic hook. That rules out
-/// `disarm(&mut self)` on the backend — `&mut self` means only the thread that
-/// owns the backend may call it, which is precisely the thread that is stuck.
-///
-/// Realised as an associated type rather than the ICD's concrete struct so each
-/// backend can carry its own pre-opened handle and pre-encoded safe-state
-/// frame. The contract is unchanged.
-///
-/// Implementations **must not** allocate, lock, or block unboundedly —
-/// everything needed is prepared at `arm()` time — and **must** be idempotent,
-/// because several paths may race to call it.
-pub trait Disarm: Send + Sync {
-    fn disarm(&self, reason: DisarmReason) -> Result<(), IoError>;
-}
-
-/// Motion authority. Kept separate from [`BoardObserve`] so it can be left
-/// unlinked entirely.
-pub trait BoardActuate: BoardObserve {
-    /// The disarm capability handed out by [`BoardActuate::arm`].
-    type Disarm: Disarm;
-
-    /// Enable motion, returning the disarm handle.
-    fn arm(&mut self) -> Result<Self::Disarm, IoError>;
-
-    /// Enqueue a command. Does **not** advance time. Returns the post-clamp
-    /// value so anti-windup can be driven synchronously (ICD §7.6).
-    fn apply(&mut self, cmd: &Command) -> Result<Applied, IoError>;
 }
 
 /// Enforces the §5.2 call-sequence rules: zero-or-one `apply()` per
