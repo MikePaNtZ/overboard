@@ -121,6 +121,8 @@
 /tests/test_bench_*.py          @MikePaNtZ
 # role: Sr. Mechanical & Systems
 /tests/test_imperfections.py    @MikePaNtZ
+# role: Sr. Mechanical & Systems
+/tests/test_plant_*.py          @MikePaNtZ
 
 # --------------------------------------------------------------------------
 # Renders and published media. This role does NOT own the landing page's
@@ -158,6 +160,23 @@
 /roles/senior-controls/         @MikePaNtZ
 
 # --------------------------------------------------------------------------
+# The canonical term list, in git so a machine can read it.
+#
+# The Archivist owns strategy-tier Notion and vocabulary consistency across all
+# three repos -- but vocabulary lives in EVERY role's files, so granting turf
+# there would be wrong. Those changes land as small PRs with review requested
+# from whoever owns the file. This directory is the one exception, and it earns
+# it: CI cannot read Notion, so a term list that exists only there can never be
+# enforced. Put the retired-to-current mapping here and the policy gate can
+# consume it.
+#
+# Deliberately NOT granted: docs/decisions/INDEX.md. Ratification is the COO's
+# to close (ADR-0001); splitting that authority would defeat the record.
+# --------------------------------------------------------------------------
+# role: Archivist
+/docs/vocabulary/               @MikePaNtZ
+
+# --------------------------------------------------------------------------
 # ROLES THAT OWN NOTHING IN THIS REPO -- stated on purpose, so their absence
 # reads as a decision rather than an oversight.
 #
@@ -165,7 +184,6 @@
 #                              overboard-web; nothing here.
 #   Senior Digital Marketer -- landing page, brand identity, page copy and
 #                              analytics, all in overboard-web. Provisional.
-#   Archivist               -- surface not yet declared. Provisional.
 #
 # Neither sibling repo has a CODEOWNERS yet, so turf is still unfalsifiable in
 # two thirds of the estate. Open item in ADR-0002.

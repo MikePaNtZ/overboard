@@ -41,16 +41,23 @@ All-three-or-none is the definition of `Ratified`. It is **not** a precondition 
 | `CMO` | Ratified | `CEO` | — | The marketing line. Peer of COO — neither escalates to the other. Owns nothing in this repo by design; brand lives in `overboard-web` |
 | `Senior Digital Marketer` | Provisional | `CMO` | `feat/web/` | Landing page, brand and visual identity, page copy, analytics — in `overboard-web` |
 | `Digital Content Production` | Ratified | `Senior Digital Marketer` | `feat/content/` | Renders and published media. Explicitly **not** page markup or CSS |
-| `Sr. Mechanical & Systems` | Ratified | `COO` | — | BoM, platform selection, the bench rig, the sim-to-hardware fidelity contract |
-| `Senior Controls` | Ratified | `COO` | — | The control law and its harness |
-| `Archivist` | Provisional | `CEO` | — | *Surface not yet declared* |
+| `Sr. Mechanical & Systems` | Ratified | `COO` | `feat/mech/` | BoM, platform selection, the bench rig, the sim-to-hardware fidelity contract |
+| `Senior Controls` | Ratified | `COO` | `feat/controls/` | The control law and its harness |
+| `Archivist` | Ratified | `CEO` | `feat/archive/` | Strategy-tier Notion, shared vocabulary across all three repos, drift tooling. Owns `docs/vocabulary/` and no other repo path |
 
-⚠️ **Unverified entries.** Escalation targets for `Sr. Mechanical & Systems` and
+✅ **Branch prefixes for `Sr. Mechanical & Systems` (`feat/mech/`) and `Senior Controls`
+(`feat/controls/`) are now OBSERVED**, not inferred — both appear repeatedly in merged branch
+history. They were blank until 2026-07-27, which meant the `policy` turf check **silently
+skipped** every branch those two roles pushed: it fails open for roles with no declared prefix,
+so the two most active engineering roles had no turf enforcement at all. Caught by a dispatched
+agent, not by me.
+
+⚠️ **Still unverified.** Escalation targets for `Sr. Mechanical & Systems` and
 `Senior Controls`, the branch prefixes for `Digital Content Production` and
-`Senior Digital Marketer`, and everything about the `Archivist` are **inferred** — from the
+and the branch prefix for `Senior Digital Marketer` are **inferred** — from the
 COO's own charter ("receives from Sr. Mechanical and Systems Engineering"), from branch
-conventions observed in sibling repos, and from a CEO remark that the Archivist reports
-directly. Inferring turf from a branch prefix is guessing, which is the thing this registry
+conventions observed in sibling repos. The `Archivist` is no longer among them — the CEO
+declared its surface on 2026-07-27 and it was ratified the same day. Inferring turf from a branch prefix is guessing, which is the thing this registry
 exists to stop. Each is flagged rather than asserted, and each wants one line of confirmation
 from the role itself or the CEO. `Provisional` roles stay provisional until that lands.
 
