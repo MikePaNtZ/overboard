@@ -1,6 +1,7 @@
 # ADR-0002 — Map repository paths to roles
 
-- **Status:** Accepted — ⚠️ **unopposed, not agreed** (see §Ratification)
+- **Status:** Accepted
+- **Consent:** ⚠️ **unopposed, not agreed** — see §Ratification
 - **Date:** 2026-07-26 (Proposed) · 2026-07-26 (Accepted with corrections)
 - **Ratified by:** COO
 - **Closes:** [Escalations — "Confirm the path ownership map before ADR-0002 is ratified"](https://app.notion.com/p/3a9472a5fb698123862ee0c30bbc4b70)

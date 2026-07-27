@@ -24,8 +24,13 @@ primitive the org has.
 | # | Title | Status | Constrains |
 |---|---|---|---|
 | [0001](ADR-0001-decision-record-and-escalation-queue.md) | Decision record and escalation queue | Accepted | Every role's process |
-| [0002](ADR-0002-path-ownership-map.md) | Path ownership map | **Proposed** | Who may edit which directory |
+| [0002](ADR-0002-path-ownership-map.md) | Path ownership map | Accepted ⚠️ *unopposed* | Who may edit which directory |
 | [0003](ADR-0003-policy-ci-gate.md) | `policy` CI gate | Accepted | Public claims in this repo |
+| [0004](ADR-0004-decisions-handoffs-and-work-requests.md) | Three lanes: decisions, handoffs, work requests | Accepted | How every role routes traffic |
+| [0005](ADR-0005-role-registry.md) | One home for the role list | Accepted | Who exists, and who owes registration |
+
+**Roles:** [`ROLES.md`](ROLES.md) is the single home for the role list — `policy` parses it.
+`python3 .github/policy_check.py --who <path>` answers "who owns this?".
 
 ## Conventions
 

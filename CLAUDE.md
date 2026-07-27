@@ -2,6 +2,20 @@
 
 Extends the global `~/.claude/CLAUDE.md`. Project: a DIY **lean-to-steer self-balancing board** (rideable inverted pendulum) — Rust real-time control on PREEMPT_RT Linux, off-the-shelf smart drive (torque mode) + hoverboard hub motors, sim-first. A deferred companion **PX4 drone** lives in its own Notion doc. Full context: memory `[[balance-board-project]]`.
 
+## Org protocol — you hold a role in a multi-session org. Read `docs/decisions/INDEX.md` before any PR.
+- **Three lanes.** A **decision** (choose between options) → the Notion Escalations queue. A
+  **handoff** (finished work crossing a boundary) → a **pull request**, review requested from the
+  receiving role. A **work request** (something that does not exist yet) → a **GitHub issue**.
+- **The test:** if you cannot name a default action you could execute alone, it is **not** an
+  escalation. Filing one anyway is how four days were lost on content that was already finished.
+- **Go and look before you ask.** Repo state, open PRs and merged branches are observable without a
+  conversation. **Prefer what you can observe over what you must wait for.**
+- **Stay in your own git worktree and branch prefix.** Two sessions in one working directory
+  corrupt each other — this has already happened. `python3 .github/policy_check.py --who <path>`
+  answers "am I trespassing?"; roles are in `docs/decisions/ROLES.md`.
+- Escalate on **Promise, Door, or Turf**; difficulty is not a trigger. Every row needs a default
+  action and a deadline, so nobody is ever parked.
+
 ## Repo boundary
 - **This repo is controls only** — Rust, sim, hardware, design docs. The public landing page and all
   brand/marketing assets live in the sibling repo **`overboard-web`** (`~/projects/overboard-web`).
