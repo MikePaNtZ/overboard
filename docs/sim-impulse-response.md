@@ -1,5 +1,14 @@
 # Sim Test — Impulse Disturbance Response
 
+<!--
+covers:
+  - sim/scenarios/impulse_response.py
+  - tests/test_impulse_response.py
+  - sim/models/overboard_onewheel.xml
+  - scripts/render_scenario.py
+reconciled: e4ddb82
+-->
+
 Implementation mirror of the Notion mini design doc
 [Overboard — Sim Test: Impulse Disturbance Response](https://app.notion.com/p/3a8472a5fb6981d8b9e6f749517498dd)
 (GitHub issue [#2](https://github.com/MikePaNtZ/overboard/issues/2)).

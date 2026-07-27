@@ -1,5 +1,12 @@
 # Landing Page — Hosting & Automatic Sim-Artifact Pipeline
 
+<!--
+covers:
+  - .github/workflows/ci.yml
+  - scripts/render_scenario.py
+reconciled: e4ddb82
+-->
+
 **Status: design only. Nothing here is implemented.** Phases A (sim scenario)
 and B (CI renders + publishes) have shipped; this is the deferred Phase C.
 

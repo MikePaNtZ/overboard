@@ -51,6 +51,13 @@ CAPABILITY = re.compile(
 )
 
 TURF_OVERRIDE = re.compile(r"TURF-OVERRIDE:\s*(\S.*)")
+DOC_OK = re.compile(r"DOC-OK:\s*(\S.*)")
+
+# A doc declares what it describes in an HTML comment, so it stays invisible
+# when rendered:  <!-- covers: [glob, ...]  reconciled: <sha> -->
+COVERS = re.compile(r"<!--\s*covers:\s*(.*?)-->", re.S)
+DOC_WARN_BYTES = 20_000
+DOC_FAIL_BYTES = 40_000
 
 failures: list[str] = []
 advisories: list[str] = []
@@ -256,6 +263,82 @@ def check_turf(roles: dict, rules: list) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Documentation drift
+# ---------------------------------------------------------------------------
+def doc_manifests() -> list[tuple[Path, list[str]]]:
+    """[(doc path, covered globs)] for implementation-tier docs."""
+    out = []
+    for path in sorted((REPO / "docs").rglob("*.md")):
+        if DECISIONS in path.parents:
+            continue
+        m = COVERS.search(path.read_text(encoding="utf-8"))
+        if not m:
+            continue
+        globs = [ln.strip().lstrip("-").strip()
+                 for ln in m.group(1).splitlines()
+                 if ln.strip().lstrip("-").strip() and not ln.strip().startswith("reconciled:")]
+        out.append((path, [g for g in globs if g]))
+    return out
+
+
+def check_doc_drift() -> None:
+    """A change to code must carry the doc that describes it, in the same PR.
+
+    Caught at the moment of creation rather than discovered months later. The
+    check never judges CONTENT -- only that somebody looked since the code
+    moved. `DOC-OK: <reason>` in a commit message is the escape hatch, same
+    shape as TURF-OVERRIDE, so the reason lands in git history.
+    """
+    base = os.environ.get("POLICY_BASE_REF", "origin/master")
+    merge_base = git("merge-base", base, "HEAD")
+    if not merge_base:
+        print("doc-drift: cannot resolve base -- skipping")
+        return
+    changed = set(p for p in git("diff", "--name-only", f"{merge_base}...HEAD").split() if p)
+    if not changed:
+        return
+
+    override_text = (os.environ.get("POLICY_PR_BODY", "") + "\n"
+                     + git("log", f"{merge_base}..HEAD", "--format=%B"))
+    om = DOC_OK.search(override_text)
+
+    for doc, globs in doc_manifests():
+        rel_doc = str(doc.relative_to(REPO))
+        if rel_doc in changed:
+            continue  # the doc moved with the code
+        hits = sorted({c for c in changed for g in globs if fnmatch.fnmatch(c, g)})
+        if not hits:
+            continue
+        if om:
+            print(f"doc-drift: {rel_doc} not updated alongside {len(hits)} covered file(s), "
+                  f"overridden -- {om.group(1).strip()}")
+            continue
+        fail(
+            "doc-drift",
+            f"{rel_doc} describes {', '.join(hits[:3])}"
+            f"{' and others' if len(hits) > 3 else ''}, which this PR changes, but the doc "
+            f"was not touched. Update it, or put 'DOC-OK: <reason>' in a commit message",
+        )
+
+
+def check_doc_size() -> None:
+    """Stop docs becoming historical logs.
+
+    A 55,000-character BoM is what prompted this: excellent research, unusable
+    as the thing it claimed to be. Superseded reasoning belongs in an appendix
+    or deleted, not accreted at the top of the file someone has to act on.
+    """
+    for path in sorted((REPO / "docs").rglob("*.md")):
+        n = len(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(REPO)
+        if n > DOC_FAIL_BYTES:
+            fail("doc-size", f"{rel} is {n:,} chars (limit {DOC_FAIL_BYTES:,}). "
+                             f"Move superseded material to an appendix, or cut it")
+        elif n > DOC_WARN_BYTES:
+            advisories.append(f"{rel} is {n:,} chars -- approaching the {DOC_FAIL_BYTES:,} limit")
+
+
 def public_markdown() -> list[Path]:
     """README plus docs/, excluding docs/decisions/.
 
@@ -319,7 +402,30 @@ def who(path: str) -> int:
     return 0
 
 
+def reconcile(doc: str) -> int:
+    """Stamp the current HEAD into a doc's manifest, marking it reconciled."""
+    p = REPO / doc
+    if not p.is_file():
+        print(f"{doc}: not found")
+        return 1
+    text = p.read_text(encoding="utf-8")
+    m = COVERS.search(text)
+    if not m:
+        print(f"{doc}: no <!-- covers: --> manifest to stamp")
+        return 1
+    head = git("rev-parse", "HEAD")[:7]
+    body = m.group(1)
+    body = (re.sub(r"reconciled:\s*\S+", f"reconciled: {head}", body)
+            if "reconciled:" in body else body.rstrip() + f"\nreconciled: {head}\n")
+    p.write_text(text[:m.start(1)] + body + text[m.end(1):], encoding="utf-8")
+    print(f"{doc}: reconciled at {head}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if "--reconcile" in argv:
+        i = argv.index("--reconcile")
+        return reconcile(argv[i + 1]) if i + 1 < len(argv) else 2
     if "--who" in argv:
         i = argv.index("--who")
         if i + 1 >= len(argv):
@@ -332,6 +438,8 @@ def main(argv: list[str]) -> int:
     check_adr_index()
     check_ownership(roles, rules)
     check_turf(roles, rules)
+    check_doc_drift()
+    check_doc_size()
     check_claims()
 
     if advisories:
