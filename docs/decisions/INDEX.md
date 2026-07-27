@@ -28,6 +28,8 @@ primitive the org has.
 | [0003](ADR-0003-policy-ci-gate.md) | `policy` CI gate | Accepted | Public claims in this repo |
 | [0004](ADR-0004-decisions-handoffs-and-work-requests.md) | Three lanes: decisions, handoffs, work requests | Accepted | How every role routes traffic |
 | [0005](ADR-0005-role-registry.md) | One home for the role list | Accepted | Who exists, and who owes registration |
+| [0006](ADR-0006-one-worktree-per-role.md) | One git worktree per role | Accepted | Where every session may work |
+| [0007](ADR-0007-delegation-dispatch-and-utilization.md) | Delegation: board → issues → dispatch | Accepted | How work flows downward, and the concurrency cap |
 
 **Roles:** [`ROLES.md`](ROLES.md) is the single home for the role list — `policy` parses it.
 `python3 .github/policy_check.py --who <path>` answers "who owns this?".
