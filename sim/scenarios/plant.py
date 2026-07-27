@@ -185,18 +185,196 @@ def rider_geoms(style: str, com_height: float) -> str:
     return "".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Terrain — a genuinely tilted ground plane
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS ALONGSIDE THE ROTATED-GRAVITY HILL, NOT INSTEAD OF IT
+# ---------------------------------------------------------------------
+# `hill.py` models a grade by rotating the gravity vector and leaving the
+# ground flat. That was the right first call: it keeps the nose-strike contact
+# geometry bit-identical to every other scenario, so an 18.57 deg strike on a
+# hill means what it means on the flat. Changing the geometry to get a hill
+# would have moved the one contact case the scenario exists to measure.
+#
+# It has two ceilings, and one of them is not a physics problem at all:
+#
+#   1. IT CANNOT BE FILMED. A gravity-rotated hill renders as a board on flat
+#      ground accelerating for no visible reason. For the build log and the
+#      design-doc video that footage is actively misleading -- it reads as a
+#      bug, not a hill. A real tilted plane is the only version with a slope in
+#      frame.
+#   2. IT CAN ONLY EVER BE AN INFINITE UNIFORM PLANE. No crest, no grade
+#      transition, no compression at the bottom of a dip. The transition ONTO a
+#      slope is a plausible place for a balancer to fail and rotated gravity
+#      cannot express it at all.
+#
+# Here gravity stays vertical and the ground tilts, so the two models are
+# genuinely independent routes to the same answer and can be cross-checked
+# against each other. `test_plant_terrain.py` does exactly that on the flat and
+# at a mid grade. If they ever disagree, that disagreement is a finding.
+#
+# SIGN, MEASURED NOT ASSERTED
+# ---------------------------
+# Forward is -X. `grade_pct > 0` means DOWNHILL IS FORWARD, matching hill.py.
+# That requires a rotation of -phi about +Y, giving a ground normal of
+# (-sin phi, 0, cos phi). The opposite sign puts the hill the other way up, and
+# the failure mode of getting it wrong is a scenario that quietly measures a
+# climb while its filename says descent. Asserted against actual rolling
+# direction in `test_positive_grade_rolls_forward_downhill`, not derived and
+# trusted -- this repo has already shipped one frame convention that was
+# "derived" and wrong.
+
+_GROUND_GEOM = '<geom name="ground" type="plane" size="20 20 0.1" material="ground_mat"/>'
+_FRAME_BODY = '<body name="frame" pos="0 0 0.1454">'
+
+
+def slope_rad(grade_pct: float) -> float:
+    """Slope angle from a percentage grade. `grade_pct = 100 * rise / run`."""
+    import math
+
+    return math.atan(grade_pct / 100.0)
+
+
+def slope_normal(grade_pct: float):
+    """Unit normal of the tilted ground plane, world frame.
+
+    `(-sin phi, 0, cos phi)`. Verified against MuJoCo's compiled `geom_xmat`
+    rather than assumed -- see `test_slope_normal_matches_the_compiled_model`.
+    """
+    import math
+
+    import numpy as np
+
+    phi = slope_rad(grade_pct)
+    return np.array([-math.sin(phi), 0.0, math.cos(phi)])
+
+
+def tilt_ground(xml: str, grade_pct: float) -> str:
+    """Tilt the ground plane to `grade_pct` and stand the board back on it.
+
+    Two edits, and the second is the one that is easy to forget. Tilting the
+    plane alone leaves the axle at its flat-ground height, which is *inside*
+    the slope: the perpendicular distance from the axle to a plane through the
+    origin is `h*cos(phi)`, i.e. short of the rolling radius by `h*(1-cos phi)`.
+    MuJoCo would resolve that as a penetration and spit the board out on the
+    first step. The axle therefore rises to `r / cos(phi)`, which puts it
+    exactly `r` from the tilted surface.
+
+    Both replacements are checked, not trusted. A silent no-op here produces a
+    model that looks tilted in the XML and behaves flat, which is far worse
+    than an exception -- it is the same failure class as a strip that does not
+    strip.
+    """
+    import math
+
+    if grade_pct == 0.0:
+        return xml
+
+    phi_deg = math.degrees(slope_rad(grade_pct))
+    tilted = _GROUND_GEOM.replace(
+        'size="20 20 0.1"', f'size="20 20 0.1" euler="0 {-phi_deg:.9g} 0"'
+    )
+    out, n = xml.replace(_GROUND_GEOM, tilted), xml.count(_GROUND_GEOM)
+    if n != 1:
+        raise RuntimeError(
+            f"expected exactly one ground plane geom to tilt, found {n}. The "
+            "markup in overboard_onewheel.xml changed; update _GROUND_GEOM."
+        )
+
+    if out.count(_FRAME_BODY) != 1:
+        raise RuntimeError(
+            "could not find the frame body to raise onto the slope. Tilting the "
+            "ground without raising the axle buries the wheel in the plane."
+        )
+    r = float(_FRAME_BODY.split('pos="0 0 ')[1].rstrip('">'))
+    raised = _FRAME_BODY.replace(
+        f'pos="0 0 {r}"', f'pos="0 0 {r / math.cos(slope_rad(grade_pct)):.9g}"'
+    )
+    return out.replace(_FRAME_BODY, raised)
+
+
+def strike_angles_deg(model, grade_pct: float = 0.0) -> dict:
+    """Pitch at which each bumper first reaches the ground, from geometry.
+
+    Returns nose and tail SEPARATELY, in world nose-up-positive radians-as-
+    degrees (ICD 10.1), plus the relative angle they share.
+
+    WHY SEPARATELY. On the flat the two are symmetric -- both bumpers reach the
+    ground at 18.57 deg, in opposite directions -- so one number was enough and
+    `nose_strike_angle_deg` collapses them with a min(). On a slope they are
+    NOT symmetric, because the board sits nose-down by the slope angle before
+    it has pitched at all:
+
+        board resting flat on the slope  =>  world pitch = -phi
+        nose reaches the ground at        =>  world pitch = -(rel + phi)
+        tail reaches the ground at        =>  world pitch = +(rel - phi)
+
+    So a DESCENT (grade > 0) brings the tail strike closer and pushes the nose
+    strike away; a CLIMB does the reverse. That is exactly the asymmetry the
+    hill gate measured -- descents fail tail-down, climbs fail nose-down -- and
+    it falls out of the geometry rather than having to be discovered per grade.
+
+    The angle is derived from the collision hull's vertices against the tilted
+    plane, so it stays correct if the meshes, the tire radius or the grade
+    change. The critical vertex is NOT the bumper tip: the bumper curves up
+    toward its nose, so the underside heel lands first, ~90 mm inboard.
+    """
+    import math
+
+    import mujoco
+    import numpy as np
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
+    axle = np.array(data.xpos[body], dtype=float)
+    n = slope_normal(grade_pct)
+
+    out = {}
+    for name, key in (("front_bumper_geom", "nose"), ("rear_bumper_geom", "tail")):
+        gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        mesh = model.geom_dataid[gid]
+        adr, num = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+        verts = model.mesh_vert[adr : adr + num].astype(float)
+        # hull vertices in frame-body coordinates, axle at the origin
+        v = data.geom_xpos[gid] + verts @ data.geom_xmat[gid].reshape(3, 3).T - axle
+
+        # Sweep world pitch. Nose-up-positive about +Y (ICD 10.1): a rotation of
+        # +theta maps the body -x axis (the nose) toward +z.
+        hit = None
+        for deg in np.arange(0.0, 89.0, 0.01):
+            th = math.radians(deg) * (-1.0 if key == "nose" else 1.0)
+            c, s = math.cos(th), math.sin(th)
+            R = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+            if float(((axle + v @ R.T) @ n).min()) <= 0.0:
+                hit = math.copysign(deg, th)
+                break
+        out[key] = hit
+    out["relative_deg"] = (
+        None if out["tail"] is None else out["tail"] + math.degrees(slope_rad(grade_pct))
+    )
+    return out
+
+
 def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
-                rider_style: str = "figure"):
+                rider_style: str = "figure", grade_pct: float = 0.0):
     """The stock model, optionally with a rigid rider-proxy mass above the axle.
 
     A rigid ballast is NOT a rider: a real one is compliant at the ankles and
     knees, which changes the dynamics substantially. It is the honest
     order-of-magnitude stand-in for "what happens when the centre of mass moves
     above the axle", which is the property that matters here.
+
+    `grade_pct` tilts the GROUND and leaves gravity vertical (see `tilt_ground`).
+    It defaults to 0.0, so every existing caller is unaffected. This is the
+    filmable hill and the one that can later carry a crest or a grade
+    transition; `hill.py`'s rotated-gravity model remains the reference for the
+    infinite uniform plane, and the two are cross-checked against each other.
     """
     import mujoco
 
-    xml = MODEL_PATH.read_text()
+    xml = tilt_ground(MODEL_PATH.read_text(), grade_pct)
     if clamp_a is not None:
         lim = clamp_a * KT_NM_PER_A
         xml = xml.replace('ctrlrange="-28 28"', f'ctrlrange="{-lim:g} {lim:g}"')
