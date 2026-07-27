@@ -250,7 +250,9 @@ def check_turf(roles: dict, rules: list) -> None:
         fail(
             "turf",
             f"branch is {role}'s ({branch}) but edits {t}. File a row, or put "
-            f"'TURF-OVERRIDE: <reason or row url>' in the PR body if this is authorised",
+            f"'TURF-OVERRIDE: <reason or row url>' in a COMMIT MESSAGE on this "
+            f"branch if it is authorised -- CI reads commit messages, not the PR "
+            f"body, so the reason lives in git history rather than an editable field",
         )
 
 

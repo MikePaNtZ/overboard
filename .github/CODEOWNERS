@@ -132,6 +132,32 @@
 /docs/web-artifact-pipeline.md  @MikePaNtZ
 
 # --------------------------------------------------------------------------
+# Operational tooling: the dispatch gate, the usage sensor, the metrics script.
+# These are the enforcement surfaces for ADR-0006 and ADR-0007.
+# --------------------------------------------------------------------------
+# role: COO
+/ops/                           @MikePaNtZ
+# role: COO
+/roles/                         @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# Each role owns its own working-context file and may append to it in any PR.
+# This is what makes dispatch to a fresh agent safe instead of amnesiac.
+# --------------------------------------------------------------------------
+# role: CEO
+/roles/ceo/                     @MikePaNtZ
+# role: CMO
+/roles/cmo/                     @MikePaNtZ
+# role: Senior Digital Marketer
+/roles/senior-digital-marketer/ @MikePaNtZ
+# role: Digital Content Production
+/roles/digital-content-production/ @MikePaNtZ
+# role: Sr. Mechanical & Systems
+/roles/sr-mechanical-systems/   @MikePaNtZ
+# role: Senior Controls
+/roles/senior-controls/         @MikePaNtZ
+
+# --------------------------------------------------------------------------
 # ROLES THAT OWN NOTHING IN THIS REPO -- stated on purpose, so their absence
 # reads as a decision rather than an oversight.
 #
