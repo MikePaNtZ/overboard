@@ -28,6 +28,32 @@ def ridden():
 
 OFF, ACTIVE, SHADOW = 0, 1, 2
 
+#: Shared reason for the results this branch re-opens rather than re-tunes.
+#:
+#: `plant.imu_readings` used to convert MuJoCo axes to the ICD body frame with
+#: `diag(+1,+1,−1)` — determinant −1, a reflection, not a rotation. It inverted
+#: the accelerometer's x channel, so the complementary filter fused a
+#: nose-up-positive gyro against a nose-down-positive accelerometer. Every
+#: result below was measured through that. The corrected `diag(−1,+1,−1)`
+#: changes them materially, and in one case reverses the comparison the
+#: workstream's conclusion rests on.
+#:
+#: These are marked xfail(strict) rather than re-tuned, deleted, or left red on
+#: purpose. Re-tuning them to the new numbers would silently re-author Senior
+#: Controls' conclusions inside a frame-map fix; deleting them would destroy the
+#: evidence; leaving them red would block the fix indefinitely on a sim every
+#: other role is building against. strict=True means each one goes red the
+#: moment it starts passing again, so none can be forgotten.
+#:
+#: Owner: Senior Controls. Each xfail should become a re-derived assertion or a
+#: deliberate deletion. See the Escalations row "Correct the sim IMU→ICD frame
+#: map: it is a reflection (det = −1), not a rotation".
+FRAME_MAP_REBASELINE = (
+    "Recorded against the pre-fix IMU→ICD frame map (det = −1, a reflection that "
+    "inverted accelerometer x). Needs re-deriving by Senior Controls against the "
+    "corrected diag(−1,+1,−1) rotation — see the Escalations row on the frame map."
+)
+
 
 def _run(model, use_estimator, tau=TAU, secs=8.0, impulse=NOMINAL_IMPULSE_NS):
     with RustController(
@@ -97,8 +123,16 @@ def test_the_estimator_meets_the_ac_on_an_undisturbed_board(ridden):
     assert r.metrics.pitch_est_max_deg <= 1.0
 
 
+@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
 def test_closing_the_loop_on_the_v1_estimator_destabilises_the_board(ridden):
     """**The headline result, recorded rather than hidden.**
+
+    XFAILED PENDING RE-BASELINE (see FRAME_MAP_REBASELINE). Under the corrected
+    model→ICD rotation the board no longer strikes: peak |pitch| 18.81° → 7.71°,
+    estimator RMS 27.813° → 0.312°. The destabilisation recorded here was
+    dominated by an inverted accelerometer x channel, not by the mechanism the
+    docstring describes. That mechanism is still real and still measurable —
+    closed loop remains ~5× worse than shadow — but at a fraction of this size.
 
     In shadow the filter is accurate to ~1.1 deg RMS. Driving the loop with it
     strikes. The mechanism is feedback: estimate error produces a wrong command,
@@ -238,8 +272,14 @@ def test_the_shuttle_hands_the_controller_a_live_imu():
     )
 
 
+@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
 def test_command_feedforward_closes_the_loop_on_the_shuttle():
     """**The result this whole workstream was after.**
+
+    XFAILED PENDING RE-BASELINE. Still completes the run without a strike, but
+    return error goes 0.0226 m → 0.2331 m under the corrected rotation, so the
+    < 0.10 m assertion no longer holds. The qualitative result survives; the
+    number does not.
 
     Driving the real control law from a fused attitude estimate, the board
     completes the shuttle run. Measured through the real scenario and the real
@@ -256,8 +296,20 @@ def test_command_feedforward_closes_the_loop_on_the_shuttle():
     )
 
 
+@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
 def test_the_original_wheel_odometry_aiding_still_falls_over():
     """The other half of the measurement, so the fix is a comparison.
+
+    XFAILED PENDING RE-BASELINE — **and this is the one that matters most.**
+    Under the corrected rotation wheel-odometry aiding does NOT fall over:
+    strike True → False, return error 120.84 m → 0.2783 m, against command
+    feedforward's 0.2331 m. The comparison this test exists to make — odometry
+    fatal, feedforward the fix — collapses to a 0.05 m difference between two
+    configurations that both work.
+
+    That does not make command feedforward wrong. It removes the evidence that
+    it was *necessary*, which is a different claim and has to be re-established
+    rather than assumed.
 
     Same filter, same tau, same everything -- only the source of the forward
     acceleration correction differs. Wheel odometry differentiates a quantised,
@@ -272,8 +324,13 @@ def test_the_original_wheel_odometry_aiding_still_falls_over():
     )
 
 
+@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
 def test_a_long_crossover_is_the_other_way_to_survive_and_costs_accuracy():
     """Both knobs work, and the trade between them is the interesting part.
+
+    XFAILED PENDING RE-BASELINE. The trade is still visible but no longer clears
+    the 5× bar: 0.9567 m vs 0.2331 m is 4.10×. A threshold set against a
+    confounded baseline, not a result that vanished.
 
     tau >= 10 s stabilises the loop with the ORIGINAL aiding, by leaning on the
     accelerometer less. It costs position accuracy, because a gyro bias b leaves
