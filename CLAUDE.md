@@ -13,6 +13,8 @@ Extends the global `~/.claude/CLAUDE.md`. Project: a DIY **lean-to-steer self-ba
 - **Stay in your own git worktree and branch prefix.** Two sessions in one working directory
   corrupt each other — this has already happened. `python3 .github/policy_check.py --who <path>`
   answers "am I trespassing?"; roles are in `docs/decisions/ROLES.md`.
+- **Never poll your own PR.** `gh pr merge <n> --squash --auto` queues it — GitHub updates the
+  branch and merges when green. Queue it and start the next thing.
 - Escalate on **Promise, Door, or Turf**; difficulty is not a trigger. Every row needs a default
   action and a deadline, so nobody is ever parked.
 
@@ -37,7 +39,9 @@ Extends the global `~/.claude/CLAUDE.md`. Project: a DIY **lean-to-steer self-ba
   so requiring it would hang every PR forever waiting for a check that never reports.
 - `enforce_admins` is off, so Mike can break glass in an emergency. Claude must not.
 - Open the PR with a body that states what changed and *why*, and call out any acceptance criteria
-  that moved. Wait for CI, then merge (squash) — do not merge red or bypass protection.
+  that moved. Then **queue it — `gh pr merge <n> --squash --auto`** — and start the next thing.
+  Auto-merge and auto-delete-on-merge are on for all three repos, so GitHub brings the branch up
+  to date and merges when green. Do not sit and poll; do not merge red or bypass protection.
 
 ## Public artifacts
 - Both repos are **public**. CI publishes the sim render + metrics to the rolling `sim-latest`
