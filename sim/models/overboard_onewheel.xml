@@ -143,7 +143,10 @@
       <inertial pos="0 0 -0.03" mass="8.0" diaginertia="0.040 0.400 0.420"/>
 
       <!-- IMU mounting point: on the electronics platform, just aft of the
-           axle, axes aligned with the frame (x fwd-negative, y left, z up). -->
+           axle, axes aligned with the frame. Right-handed only (MuJoCo
+           cannot represent a left-handed frame): forward = -x, up = +z,
+           so right is derived, not asserted:
+             (-x_hat) x y_hat = -z_hat  =>  right = +y. -->
       <site name="imu" pos="-0.06 0 -0.007" size="0.008" group="4"/>
 
       <!-- Openwheel shells: visual only. -->
