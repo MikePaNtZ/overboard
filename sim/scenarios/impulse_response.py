@@ -447,3 +447,4 @@ def run(
         motor_current_a=np.asarray(currents),
         qpos=np.asarray(states) if states else np.empty(0),
     )
+
