@@ -43,6 +43,18 @@ primitive the org has.
 - `Proposed` ADRs are visible on purpose: they are the current working assumption, and a
   role that disagrees files a row rather than editing around it.
 
+## Never wait on your own PR
+
+Branch protection is **strict** — a PR must be up to date with master before it merges, and
+master moves several times a day. Polling for that is wasted time and wasted tokens.
+
+```sh
+gh pr merge <n> --squash --auto      # queues it; GitHub updates the branch and merges when green
+```
+
+Auto-merge and auto-delete-on-merge are enabled on all three repos. **Queue the merge and move
+on to the next thing.** Come back only if a check actually fails.
+
 ## Escalate when any one is true — Promise, Door, or Turf
 
 - **Promise** — it changes something outside your role relies on: a public claim, a
