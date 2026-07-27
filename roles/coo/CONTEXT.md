@@ -16,7 +16,13 @@
 
 ## Decisions made (append as you go)
 
-_Nothing recorded yet by this role._
+- **2026-07-27 — match the agent type to the work before dispatching.** `sonnet-executor`
+  carries Read/Write/Edit/Bash/Grep/Glob only. A Notion + web-research task sent to it burned
+  a full agent boot to report that it had no tools. Use `general-purpose` for anything needing
+  MCP or the web. Now printed by `ops/dispatch.sh`.
+- **2026-07-27 — issues beat queue rows for getting work done.** Issue #21 was argued over in
+  two mutually-blocking escalation rows for hours; the moment it became a GitHub issue with an
+  acceptance criterion, Controls closed it unprompted and without dispatch.
 
 ## Known dead ends
 
