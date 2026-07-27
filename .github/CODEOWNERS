@@ -121,6 +121,8 @@
 /tests/test_bench_*.py          @MikePaNtZ
 # role: Sr. Mechanical & Systems
 /tests/test_imperfections.py    @MikePaNtZ
+# role: Sr. Mechanical & Systems
+/tests/test_plant_*.py          @MikePaNtZ
 
 # --------------------------------------------------------------------------
 # Renders and published media. This role does NOT own the landing page's
