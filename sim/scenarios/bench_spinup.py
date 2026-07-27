@@ -47,6 +47,60 @@ not exist. `J_bare`, by contrast, comes out UNBIASED by this same algebra --
 the friction term cancels between the two runs exactly, which is a genuine
 property of the method and not a coincidence of these particular numbers.
 
+kt WAS ALSO BIASED BY A MUCH LARGER AMOUNT, AND THAT ONE IS FIXED HERE
+-----------------------------------------------------------------------
+The Coulomb bias above is ~0.5%. There was a second bias roughly a HUNDRED
+times larger, and the asymmetry between what it does to kt and what it does to
+`J_bare` is worth understanding because it is the same asymmetry as above
+running the other way.
+
+The current does not arrive when commanded. Under `STAGE0_PLACEHOLDER` there
+is 1 ms of actuation delay and a 1 ms current-loop time constant, against what
+used to be a 5 ms fit window. So for the first fifth of that window there was
+little or no torque at the shaft, and the 500 Hz feedback update laid a 2 ms
+staircase on top. Both ramps were suppressed by roughly the same factor
+k ~ 0.5, and:
+
+  * `J_bare = kt*i/alpha_1` -- k appears in numerator and denominator, so it
+    CANCELS. J_bare was accurate to 0.1% the whole time.
+  * `kt = J_disc / (i*(1/alpha_2 - 1/alpha_1))` -- scales LINEARLY with k. It
+    came out at 0.02493 against a 0.05026 nameplate: 50.4% low, a factor of
+    two, on the default profile.
+
+The slope RATIO survived (7.70 with imperfections, 7.68 without), which is why
+the two-run structure still worked and only the absolute scale was lost. That
+is also why this hid so well: everything self-consistent stayed self-consistent
+and only the one number with an external reference was wrong.
+
+THE FIX HAS TWO PARTS, AND BOTH ARE ABOUT NOT ASSUMING THE COMMAND WAS OBEYED.
+
+1. FIT WHERE THE RAMP IS ACTUALLY A RAMP. The window now starts when the
+   measured current has settled to within `settle_fraction` of the command,
+   detected FROM THE CURRENT TRACE rather than computed from the profile --
+   see `settle_time_s`. That distinction matters: on hardware there is no
+   profile object to consult, only a current sensor, so a data-driven rule is
+   the only one that transfers. The rig's whole job is to characterise this
+   signal path, so it must not require the answer as an input.
+
+2. FIT AGAINST THE MEASURED CURRENT, NOT THE COMMANDED ONE. `kt*i = J*alpha`
+   is a statement about the current that actually flowed. Using the command
+   assumes a perfect current loop, which is precisely the assumption the bench
+   exists to test. The mean measured current over the fit window is the
+   consistent estimator here, and it makes the fit robust to any current-path
+   imperfection rather than only to the two currently modelled.
+
+Result: kt error on the default profile goes 50.4% -> 0.13%, and both
+profiles now land on the same ~0.1-0.5% floor, which IS the Coulomb bias above
+-- i.e. the only bias left is the one the algebra predicts. `test_identify_
+recovers_kt_under_the_stage0_profile` pins this so it cannot regress; its
+absence is why a factor-of-two error shipped green.
+
+RAISED BY Digital Content Production, who found it while building the render
+and correctly declined to quote a fitted kt in published material until it was
+resolved. The diagnostic that should have caught it did fire -- R^2 fell from
+1.0000 to 0.6927 -- but nothing asserted it, so the suite stayed green. Both
+R^2 values are now floored in the tests.
+
 SPIN-DOWN: b AND tau_c ARE FIT SEPARATELY, NOT LUMPED
 ------------------------------------------------------
 A single lumped friction coefficient fits a decelerating flywheel badly:
@@ -131,6 +185,21 @@ CURRENT_TRACKING_TOLERANCE_A = 0.5
 
 _FLYWHEEL_GEOM_RE = re.compile(r'<geom name="flywheel"[^>]*/>')
 
+#: The index mark goes with the disc it is drawn on.
+#:
+#: `index` sits at `pos="0 0.046 0.052"` -- the same y as the flywheel, at 52 mm
+#: radius, i.e. on the disc face. Strip the disc and leave the mark and you get
+#: a white bar rotating in mid-air where the flywheel used to be.
+#:
+#: It is massless with collision off, so `J_bare` and every fitted number are
+#: unaffected either way; this is model coherence, not correctness. But a plant
+#: model that renders as a floating decal is a plant model that will eventually
+#: be believed about something else. The mark exists so rotation is legible, and
+#: a bare on-axis rotor has nothing to make legible.
+#:
+#: Raised by Digital Content Production, who hit it rendering the bare variant.
+_INDEX_GEOM_RE = re.compile(r'<geom name="index"[^>]*/>')
+
 
 def known_disc_inertia_kg_m2() -> float:
     """`J_disc` from geometry and material, NOT from the compiled model.
@@ -162,19 +231,30 @@ def _joint_inertia(model: mujoco.MjModel) -> float:
 
 
 def strip_flywheel_geom(xml: str) -> str:
-    """Remove the flywheel geom from the MJCF string.
+    """Remove the flywheel geom -- and the index mark drawn on it -- from the
+    MJCF string.
 
     A regex, not `MjSpec` surgery: `MjsGeom` has no `.delete()`, and building
     the bare variant through spec editing is not worth the fragility for one
     geom. The caller MUST verify the strip actually worked -- see
     `build_bare_model` -- because a silent no-op here would make the bare and
     loaded runs identical and turn the two-run fit into a divide-by-zero.
+
+    The index mark is removed with the disc because it is ON the disc; see
+    `_INDEX_GEOM_RE`. It is massless, so no fitted number moves.
     """
     stripped, n = _FLYWHEEL_GEOM_RE.subn("", xml)
     if n != 1:
         raise RuntimeError(
             f"expected exactly one <geom name=\"flywheel\".../> to strip, found {n}. "
             "The bench_rig.xml flywheel geom's markup may have changed; update the regex."
+        )
+    stripped, n_index = _INDEX_GEOM_RE.subn("", stripped)
+    if n_index != 1:
+        raise RuntimeError(
+            f"expected exactly one <geom name=\"index\".../> to strip, found {n_index}. "
+            "The mark is drawn on the flywheel face, so it must go with it -- "
+            "otherwise the bare model renders a decal floating where the disc was."
         )
     return stripped
 
@@ -191,20 +271,66 @@ def build_bare_model(xml_text: str | None = None) -> mujoco.MjModel:
     assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel") < 0, (
         "flywheel geom is still present after stripping -- the regex did not match"
     )
+    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "index") < 0, (
+        "index mark survived the flywheel strip -- it is drawn on the disc face, "
+        "so the bare model would render a decal floating in mid-air"
+    )
     return bare
 
 
-def _fit_line(t: np.ndarray, y: np.ndarray, window_s: float) -> tuple[float, float]:
-    """Least-squares slope of `y` vs `t` over `t <= window_s`, plus R^2.
+def settle_time_s(
+    t: np.ndarray, i_measured: np.ndarray, commanded_a: float, fraction: float,
+) -> float:
+    """First instant after which the measured current STAYS within `fraction`
+    of the command.
+
+    Data-driven on purpose. The obvious alternative -- compute
+    `actuation_delay_s + 5*current_loop_tau_s` from the profile -- gives the
+    same answer in sim and is useless on hardware, where there is no profile
+    object, only a current sensor. Since characterising this very signal path
+    is the rig's job, a rule that needs the answer as an input is circular.
+
+    "Stays within" rather than "first reaches": a staircased or noisy current
+    can clip the threshold once on the way up. The last violation is what
+    bounds the transient, so the search runs from the end.
+    """
+    ok = np.asarray(i_measured) >= fraction * commanded_a
+    if not ok.any():
+        raise ValueError(
+            f"measured current never reached {fraction:.0%} of the commanded "
+            f"{commanded_a} A. Either the drive is saturating or the run is too "
+            "short to contain a settled ramp; the fit would be of the transient."
+        )
+    violations = np.flatnonzero(~ok)
+    idx = 0 if violations.size == 0 else int(violations[-1]) + 1
+    if idx >= len(t):
+        raise ValueError(
+            "measured current settles only at the very last sample -- no ramp "
+            "left to fit. Increase IdentifyParams.sim_seconds."
+        )
+    return float(t[idx])
+
+
+def _fit_line(
+    t: np.ndarray, y: np.ndarray, window_s: float, start_s: float = 0.0,
+) -> tuple[float, float]:
+    """Least-squares slope of `y` vs `t` over `start_s <= t <= window_s`, plus R^2.
 
     A window fit, not a two-sample finite difference -- so a bad window (too
     long, catching friction or a current cutback) is visible in the R^2
     rather than silently baked into a slope from two noisy points.
+
+    `start_s` defaults to 0.0 so the pre-existing two-argument call is
+    unchanged, but `identify` always passes an explicit start: fitting from
+    t=0 through an actuation delay and a current-loop lag is what produced a
+    factor-of-two kt error (see the module docstring).
     """
-    mask = t <= window_s
+    mask = (t >= start_s) & (t <= window_s)
     tt, yy = t[mask], y[mask]
     if len(tt) < 2:
-        raise ValueError(f"fit window {window_s}s contains fewer than 2 samples")
+        raise ValueError(
+            f"fit window [{start_s}s, {window_s}s] contains fewer than 2 samples"
+        )
     design = np.vstack([tt, np.ones_like(tt)]).T
     (slope, intercept), *_ = np.linalg.lstsq(design, yy, rcond=None)
     pred = slope * tt + intercept
@@ -217,23 +343,32 @@ def _fit_line(t: np.ndarray, y: np.ndarray, window_s: float) -> tuple[float, flo
 def _run_constant_current(
     model: mujoco.MjModel, current_a: float, seconds: float, profile: ImperfectionProfile,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Drive `model` with a held commanded current; log time and SENSED shaft
-    rate (i.e. run through the same quantisation/update-rate a real bench
-    identification would see, not MuJoCo truth)."""
+    """Drive `model` with a held commanded current; log time, SENSED shaft rate,
+    and the current ACTUALLY delivered.
+
+    The sensed rate runs through the same quantisation and update-rate a real
+    bench identification would see, not MuJoCo truth.
+
+    The delivered current is returned because `kt*i = J*alpha` is a statement
+    about the current that flowed, not the one that was asked for. Returning
+    only the command would force every caller to assume a perfect current loop
+    -- the assumption this rig exists to test.
+    """
     data = mujoco.MjData(model)
     dt = float(model.opt.timestep)
     n_steps = int(round(seconds / dt))
     imp = ImperfectionState(profile=profile, dt_s=dt)
     mujoco.mj_forward(model, data)
 
-    ts, ws = [], []
+    ts, ws, i_meas = [], [], []
     for _ in range(n_steps):
         current = imp.apply_current(current_a)
         data.ctrl[0] = current * NAMEPLATE_KT_NM_PER_A
         mujoco.mj_step(model, data)
         ts.append(float(data.time))
         ws.append(imp.wheel_rate(float(data.qvel[0]), float(data.time)))
-    return np.asarray(ts), np.asarray(ws)
+        i_meas.append(current)
+    return np.asarray(ts), np.asarray(ws), np.asarray(i_meas)
 
 
 # ---------------------------------------------------------------------------
@@ -250,14 +385,37 @@ class IdentifyParams:
     the kt fit (tau_c/i, see the module docstring) stays under ~0.5% of kt
     while remaining well inside the rig's 40 A / 2.0 N*m envelope."""
 
-    fit_window_s: float = 0.005
-    """Early window for the alpha fit. Short enough that viscous drag (which
-    grows with w, unlike Coulomb) has not yet bent the ramp measurably."""
+    fit_span_s: float = 0.014
+    """Length of the alpha fit window, measured FROM the settle instant rather
+    than from t=0 -- see `settle_time_s` and the module docstring.
 
-    sim_seconds: float = 0.02
-    """Just past the fit window, so nothing here depends on a current cutback
-    or on friction dominating -- both would show up as a fit window that
-    silently ran past the data available."""
+    Replaces the old `fit_window_s = 0.005`, which started at zero and so spent
+    its first fifth inside the actuation delay and current-loop lag. That is
+    the factor-of-two kt error. The name changed deliberately: the semantics
+    are different, and a silently redefined `fit_window_s` would be worse than
+    a loud `AttributeError` for any caller that reaches for it.
+
+    14 ms is chosen against measurement, not taste. Too short and the 500 Hz
+    sensed-rate staircase leaves too few distinct updates to fit a slope
+    through (10 ms gives five); too long and viscous drag, which grows with w
+    unlike Coulomb, starts bending the ramp -- visible as J_bare error creeping
+    up with span. Measured kt error by span on the default profile: 0.23% at
+    10 ms, 0.13% at 14 ms, 0.31% at 20 ms, 0.95% at 30 ms."""
+
+    settle_fraction: float = 0.99
+    """Fraction of the commanded current the measured current must reach, and
+    stay at, before the fit window opens.
+
+    0.99 is ~5 time constants of the current loop. 0.95 would open the window
+    ~3 tau in, while the ramp is still visibly curved; 0.999 buys nothing and
+    costs samples off the front of a finite run."""
+
+    sim_seconds: float = 0.04
+    """Long enough to contain the settle transient AND the full fit span with
+    margin (7 ms + 14 ms on the default profile). Was 0.02, which only just
+    cleared the old 5 ms window; the fit now starts later, so the run has to
+    end later. `identify` asserts the window actually fits inside the data
+    rather than letting a short run silently truncate it."""
 
 
 @dataclass
@@ -269,6 +427,20 @@ class IdentifyMetrics:
     alpha_loaded_rad_s2: float = 0.0
     r2_bare: float = 0.0
     r2_loaded: float = 0.0
+
+    #: The fit window actually used, in seconds. DERIVED FROM THE DATA, not a
+    #: parameter, so it has to be reported or the fit is not reproducible: the
+    #: start comes from where the measured current settled (`settle_time_s`).
+    #: Anything cross-checking these slopes must fit over the same interval --
+    #: comparing a post-settle slope against a from-zero one is a ~40%
+    #: "divergence" that is really two different signals.
+    fit_start_s: float = 0.0
+    fit_end_s: float = 0.0
+
+    #: Mean current that actually flowed over the fit window. This, not
+    #: `commanded_current_a`, is the `i` in `kt*i = J*alpha` -- see the module
+    #: docstring on why using the command cost a factor of two.
+    i_measured_mean_a: float = 0.0
 
     #: Against the nameplate/geometry references -- informational, NOT the
     #: acceptance criterion for a bare-motor J (there is no independent
@@ -310,20 +482,45 @@ def identify(
         "did not actually remove any mass"
     )
 
-    t_bare, w_bare = _run_constant_current(
+    t_bare, w_bare, i_bare = _run_constant_current(
         bare_model, params.commanded_current_a, params.sim_seconds, profile
     )
-    t_loaded, w_loaded = _run_constant_current(
+    t_loaded, w_loaded, i_loaded = _run_constant_current(
         loaded_model, params.commanded_current_a, params.sim_seconds, profile
     )
 
-    alpha1, r2_1 = _fit_line(t_bare, w_bare, params.fit_window_s)
-    alpha2, r2_2 = _fit_line(t_loaded, w_loaded, params.fit_window_s)
+    # Open the window only once the current has settled in BOTH runs. Taking the
+    # later of the two keeps the two fits over the same interval, which is what
+    # makes the slope ratio -- the quantity the whole two-run method rests on --
+    # a comparison of like with like.
+    i_cmd = params.commanded_current_a
+    t_start = max(
+        settle_time_s(t_bare, i_bare, i_cmd, params.settle_fraction),
+        settle_time_s(t_loaded, i_loaded, i_cmd, params.settle_fraction),
+    )
+    t_end = t_start + params.fit_span_s
+    if t_end > float(t_bare[-1]):
+        raise ValueError(
+            f"fit window [{t_start*1e3:.1f}, {t_end*1e3:.1f}] ms runs past the "
+            f"{float(t_bare[-1])*1e3:.1f} ms run. Increase sim_seconds; a truncated "
+            "window would silently fit fewer samples than asked for."
+        )
+
+    alpha1, r2_1 = _fit_line(t_bare, w_bare, t_end, start_s=t_start)
+    alpha2, r2_2 = _fit_line(t_loaded, w_loaded, t_end, start_s=t_start)
+
+    # The current that actually flowed over the fit window, not the command.
+    # Averaged across both runs: they share a profile and a held command, so the
+    # traces are the same to within the loop's own settling, and one number keeps
+    # the two-equation algebra below in the form the docstring derives.
+    def _mean_i(t, i_meas):
+        return float(np.asarray(i_meas)[(t >= t_start) & (t <= t_end)].mean())
+
+    i_eff = 0.5 * (_mean_i(t_bare, i_bare) + _mean_i(t_loaded, i_loaded))
 
     j_disc = known_disc_inertia_kg_m2()
-    i = params.commanded_current_a
-    kt_fit = j_disc / (i * (1.0 / alpha2 - 1.0 / alpha1))
-    j_bare_fit = kt_fit * i / alpha1
+    kt_fit = j_disc / (i_eff * (1.0 / alpha2 - 1.0 / alpha1))
+    j_bare_fit = kt_fit * i_eff / alpha1
 
     m = IdentifyMetrics(
         kt_fit_nm_per_a=kt_fit,
@@ -334,8 +531,11 @@ def identify(
         r2_bare=r2_1,
         r2_loaded=r2_2,
         kt_error_vs_nameplate_pct=abs(kt_fit - NAMEPLATE_KT_NM_PER_A) / NAMEPLATE_KT_NM_PER_A * 100.0,
+        fit_start_s=t_start,
+        fit_end_s=t_end,
+        i_measured_mean_a=i_eff,
         imperfection_profile_id=profile.profile_id,
-        commanded_current_a=i,
+        commanded_current_a=i_cmd,
         model_sha256=hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest()[:16],
         mujoco_version=mujoco.__version__,
         timestep_s=float(loaded_model.opt.timestep),
