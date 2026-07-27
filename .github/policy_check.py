@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """Policy gate for the Overboard repo.
 
-Four hard checks that fail the build, plus one advisory report that does not.
-See docs/decisions/ADR-0003-policy-ci-gate.md for why each one exists and why
-the advisory one is deliberately not hard yet.
+Hard checks fail the build; advisory findings are reported and do not.
+See docs/decisions/ADR-0003 (the gate) and ADR-0005 (the role registry).
 
-Run it locally before opening a PR:
-
-    python3 .github/policy_check.py
+    python3 .github/policy_check.py              # run every check
+    python3 .github/policy_check.py --who PATH   # who owns PATH?
 
 Stdlib only, on purpose: the policy gate must not be able to fail because a
-dependency moved.
+dependency moved. It also never queries Notion -- a network- or token-dependent
+required check produces red builds the PR author cannot fix, which would poison
+the one interrupt this org has that reliably works.
 """
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import re
 import subprocess
 import sys
@@ -23,26 +25,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 DECISIONS = REPO / "docs" / "decisions"
 CODEOWNERS = REPO / ".github" / "CODEOWNERS"
-
-KNOWN_ROLES = {
-    "CEO",
-    "COO",
-    "CMO",
-    "Sr. Mechanical & Systems",
-    "Senior Controls",
-    "Digital Content Production",
-}
+ROLES_MD = DECISIONS / "ROLES.md"
 
 VALID_ADR_STATUS = re.compile(
     r"^\s*-\s*\*\*Status:\*\*\s*(Proposed|Accepted|Rejected|Superseded by ADR-\d{4})\s*$",
     re.MULTILINE,
 )
-
-# A requirement ID: UR-13, SR-WEB-4, DR-SIM-1.
 REQ_ID = re.compile(r"\b(?:UR|SR|DR)-[A-Z0-9]*-?\d+\b")
 
-# Absolutes the program committed to never saying in public. Deliberately tight:
-# a broad list produces false positives, and a gate that cries wolf gets removed.
 BANNED = [
     (re.compile(r"production[- ]ready", re.I), "the project is explicitly not production-ready"),
     (re.compile(r"\bcertified\b", re.I), "nothing here is certified by anyone"),
@@ -54,12 +44,13 @@ BANNED = [
     (re.compile(r"medical[- ]grade|\bFDA\b"), "not a regulated device; do not borrow the language"),
 ]
 
-# Capability language that SHOULD trace to a requirement. Advisory for now.
 CAPABILITY = re.compile(
     r"self[- ]balanc\w*|balances?\s+itself|rides?\s+itself|riderless|driverless"
     r"|autonomous|\bproven\b",
     re.I,
 )
+
+TURF_OVERRIDE = re.compile(r"TURF-OVERRIDE:\s*(\S.*)")
 
 failures: list[str] = []
 advisories: list[str] = []
@@ -69,13 +60,206 @@ def fail(check: str, msg: str) -> None:
     failures.append(f"{check}: {msg}")
 
 
-def public_markdown() -> list[Path]:
-    """Markdown that forms the repo's public face.
+def git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=REPO, capture_output=True, text=True
+    ).stdout.strip()
 
-    docs/decisions/ is excluded on purpose. ADRs are internal engineering
-    records and must be able to QUOTE the banned words in order to ban them --
-    ADR-0003 lists every one of them. Scanning them would make the gate
-    self-defeating on its own charter.
+
+# ---------------------------------------------------------------------------
+# The role registry -- docs/decisions/ROLES.md is the single home.
+# ---------------------------------------------------------------------------
+def load_roles() -> dict[str, dict[str, str]]:
+    """Parse the registry table. Returns {role: {status, prefix}}."""
+    if not ROLES_MD.is_file():
+        fail("roles", "docs/decisions/ROLES.md is missing -- the role registry has no home")
+        return {}
+
+    roles: dict[str, dict[str, str]] = {}
+    for line in ROLES_MD.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 4:
+            continue
+        m = re.fullmatch(r"`([^`]+)`", cells[0])
+        if not m:
+            continue  # header or a non-role table
+        status = cells[1]
+        if status not in {"Provisional", "Ratified"}:
+            continue  # a different table that happens to have a backticked col 0
+        prefix = ""
+        pm = re.fullmatch(r"`([^`]+)`", cells[3])
+        if pm:
+            prefix = pm.group(1)
+        roles[m.group(1)] = {"status": status, "prefix": prefix}
+
+    if not roles:
+        fail("roles", "ROLES.md parsed to zero roles -- the registry table shape changed")
+    return roles
+
+
+# ---------------------------------------------------------------------------
+# CODEOWNERS
+# ---------------------------------------------------------------------------
+def load_codeowners() -> list[tuple[str, str, int]]:
+    """Returns [(pattern, role, lineno)] in file order. Last match wins."""
+    if not CODEOWNERS.is_file():
+        fail("ownership", ".github/CODEOWNERS is missing")
+        return []
+
+    rules: list[tuple[str, str, int]] = []
+    pending: str | None = None
+    for lineno, raw in enumerate(CODEOWNERS.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            m = re.match(r"#\s*role:\s*(.+?)\s*$", line)
+            if m:
+                pending = m.group(1)
+            continue
+        if pending is None:
+            fail("ownership", f"CODEOWNERS:{lineno} rule {line.split()[0]!r} has no '# role:' tag above it")
+            continue
+        rules.append((line.split()[0], pending, lineno))
+        pending = None
+    return rules
+
+
+def matches(pattern: str, path: str) -> bool:
+    if pattern == "*":
+        return True
+    p = pattern.lstrip("/")
+    if p.endswith("/"):
+        return path.startswith(p)
+    if "*" in p:
+        return fnmatch.fnmatch(path, p)
+    return path == p or path.startswith(p + "/")
+
+
+def owner_of(path: str, rules: list[tuple[str, str, int]]) -> tuple[str, str, int] | None:
+    hit = None
+    for pattern, role, lineno in rules:
+        if matches(pattern, path):
+            hit = (role, pattern, lineno)
+    return hit
+
+
+# ---------------------------------------------------------------------------
+# Checks
+# ---------------------------------------------------------------------------
+def check_adr_index() -> None:
+    index = DECISIONS / "INDEX.md"
+    if not index.is_file():
+        fail("adr-index", "docs/decisions/INDEX.md is missing")
+        return
+    index_text = index.read_text(encoding="utf-8")
+    on_disk = {p.name for p in DECISIONS.glob("ADR-*.md") if p.name != "ADR-TEMPLATE.md"}
+
+    for name in sorted(on_disk):
+        if name not in index_text:
+            fail("adr-index", f"{name} exists but is not listed in INDEX.md")
+    for ref in sorted(set(re.findall(r"ADR-\d{4}-[a-z0-9-]+\.md", index_text))):
+        if not (DECISIONS / ref).is_file():
+            fail("adr-index", f"INDEX.md references {ref}, which does not exist")
+    for name in sorted(on_disk):
+        body = (DECISIONS / name).read_text(encoding="utf-8")
+        if not VALID_ADR_STATUS.search(body):
+            fail("adr-index", f"{name} has no recognised '- **Status:**' line")
+        if not re.search(r"^\s*-\s*\*\*Closes:\*\*", body, re.MULTILINE):
+            fail("adr-index", f"{name} has no '- **Closes:**' line naming the row it closes")
+
+    numbers = [re.match(r"ADR-(\d{4})", n).group(1) for n in on_disk]
+    if len(numbers) != len(set(numbers)):
+        fail("adr-index", "duplicate ADR numbers on disk; numbers are never reused")
+
+
+def check_ownership(roles: dict, rules: list) -> None:
+    for _pattern, role, lineno in rules:
+        if role not in roles:
+            fail(
+                "ownership",
+                f"CODEOWNERS:{lineno} role {role!r} is not in docs/decisions/ROLES.md. "
+                f"Add a Provisional registry entry first -- see ADR-0005",
+            )
+
+    explicit = {p.strip("/") for p, _r, _l in rules if p != "*"}
+    tracked = git("ls-files").split()
+    for d in sorted({p.split("/")[0] for p in tracked if "/" in p}):
+        if d not in explicit:
+            fail(
+                "ownership",
+                f"top-level directory {d!r} has no explicit CODEOWNERS rule "
+                f"(the '*' catch-all does not count -- assign it deliberately)",
+            )
+
+    if CODEOWNERS.is_file():
+        text = CODEOWNERS.read_text(encoding="utf-8")
+        for role, meta in roles.items():
+            if meta["status"] == "Ratified" and role not in text:
+                fail(
+                    "ownership",
+                    f"ratified role {role!r} appears nowhere in CODEOWNERS -- give it a rule, "
+                    f"or declare that it owns nothing in this repo",
+                )
+
+
+def check_turf(roles: dict, rules: list) -> None:
+    """Turf, checked at the moment of offence.
+
+    Only enforced when the branch prefix resolves to a registered role. Roles
+    that have not declared a prefix are skipped entirely -- failing open keeps
+    the blast radius to roles that opted in, and the check tightens by itself as
+    the registry fills in.
+    """
+    branch = os.environ.get("POLICY_BRANCH") or git("rev-parse", "--abbrev-ref", "HEAD")
+    base = os.environ.get("POLICY_BASE_REF", "origin/master")
+
+    prefixes = {m["prefix"]: r for r, m in roles.items() if m["prefix"]}
+    role = next((r for p, r in prefixes.items() if branch.startswith(p)), None)
+    if role is None:
+        print(f"turf: branch {branch!r} matches no registered branch prefix -- skipping")
+        return
+
+    merge_base = git("merge-base", base, "HEAD")
+    if not merge_base:
+        print(f"turf: cannot resolve {base} -- skipping")
+        return
+    changed = [p for p in git("diff", "--name-only", f"{merge_base}...HEAD").split() if p]
+    if not changed:
+        return
+
+    override = os.environ.get("POLICY_PR_BODY", "") + "\n" + git("log", f"{merge_base}..HEAD", "--format=%B")
+    om = TURF_OVERRIDE.search(override)
+
+    trespass = []
+    for path in changed:
+        hit = owner_of(path, rules)
+        if hit and hit[0] != role:
+            trespass.append(f"{path} (owned by {hit[0]}, CODEOWNERS:{hit[2]})")
+
+    if not trespass:
+        return
+    if om:
+        print(f"turf: {len(trespass)} cross-boundary edit(s) as {role}, overridden -- {om.group(1).strip()}")
+        for t in trespass:
+            print(f"    ! {t}")
+        return
+    for t in trespass:
+        fail(
+            "turf",
+            f"branch is {role}'s ({branch}) but edits {t}. File a row, or put "
+            f"'TURF-OVERRIDE: <reason or row url>' in the PR body if this is authorised",
+        )
+
+
+def public_markdown() -> list[Path]:
+    """README plus docs/, excluding docs/decisions/.
+
+    ADRs are internal records and have to be able to QUOTE the banned words in
+    order to ban them -- ADR-0003 lists every one. Scanning them would make the
+    gate fail on its own charter.
     """
     out = [REPO / "README.md"]
     out += [p for p in sorted((REPO / "docs").rglob("*.md")) if DECISIONS not in p.parents]
@@ -83,7 +267,6 @@ def public_markdown() -> list[Path]:
 
 
 def sections(text: str) -> list[tuple[str, str, int]]:
-    """Split markdown into (heading, body, heading_line_number)."""
     lines = text.splitlines()
     out: list[tuple[str, str, int]] = []
     heading, buf, start = "(preamble)", [], 1
@@ -97,94 +280,14 @@ def sections(text: str) -> list[tuple[str, str, int]]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# 1. ADR index integrity
-# ---------------------------------------------------------------------------
-def check_adr_index() -> None:
-    index = DECISIONS / "INDEX.md"
-    if not index.is_file():
-        fail("adr-index", "docs/decisions/INDEX.md is missing")
-        return
-
-    index_text = index.read_text(encoding="utf-8")
-    on_disk = {p.name for p in DECISIONS.glob("ADR-*.md") if p.name != "ADR-TEMPLATE.md"}
-
-    for name in sorted(on_disk):
-        if name not in index_text:
-            fail("adr-index", f"{name} exists but is not listed in INDEX.md")
-
-    for ref in sorted(set(re.findall(r"ADR-\d{4}-[a-z0-9-]+\.md", index_text))):
-        if not (DECISIONS / ref).is_file():
-            fail("adr-index", f"INDEX.md references {ref}, which does not exist")
-
-    for name in sorted(on_disk):
-        body = (DECISIONS / name).read_text(encoding="utf-8")
-        if not VALID_ADR_STATUS.search(body):
-            fail("adr-index", f"{name} has no recognised '- **Status:**' line")
-
-    numbers = sorted(re.match(r"ADR-(\d{4})", n).group(1) for n in on_disk)
-    if len(numbers) != len(set(numbers)):
-        fail("adr-index", "duplicate ADR numbers on disk; numbers are never reused")
-
-
-# ---------------------------------------------------------------------------
-# 2. Ownership coverage and role tags
-# ---------------------------------------------------------------------------
-def check_codeowners() -> None:
-    if not CODEOWNERS.is_file():
-        fail("ownership", ".github/CODEOWNERS is missing")
-        return
-
-    patterns: list[str] = []
-    pending_role: str | None = None
-
-    for lineno, raw in enumerate(CODEOWNERS.read_text(encoding="utf-8").splitlines(), 1):
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            m = re.match(r"#\s*role:\s*(.+?)\s*$", line)
-            if m:
-                if m.group(1) not in KNOWN_ROLES:
-                    fail("ownership", f"CODEOWNERS:{lineno} unknown role {m.group(1)!r}")
-                pending_role = m.group(1)
-            continue
-
-        # A rule line.
-        if pending_role is None:
-            fail("ownership", f"CODEOWNERS:{lineno} rule {line.split()[0]!r} has no '# role:' tag above it")
-        pending_role = None
-        patterns.append(line.split()[0])
-
-    explicit = {p.strip("/") for p in patterns if p != "*"}
-
-    tracked = subprocess.run(
-        ["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=True
-    ).stdout.split()
-    top_dirs = sorted({p.split("/")[0] for p in tracked if "/" in p})
-
-    for d in top_dirs:
-        if d not in explicit:
-            fail(
-                "ownership",
-                f"top-level directory {d!r} has no explicit CODEOWNERS rule "
-                f"(the '*' catch-all does not count -- assign it deliberately)",
-            )
-
-
-# ---------------------------------------------------------------------------
-# 3 + 4 + 5. Public claim checks
-# ---------------------------------------------------------------------------
 def check_claims() -> None:
     for path in public_markdown():
         rel = path.relative_to(REPO)
         text = path.read_text(encoding="utf-8")
-
         for lineno, line in enumerate(text.splitlines(), 1):
             for pattern, why in BANNED:
                 if pattern.search(line):
                     fail("banned-absolute", f"{rel}:{lineno} {pattern.pattern!r} -- {why}")
-
         for heading, body, lineno in sections(text):
             if "claim" in heading.lower():
                 if not REQ_ID.search(body) and not REQ_ID.search(heading):
@@ -201,9 +304,32 @@ def check_claims() -> None:
                 )
 
 
-def main() -> int:
+def who(path: str) -> int:
+    roles, rules = load_roles(), load_codeowners()
+    hit = owner_of(path.lstrip("./"), rules)
+    if hit is None:
+        print(f"{path}: no rule matches (this should be impossible -- '*' is a catch-all)")
+        return 1
+    role, pattern, lineno = hit
+    status = roles.get(role, {}).get("status", "UNREGISTERED")
+    print(f"{path}\n  owner : {role}  [{status}]\n  rule  : {pattern}  (CODEOWNERS:{lineno})")
+    print("\n  Ownership governs WRITE, not read or import. Reading needs no row.")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if "--who" in argv:
+        i = argv.index("--who")
+        if i + 1 >= len(argv):
+            print("usage: policy_check.py --who <path>")
+            return 2
+        return who(argv[i + 1])
+
+    roles = load_roles()
+    rules = load_codeowners()
     check_adr_index()
-    check_codeowners()
+    check_ownership(roles, rules)
+    check_turf(roles, rules)
     check_claims()
 
     if advisories:
@@ -217,12 +343,12 @@ def main() -> int:
         print(f"POLICY FAILED -- {len(failures)} problem(s):\n")
         for f in failures:
             print(f"  x {f}")
-        print("\nSee docs/decisions/ADR-0003-policy-ci-gate.md")
+        print("\nSee docs/decisions/ADR-0003 and ADR-0005")
         return 1
 
-    print("policy: all hard checks pass")
+    print(f"policy: all hard checks pass ({len(roles)} roles, {len(rules)} ownership rules)")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
