@@ -43,7 +43,7 @@ All-three-or-none is the definition of `Ratified`. It is **not** a precondition 
 | `Digital Content Production` | Ratified | `Senior Digital Marketer` | `feat/content/` | Renders and published media. Explicitly **not** page markup or CSS |
 | `Sr. Mechanical & Systems` | Ratified | `COO` | `feat/mech/` | BoM, platform selection, the bench rig, the sim-to-hardware fidelity contract |
 | `Senior Controls` | Ratified | `COO` | `feat/controls/` | The control law and its harness |
-| `Archivist` | Provisional | `CEO` | — | *Surface not yet declared* |
+| `Archivist` | Ratified | `CEO` | `feat/archive/` | Strategy-tier Notion, shared vocabulary across all three repos, drift tooling. Owns `docs/vocabulary/` and no other repo path |
 
 ✅ **Branch prefixes for `Sr. Mechanical & Systems` (`feat/mech/`) and `Senior Controls`
 (`feat/controls/`) are now OBSERVED**, not inferred — both appear repeatedly in merged branch
@@ -54,10 +54,10 @@ agent, not by me.
 
 ⚠️ **Still unverified.** Escalation targets for `Sr. Mechanical & Systems` and
 `Senior Controls`, the branch prefixes for `Digital Content Production` and
-`Senior Digital Marketer`, and everything about the `Archivist` are **inferred** — from the
+and the branch prefix for `Senior Digital Marketer` are **inferred** — from the
 COO's own charter ("receives from Sr. Mechanical and Systems Engineering"), from branch
-conventions observed in sibling repos, and from a CEO remark that the Archivist reports
-directly. Inferring turf from a branch prefix is guessing, which is the thing this registry
+conventions observed in sibling repos. The `Archivist` is no longer among them — the CEO
+declared its surface on 2026-07-27 and it was ratified the same day. Inferring turf from a branch prefix is guessing, which is the thing this registry
 exists to stop. Each is flagged rather than asserted, and each wants one line of confirmation
 from the role itself or the CEO. `Provisional` roles stay provisional until that lands.
 
