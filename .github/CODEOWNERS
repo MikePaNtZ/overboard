@@ -1,32 +1,37 @@
 # CODEOWNERS — path ownership map for the Overboard org
 #
-# STATUS: PROPOSED. See docs/decisions/ADR-0002-path-ownership-map.md and the
-# Escalations row it names. This file is the current working assumption; a role
-# that disagrees with a boundary files a row rather than editing around it.
+# Roles are defined in docs/decisions/ROLES.md, which is the single home for the
+# role list. The `# role:` tag above each rule is the authoritative assignment;
+# `policy_check.py` validates every tag against that registry.
 #
-# GitHub CODEOWNERS can only name real accounts, and this org has exactly one
-# human. So @MikePaNtZ is the reviewer on every rule, and the ROLE is carried in
-# the `# role:` tag above each block. Those tags are the authoritative map that
-# the `policy` CI job parses and that the "do not edit paths another role owns"
-# rule refers to. Do not remove them.
+# GitHub CODEOWNERS can only name real accounts and this org has one human, so
+# @MikePaNtZ is the reviewer on every rule. That means CODEOWNERS provides no
+# review routing here -- all enforcement lives in the policy check. Do not
+# remove the tags.
 #
-# Known roles (the policy check rejects any other value):
-#   CEO, COO, CMO, Sr. Mechanical & Systems, Senior Controls,
-#   Digital Content Production
+# OWNERSHIP GOVERNS WRITE, NOT READ. Importing, reading or depending on another
+# role's module needs no permission and no row. Only editing does. A session
+# that files a row before importing a module has over-escalated, which is the
+# same failure as trespassing, just pointed the other way.
+#
+# "Am I trespassing?"  ->  python3 .github/policy_check.py --who <path>
 #
 # Last matching pattern wins, so specific rules go BELOW general ones.
+# See docs/decisions/ADR-0002-path-ownership-map.md.
 
 # --------------------------------------------------------------------------
-# Default. Anything not explicitly claimed belongs to the CEO, which is the
-# right default because unclaimed territory is a scoping question, not a
-# technical one.
+# Default. Unclaimed territory is a scoping question, not a technical one.
+#
+# Root-level SOURCE files are not a valid resting place -- they get a directory
+# and an owner before they are committed. This default exists for metadata, not
+# as a dumping ground. (A verbatim GPLv3 comm_can.c once sat untracked at this
+# root, one `git add .` from a public MIT repo.)
 # --------------------------------------------------------------------------
 # role: CEO
 *                               @MikePaNtZ
 
 # --------------------------------------------------------------------------
-# Project rules, public front door, and the licence. Public claims and the
-# licence are one-way doors; both stay with the CEO.
+# Project rules, public front door, and the licence -- one-way doors all.
 # --------------------------------------------------------------------------
 # role: CEO
 /README.md                      @MikePaNtZ
@@ -34,9 +39,12 @@
 /CLAUDE.md                      @MikePaNtZ
 # role: CEO
 /LICENSE                        @MikePaNtZ
+# role: CEO
+/.claude/                       @MikePaNtZ
 
 # --------------------------------------------------------------------------
-# Cross-role operations: the decision record, the escalation machinery, and CI.
+# Cross-role operations: the decision record, the role registry, the
+# escalation machinery, and the governance checks. NOT the build -- see below.
 # --------------------------------------------------------------------------
 # role: COO
 /.github/                       @MikePaNtZ
@@ -46,7 +54,11 @@
 /docs/decisions/                @MikePaNtZ
 
 # --------------------------------------------------------------------------
-# The control law and the Rust workspace it lives in.
+# The control law and its harness.
+#
+# .github/workflows/ci.yml is Controls, not COO: it runs the Rust and sim test
+# matrix and Controls edits it constantly. COO owning .github/ means owning
+# governance -- CODEOWNERS, policy_check.py -- not the build.
 # --------------------------------------------------------------------------
 # role: Senior Controls
 /crates/                        @MikePaNtZ
@@ -57,6 +69,8 @@
 # role: Senior Controls
 /rust-toolchain.toml            @MikePaNtZ
 # role: Senior Controls
+/requirements-sim.txt           @MikePaNtZ
+# role: Senior Controls
 /notebooks/                     @MikePaNtZ
 # role: Senior Controls
 /tests/                         @MikePaNtZ
@@ -65,27 +79,52 @@
 # role: Senior Controls
 /scripts/                       @MikePaNtZ
 # role: Senior Controls
-/requirements-sim.txt           @MikePaNtZ
-# role: Senior Controls
 /docs/sim-impulse-response.md   @MikePaNtZ
+# role: Senior Controls
+/.github/workflows/ci.yml       @MikePaNtZ
+
+# --------------------------------------------------------------------------
+# sim/out/ is harness output and belongs to Controls. Media PROMOTED for
+# publication moves to a Content-owned path and is Content's from that point --
+# it does not become Content's by being written into this directory.
+# --------------------------------------------------------------------------
+# role: Senior Controls
+/sim/out/                       @MikePaNtZ
 
 # --------------------------------------------------------------------------
 # Plant models, the bench rig, and the sim-to-hardware fidelity contract.
-# Per the Sr. Mechanical & Systems handoff: this role owns where model numbers
-# come from and which are measured versus asserted. The control law is NOT
-# owned here, which is why the split runs through sim/ rather than around it.
+#
+# The boundary runs THROUGH sim/ rather than around it: Mechanical owns where
+# plant numbers come from, Controls owns the law tuned against them. Giving
+# either role the whole directory hands it the other's work.
+#
+# plant.py and imperfections.py are named explicitly because the earlier
+# bench_* prefix seam misassigned them -- they are the fidelity contract, which
+# is verbatim Mechanical's per its handoff. A prefix convention is discoverable
+# only from this file; a directory is discoverable from `ls`. If these keep
+# accumulating, split into sim/scenarios/plant/ and sim/scenarios/control/.
+#
+# WITHIN sim/models/: mass, inertia, geometry, contact and friction are
+# Mechanical's and need a row. <sensor> and <actuator> elements are Controls'
+# and do not -- adding observability is a routine controls act and routing it
+# through an escalation weekly would just get the protocol ignored.
 # --------------------------------------------------------------------------
 # role: Sr. Mechanical & Systems
 /sim/models/                    @MikePaNtZ
 # role: Sr. Mechanical & Systems
+/sim/scenarios/plant.py         @MikePaNtZ
+# role: Sr. Mechanical & Systems
+/sim/scenarios/imperfections.py @MikePaNtZ
+# role: Sr. Mechanical & Systems
 /sim/scenarios/bench_*.py       @MikePaNtZ
 # role: Sr. Mechanical & Systems
 /tests/test_bench_*.py          @MikePaNtZ
+# role: Sr. Mechanical & Systems
+/tests/test_imperfections.py    @MikePaNtZ
 
 # --------------------------------------------------------------------------
-# Renders and published media. Per the Digital Content Production handoff this
-# role does NOT own the landing page's markup or CSS — that lives in the
-# overboard-web repo under a separate session.
+# Renders and published media. This role does NOT own the landing page's
+# markup or CSS -- that is the Senior Digital Marketer's, in overboard-web.
 # --------------------------------------------------------------------------
 # role: Digital Content Production
 /scripts/render_scenario.py     @MikePaNtZ
@@ -93,10 +132,15 @@
 /docs/web-artifact-pipeline.md  @MikePaNtZ
 
 # --------------------------------------------------------------------------
-# UNRESOLVED — flagged, not assigned.
+# ROLES THAT OWN NOTHING IN THIS REPO -- stated on purpose, so their absence
+# reads as a decision rather than an oversight.
 #
-# /overboard-logo.html is a brand asset sitting in a controls-only repo, which
-# the project rules say should not happen (brand lives in overboard-web). It
-# falls to the CEO default above until the CMO and CEO settle where it goes.
-# Raised in ADR-0002; not moved here, because moving it is CMO turf.
+#   CMO                     -- brand and the marketing line live in
+#                              overboard-web; nothing here.
+#   Senior Digital Marketer -- landing page, brand identity, page copy and
+#                              analytics, all in overboard-web. Provisional.
+#   Archivist               -- surface not yet declared. Provisional.
+#
+# Neither sibling repo has a CODEOWNERS yet, so turf is still unfalsifiable in
+# two thirds of the estate. Open item in ADR-0002.
 # --------------------------------------------------------------------------
