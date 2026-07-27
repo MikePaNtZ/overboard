@@ -3,10 +3,27 @@
 Wave-0 job: prove the identification METHOD (two-run kt/J fit, spin-down
 friction split, hardware-residual replay) on a rig small enough to sit on a
 desk, against a model whose joint-space inertias are known from geometry (see
-bench_rig.xml's header). Everything here runs on the noise-free `IDEAL`
-profile so the method itself, not the signal path, is what is being checked;
-`STAGE0_PLACEHOLDER` is exercised in `sim.scenarios.imperfections`'s own
-suite.
+bench_rig.xml's header).
+
+MOST OF THIS RUNS ON `IDEAL`, AND THAT USED TO BE THE WHOLE STORY. It is not
+enough, and the gap cost a factor of two.
+
+This file previously said that `STAGE0_PLACEHOLDER` "is exercised in
+`sim.scenarios.imperfections`'s own suite" and left it there. True, and
+irrelevant: that suite checks the imperfections, not what the identification
+does *under* them. So a `kt` fit that was 50% low on the default profile sat
+green, because the only kt assertion was on the ideal run and its name said so.
+
+The fix is a method-versus-signal-path split that actually holds:
+
+  * `IDEAL` tests pin the ALGEBRA. If they fail, the two-run derivation or the
+    geometry is wrong.
+  * `STAGE0_PLACEHOLDER` tests pin the WINDOWING. If they fail, the fit is
+    reading the current-loop transient instead of the ramp -- which is exactly
+    the failure that shipped.
+
+Any new fitted quantity needs both. A number that is only ever asserted on a
+noise-free profile is a number nobody has checked.
 """
 
 import csv
@@ -16,6 +33,7 @@ import numpy as np
 import pytest
 
 from sim.scenarios.bench_spinup import (
+    MODEL_PATH,
     NAMEPLATE_KT_NM_PER_A,
     IdentifyParams,
     SpindownParams,
@@ -24,10 +42,16 @@ from sim.scenarios.bench_spinup import (
     load_model,
     replay,
     spindown,
+    _FLYWHEEL_GEOM_RE,
     _joint_inertia,
     identify,
 )
-from sim.scenarios.imperfections import IDEAL
+from sim.scenarios.imperfections import IDEAL, STAGE0_PLACEHOLDER
+
+
+def load_model_xml() -> str:
+    """The raw MJCF text, for tests that build variants by stripping geoms."""
+    return MODEL_PATH.read_text()
 
 #: The committed model's joint-space inertias, from bench_rig.xml's header --
 #: geometry-derived, not tuned. A change to the flywheel or rotor geometry
@@ -83,6 +107,143 @@ def test_identify_recovers_nameplate_kt_and_bare_inertia_on_ideal_run(loaded_mod
     # are meaningless -- a bad window would still average to *something*.
     assert m.r2_bare > 0.999
     assert m.r2_loaded > 0.999
+
+
+def test_identify_recovers_kt_under_the_stage0_profile(loaded_model):
+    """**The assertion whose absence let a factor-of-two error ship green.**
+
+    kt used to come out at 0.02493 against a 0.05026 nameplate -- 50.4% low --
+    on the DEFAULT profile, while every test here passed because every kt
+    assertion was on the ideal run.
+
+    The tolerance is 1%, the same as the ideal run, because after the fix there
+    is no reason for the realistic profile to be worse: the only bias left is
+    Coulomb (`tau_c/i`, ~0.5%), which both profiles share. A regression to the
+    old windowing fails this by a factor of fifty, not by a hair.
+    """
+    m = identify(IdentifyParams(), loaded_model=loaded_model,
+                 profile=STAGE0_PLACEHOLDER).metrics
+    assert m.kt_fit_nm_per_a == pytest.approx(NAMEPLATE_KT_NM_PER_A, rel=0.01), (
+        f"kt {m.kt_fit_nm_per_a:.5f} vs nameplate {NAMEPLATE_KT_NM_PER_A:.5f} "
+        f"({m.kt_error_vs_nameplate_pct:.1f}% off) -- if this is ~50% low the fit "
+        "window is back inside the actuation delay and current-loop lag"
+    )
+    # J_bare was ALWAYS right, even with the bug, because the suppression factor
+    # cancels between numerator and denominator. Asserting it here documents that
+    # it is not what regressed and not what proves the fix.
+    assert m.j_bare_fit_kg_m2 == pytest.approx(KNOWN_GOOD_J_BARE, rel=0.02)
+
+
+def test_the_r2_diagnostic_is_asserted_and_not_merely_reported(loaded_model):
+    """R^2 fell 1.0000 -> 0.6927 while the bug was live, and nothing checked it.
+
+    `_fit_line`'s docstring claims a bad window is "visible in the R^2 rather
+    than silently baked into a slope". It was visible. It was just not looked at.
+
+    Floored below the ideal run's 0.999 on purpose: the 500 Hz sensed-rate
+    staircase is real and caps R^2 near 0.98. The point is that 0.69 -- a
+    curve, not a line -- can no longer pass.
+    """
+    m = identify(IdentifyParams(), loaded_model=loaded_model,
+                 profile=STAGE0_PLACEHOLDER).metrics
+    assert m.r2_bare > 0.95, f"bare ramp is not a line: R^2={m.r2_bare:.4f}"
+    assert m.r2_loaded > 0.95, f"loaded ramp is not a line: R^2={m.r2_loaded:.4f}"
+
+
+def test_the_fit_window_opens_after_the_current_has_settled(loaded_model):
+    """The mechanism, pinned so it cannot be "simplified" back to fitting from zero.
+
+    Under Stage-0 there is 1 ms of actuation delay and a 1 ms current-loop time
+    constant, so a settled window cannot start at t=0 -- and on IDEAL there is
+    nothing to wait for, so it must start immediately. Both directions are
+    asserted; checking only one would pass on a hard-coded offset.
+    """
+    stage0 = identify(IdentifyParams(), loaded_model=loaded_model,
+                      profile=STAGE0_PLACEHOLDER).metrics
+    ideal = identify(IdentifyParams(), loaded_model=loaded_model, profile=IDEAL).metrics
+
+    assert stage0.fit_start_s > 0.005, (
+        f"window opened at {stage0.fit_start_s*1e3:.1f} ms -- too early to have "
+        "cleared a 1 ms delay plus ~5 time constants of a 1 ms current loop"
+    )
+    assert ideal.fit_start_s < 0.002, (
+        f"window opened at {ideal.fit_start_s*1e3:.1f} ms on a profile with no "
+        "delay and no lag -- the settle detector is not data-driven"
+    )
+    # The span is what was asked for, in both cases.
+    for m in (stage0, ideal):
+        assert m.fit_end_s - m.fit_start_s == pytest.approx(IdentifyParams().fit_span_s)
+
+    # And the current the fit believes is the one that flowed, not the command.
+    assert stage0.i_measured_mean_a == pytest.approx(stage0.commanded_current_a, rel=0.02), (
+        "after settling, measured and commanded current should agree closely; a "
+        "large gap means the window still straddles the transient"
+    )
+
+
+def test_fitting_from_zero_reproduces_the_original_50_percent_error(loaded_model):
+    """The counterfactual, so the reason for the window is measured and not just
+    asserted in a docstring.
+
+    Deliberately reconstructs the OLD behaviour -- fit from t=0 over 5 ms
+    against the COMMANDED current -- and shows it really does halve kt. If this
+    ever stops being true, the delay/lag model changed and the windowing
+    rationale needs revisiting rather than being trusted.
+    """
+    from sim.scenarios.bench_spinup import _fit_line, _run_constant_current
+
+    p = IdentifyParams()
+    bare = build_bare_model()
+    t_b, w_b, _ = _run_constant_current(bare, p.commanded_current_a, p.sim_seconds,
+                                        STAGE0_PLACEHOLDER)
+    t_l, w_l, _ = _run_constant_current(loaded_model, p.commanded_current_a,
+                                        p.sim_seconds, STAGE0_PLACEHOLDER)
+    a1, r2_bare = _fit_line(t_b, w_b, 0.005)          # from zero, as it used to be
+    a2, _ = _fit_line(t_l, w_l, 0.005)
+    kt_old = known_disc_inertia_kg_m2() / (p.commanded_current_a * (1.0 / a2 - 1.0 / a1))
+
+    assert kt_old < 0.6 * NAMEPLATE_KT_NM_PER_A, (
+        f"the old from-zero window gave kt={kt_old:.5f}, not the ~50%-low result "
+        "it is documented to give -- the delay/lag model has changed"
+    )
+    assert r2_bare < 0.8, (
+        f"R^2={r2_bare:.4f} for the from-zero fit; the transient is supposed to be "
+        "visibly curved, which is what makes R^2 a usable diagnostic"
+    )
+
+
+# --------------------------------------------------------------------------
+# The bare variant: what the strip removes
+# --------------------------------------------------------------------------
+
+def test_the_bare_model_carries_no_floating_index_mark(loaded_model):
+    """The index mark is drawn on the flywheel face, so it goes with the disc.
+
+    Left behind, it renders as a white bar rotating in mid-air 52 mm off the
+    shaft, where the disc used to be. Raised by Digital Content Production after
+    it reached a render.
+    """
+    bare = build_bare_model()
+    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "index") < 0
+    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel") < 0
+    # Still present on the loaded rig -- the strip must be the only thing that
+    # removes it, or the mark has simply been deleted from the model.
+    assert mujoco.mj_name2id(loaded_model, mujoco.mjtObj.mjOBJ_GEOM, "index") >= 0
+
+
+def test_removing_the_index_mark_changes_no_fitted_quantity(loaded_model):
+    """It is massless with collision off, so this is model coherence, not
+    correctness -- and that claim is worth checking rather than repeating.
+
+    Compares joint inertia of a bare model against one built by stripping only
+    the flywheel. Identical means the mark never contributed, so no previously
+    published J_bare or kt moves because of this change.
+    """
+    xml = load_model_xml()
+    flywheel_only = mujoco.MjModel.from_xml_string(_FLYWHEEL_GEOM_RE.sub("", xml))
+    assert _joint_inertia(build_bare_model()) == pytest.approx(
+        _joint_inertia(flywheel_only), rel=1e-12
+    )
 
 
 # --------------------------------------------------------------------------
