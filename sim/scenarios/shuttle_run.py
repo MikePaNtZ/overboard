@@ -286,6 +286,21 @@ def run(
         from .rust_controller import RustController
 
         def controller_factory(vprofile):
+            # THE ESTIMATOR IS ON BY DEFAULT, and this is the point of the
+            # default rather than an incidental setting.
+            #
+            # This scenario used to default to TRUTH PITCH -- a board that knows
+            # its own tilt exactly, which no hardware ever will. That made the
+            # headline number (return error) a measurement of the control law
+            # with the hardest part of the problem deleted, and it meant a
+            # fresh session could easily believe the estimator was running when
+            # it was not. Both of those happened.
+            #
+            # tau = 2 s with command feedforward is the recommended
+            # configuration and was recorded nowhere in code until now. A caller
+            # that genuinely wants truth pitch -- isolating the regulator, for
+            # instance -- passes its own factory and says so, which makes the
+            # unusual case the explicit one instead of the default.
             return RustController(
                 kp_a_per_rad=200.0,
                 kd_a_per_rad_s=30.0,
@@ -294,6 +309,9 @@ def run(
                 ki_v_rad_per_m=0.02,
                 v_ref_fn=vprofile.v_ref,
                 com_above_axle=True,
+                use_estimator=1,
+                estimator_tau_s=2.0,
+                estimator_accel_aiding=2,   # command feedforward
             )
 
     dt = float(model.opt.timestep)
