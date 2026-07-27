@@ -28,31 +28,28 @@ def ridden():
 
 OFF, ACTIVE, SHADOW = 0, 1, 2
 
-#: Shared reason for the results this branch re-opens rather than re-tunes.
-#:
-#: `plant.imu_readings` used to convert MuJoCo axes to the ICD body frame with
-#: `diag(+1,+1,−1)` — determinant −1, a reflection, not a rotation. It inverted
-#: the accelerometer's x channel, so the complementary filter fused a
-#: nose-up-positive gyro against a nose-down-positive accelerometer. Every
-#: result below was measured through that. The corrected `diag(−1,+1,−1)`
-#: changes them materially, and in one case reverses the comparison the
-#: workstream's conclusion rests on.
-#:
-#: These are marked xfail(strict) rather than re-tuned, deleted, or left red on
-#: purpose. Re-tuning them to the new numbers would silently re-author Senior
-#: Controls' conclusions inside a frame-map fix; deleting them would destroy the
-#: evidence; leaving them red would block the fix indefinitely on a sim every
-#: other role is building against. strict=True means each one goes red the
-#: moment it starts passing again, so none can be forgotten.
-#:
-#: Owner: Senior Controls. Each xfail should become a re-derived assertion or a
-#: deliberate deletion. See the Escalations row "Correct the sim IMU→ICD frame
-#: map: it is a reflection (det = −1), not a rotation".
-FRAME_MAP_REBASELINE = (
-    "Recorded against the pre-fix IMU→ICD frame map (det = −1, a reflection that "
-    "inverted accelerometer x). Needs re-deriving by Senior Controls against the "
-    "corrected diag(−1,+1,−1) rotation — see the Escalations row on the frame map."
-)
+# THE FRAME-MAP REBASELINE, CLOSED 2026-07-27 (GH #21).
+#
+# `plant.imu_readings` used to convert MuJoCo axes to the ICD body frame with
+# `diag(+1,+1,-1)` -- determinant -1, a reflection, not a rotation. It inverted
+# the accelerometer's x channel, so the complementary filter fused a
+# nose-up-positive gyro against a nose-down-positive accelerometer. PR #12
+# corrected it to `diag(-1,+1,-1)`.
+#
+# Four results in this file were measured through that reflection and were held
+# as `xfail(strict=True)` by the fixing PR rather than re-tuned inside it --
+# correctly, since re-tuning would have re-authored this role's conclusions
+# inside someone else's frame-map change. They are now RE-DERIVED against the
+# corrected rotation, each with its measured value and the reasoning in its own
+# docstring. Two of them changed meaning rather than magnitude:
+#
+#   * closing the loop no longer destabilises the board; it costs margin
+#   * wheel-odometry aiding no longer falls over, so the evidence that command
+#     feedforward was NECESSARY is gone
+#
+# What did NOT get re-tuned: the acceptance criteria. The shuttle AC (0.10 m) is
+# missed at 0.2331 m and is now its own strict xfail, so loosening a regression
+# bound could not quietly retire a requirement.
 
 
 def _run(model, use_estimator, tau=TAU, secs=8.0, impulse=NOMINAL_IMPULSE_NS):
@@ -123,30 +120,55 @@ def test_the_estimator_meets_the_ac_on_an_undisturbed_board(ridden):
     assert r.metrics.pitch_est_max_deg <= 1.0
 
 
-@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
-def test_closing_the_loop_on_the_v1_estimator_destabilises_the_board(ridden):
-    """**The headline result, recorded rather than hidden.**
+def test_closing_the_loop_on_the_v1_estimator_costs_margin_but_survives(ridden):
+    """**Re-derived 2026-07-27. The result this test used to record is gone.**
 
-    XFAILED PENDING RE-BASELINE (see FRAME_MAP_REBASELINE). Under the corrected
-    model→ICD rotation the board no longer strikes: peak |pitch| 18.81° → 7.71°,
-    estimator RMS 27.813° → 0.312°. The destabilisation recorded here was
-    dominated by an inverted accelerometer x channel, not by the mechanism the
-    docstring describes. That mechanism is still real and still measurable —
-    closed loop remains ~5× worse than shadow — but at a fraction of this size.
+    It asserted `nose_strike` -- that driving the loop from the v1 estimate
+    put the board on the ground. That was measured through an IMU→ICD frame map
+    with `det = -1`, which inverted the accelerometer's x channel and made the
+    filter fuse a nose-up-positive gyro against a nose-down-positive
+    accelerometer. PR #12 corrected the map. Re-measured on the impulse:
 
-    In shadow the filter is accurate to ~1.1 deg RMS. Driving the loop with it
-    strikes. The mechanism is feedback: estimate error produces a wrong command,
-    the wrong command produces acceleration, acceleration corrupts the
-    accelerometer's gravity reference, and the error grows. A filter can be
-    accurate open-loop and still be unusable closed-loop, which is exactly why
-    shadow mode exists.
+        mode      strike   peak |pitch|   est RMS   est max
+        truth      no          6.000°     0.013°    0.073°
+        shadow     no          6.000°     0.261°    1.454°
+        ACTIVE     no          7.712°     0.312°    1.404°
 
-    Delete this test when accel compensation lands -- it should stop being true.
+    So the destabilisation was the frame bug, not the feedback mechanism. **The
+    mechanism itself is still real and still measurable** -- closing the loop
+    costs ~29% of peak pitch and ~19% of estimator RMS against shadow -- but it
+    is now a margin cost, not a crash.
+
+    Asserted as a BAND, not a threshold. A floor because the feedback penalty
+    vanishing entirely would mean the estimator stopped being in the loop, which
+    this codebase has shipped twice; a ceiling because a large penalty would
+    mean the destabilisation is back.
+
+    Where the old headline went: the estimator DOES still lose the board, on a
+    hill rather than on an impulse. `tests/test_hill.py` gates that -- truth
+    pitch holds a 15% descent, the estimate puts the tail down at 1.1 s.
     """
-    r = _run(ridden, ACTIVE)
-    assert r.metrics.nose_strike, (
-        "if this now survives, the estimator has improved and the xfail below "
-        "plus this test should both be revisited"
+    active = _run(ridden, ACTIVE).metrics
+    shadow = _run(ridden, SHADOW).metrics
+
+    assert not active.nose_strike, (
+        "the board struck while closed-loop on the estimate. That is the "
+        "pre-frame-fix behaviour returning -- do not re-baseline this, diagnose it"
+    )
+
+    # The feedback penalty: real, bounded, and required to be non-zero.
+    assert active.peak_abs_pitch_deg > shadow.peak_abs_pitch_deg * 1.05, (
+        f"closed loop ({active.peak_abs_pitch_deg:.3f}°) cost nothing against "
+        f"shadow ({shadow.peak_abs_pitch_deg:.3f}°). Feedback through a noisy "
+        "estimate is not free -- if it looks free, check the estimate is "
+        "actually driving the loop"
+    )
+    assert active.peak_abs_pitch_deg < shadow.peak_abs_pitch_deg * 2.0, (
+        f"closed loop cost {active.peak_abs_pitch_deg / shadow.peak_abs_pitch_deg:.2f}x "
+        "the peak pitch of shadow -- the destabilisation mechanism is growing again"
+    )
+    assert active.pitch_est_rms_deg < 0.5, (
+        f"estimator RMS {active.pitch_est_rms_deg:.3f}° closed-loop, was 0.312°"
     )
 
 
@@ -272,78 +294,126 @@ def test_the_shuttle_hands_the_controller_a_live_imu():
     )
 
 
-@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
 def test_command_feedforward_closes_the_loop_on_the_shuttle():
-    """**The result this whole workstream was after.**
-
-    XFAILED PENDING RE-BASELINE. Still completes the run without a strike, but
-    return error goes 0.0226 m → 0.2331 m under the corrected rotation, so the
-    < 0.10 m assertion no longer holds. The qualitative result survives; the
-    number does not.
+    """**Re-derived 2026-07-27.** The qualitative result survived the frame-map
+    fix; the number did not.
 
     Driving the real control law from a fused attitude estimate, the board
-    completes the shuttle run. Measured through the real scenario and the real
-    Rust controller over the FFI -- no replica in the path.
+    completes the shuttle run without striking. Measured through the real
+    scenario and the real Rust controller over the FFI -- no replica in the path.
 
-    The margin against the truth-pitch baseline is genuinely small, which is the
-    claim: the estimator has stopped being the limiting factor on this scenario.
+    Return error **0.0226 m → 0.2331 m** under the corrected `diag(-1,+1,-1)`
+    rotation. The old 0.0226 m was measured through a reflection and is void.
+
+    **The 0.10 m acceptance criterion is NOT met**, and this test no longer
+    pretends otherwise -- see `test_the_shuttle_ac_is_not_met_yet` below, which
+    records the gap as an explicit xfail rather than hiding it behind a loosened
+    threshold. What is asserted here is the qualitative claim that still holds:
+    it completes, and it stays within a bound that would catch a regression.
     """
     est = _shuttle(use_estimator=1, estimator_tau_s=2.0,
                    estimator_accel_aiding=COMMAND_FEEDFORWARD)
     assert not est.metrics.nose_strike
-    assert est.metrics.return_error_m < 0.10, (
-        f"finished {est.metrics.return_error_m:.4f} m from home"
+    assert est.metrics.return_error_m < 0.35, (
+        f"finished {est.metrics.return_error_m:.4f} m from home; the re-derived "
+        "figure is 0.2331 m and this bound exists to catch a regression, not to "
+        "certify the AC"
     )
 
 
-@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
-def test_the_original_wheel_odometry_aiding_still_falls_over():
-    """The other half of the measurement, so the fix is a comparison.
+@pytest.mark.xfail(
+    strict=True,
+    reason="Return error is 0.2331 m against a 0.10 m AC. Recorded as a visible "
+    "gap rather than a loosened threshold: the shuttle AC is missed by 2.3x, and "
+    "the same v1 estimator loses a 15% descent outright (tests/test_hill.py). "
+    "Delete this xfail when accel compensation lands.",
+)
+def test_the_shuttle_ac_is_not_met_yet():
+    """The acceptance criterion, asserted so its failure stays visible.
 
-    XFAILED PENDING RE-BASELINE — **and this is the one that matters most.**
-    Under the corrected rotation wheel-odometry aiding does NOT fall over:
-    strike True → False, return error 120.84 m → 0.2783 m, against command
-    feedforward's 0.2331 m. The comparison this test exists to make — odometry
-    fatal, feedforward the fix — collapses to a 0.05 m difference between two
-    configurations that both work.
-
-    That does not make command feedforward wrong. It removes the evidence that
-    it was *necessary*, which is a different claim and has to be re-established
-    rather than assumed.
-
-    Same filter, same tau, same everything -- only the source of the forward
-    acceleration correction differs. Wheel odometry differentiates a quantised,
-    100 Hz speed through a 50 ms low pass, and the residual it leaves at the
-    loop's crossover is what destabilises it.
+    Re-baselining `test_command_feedforward_closes_the_loop_on_the_shuttle` to
+    0.35 m would have quietly retired a requirement. Splitting the AC into its
+    own strict xfail keeps the regression guard and the unmet requirement as two
+    separate, separately-reviewable facts.
     """
-    r = _shuttle(use_estimator=1, estimator_tau_s=2.0,
-                 estimator_accel_aiding=WHEEL_ODOMETRY)
-    assert r.metrics.nose_strike, (
-        "wheel-odometry aiding at tau=2 s used to be fatal; if it now survives, "
-        "re-measure the frequency response in notebook 4 -- the diagnosis moved"
+    est = _shuttle(use_estimator=1, estimator_tau_s=2.0,
+                   estimator_accel_aiding=COMMAND_FEEDFORWARD)
+    assert est.metrics.return_error_m < 0.10
+
+
+def test_both_aiding_sources_survive_the_shuttle_and_feedforward_is_only_slightly_better():
+    """**Re-derived 2026-07-27. This is the one that changed most, and the
+    honest version of it is much weaker than what it replaced.**
+
+    This test asserted that wheel-odometry aiding FELL OVER at tau = 2 s --
+    strike True, 120.84 m from home -- while command feedforward completed. That
+    comparison, one configuration fatal and the other the fix, was the evidence
+    the feedforward work rested on.
+
+    Through the corrected frame map, **both survive**:
+
+        wheel odometry      no strike, 0.2783 m
+        command feedforward no strike, 0.2331 m
+
+    A 0.045 m difference between two configurations that both work. **The
+    evidence that command feedforward was NECESSARY is gone.** It is still
+    marginally better and there is a real mechanism for why -- odometry
+    differentiates a quantised 100 Hz speed through a 50 ms low pass, and the
+    residual lands near the loop's crossover -- but "better by 4.5 cm on one
+    scenario" is a different claim from "the fix", and it has to be
+    re-established elsewhere rather than assumed here.
+
+    Deliberately NOT asserting a ratio between the two. At this margin the
+    ordering is the finding; a ratio would be fitting noise.
+    """
+    odo = _shuttle(use_estimator=1, estimator_tau_s=2.0,
+                   estimator_accel_aiding=WHEEL_ODOMETRY)
+    ff = _shuttle(use_estimator=1, estimator_tau_s=2.0,
+                  estimator_accel_aiding=COMMAND_FEEDFORWARD)
+
+    assert not odo.metrics.nose_strike, (
+        "wheel-odometry aiding struck. It used to, through the reflected frame "
+        "map; if it does again, something regressed rather than reverted"
+    )
+    assert not ff.metrics.nose_strike
+    assert ff.metrics.return_error_m < odo.metrics.return_error_m, (
+        f"command feedforward ({ff.metrics.return_error_m:.4f} m) is supposed to "
+        f"beat wheel odometry ({odo.metrics.return_error_m:.4f} m); if the "
+        "ordering flips, the reason to prefer it is gone entirely"
+    )
+    assert odo.metrics.return_error_m - ff.metrics.return_error_m < 0.15, (
+        "the gap between the two aiding sources has widened well beyond the "
+        "0.045 m measured. That would be a real finding -- re-measure the "
+        "frequency response in notebook 4 rather than adjusting this bound"
     )
 
 
-@pytest.mark.xfail(strict=True, reason=FRAME_MAP_REBASELINE)
-def test_a_long_crossover_is_the_other_way_to_survive_and_costs_accuracy():
-    """Both knobs work, and the trade between them is the interesting part.
+def test_a_long_crossover_costs_accuracy():
+    """**Re-derived 2026-07-27.** The trade survived; the threshold was set
+    against a confounded baseline.
 
-    XFAILED PENDING RE-BASELINE. The trade is still visible but no longer clears
-    the 5× bar: 0.9567 m vs 0.2331 m is 4.10×. A threshold set against a
-    confounded baseline, not a result that vanished.
+    tau >= 10 s leans on the accelerometer less. It costs position accuracy,
+    because a gyro bias `b` leaves a steady attitude error `b*tau` that the
+    outer loop turns into drift.
 
-    tau >= 10 s stabilises the loop with the ORIGINAL aiding, by leaning on the
-    accelerometer less. It costs position accuracy, because a gyro bias b leaves
-    a steady attitude error b*tau that the outer loop turns into drift.
+    Measured: 0.9567 m at tau = 10 s against 0.2331 m at tau = 2 s -- a
+    **4.10x** cost. The old bar was 5x, which the pre-fix numbers cleared and
+    these do not. Re-derived to 3x, which is comfortably below the measured
+    4.10x and still far above noise.
+
+    The trade is the point: there are two ways to survive this scenario and they
+    cost different things. That is why the estimator has a crossover knob at all.
     """
     long_tau = _shuttle(use_estimator=1, estimator_tau_s=10.0,
                         estimator_accel_aiding=WHEEL_ODOMETRY)
     good = _shuttle(use_estimator=1, estimator_tau_s=2.0,
                     estimator_accel_aiding=COMMAND_FEEDFORWARD)
     assert not long_tau.metrics.nose_strike
-    assert long_tau.metrics.return_error_m > 5 * good.metrics.return_error_m, (
-        "the tau trade should be visible: surviving via a long crossover ought to "
-        "drift substantially further than surviving via better aiding"
+    assert long_tau.metrics.return_error_m > 3 * good.metrics.return_error_m, (
+        f"tau=10 s drifted {long_tau.metrics.return_error_m:.4f} m against "
+        f"{good.metrics.return_error_m:.4f} m at tau=2 s. The trade should be "
+        "visible: surviving via a long crossover ought to cost substantially "
+        "more position accuracy than surviving via better aiding"
     )
 
 
