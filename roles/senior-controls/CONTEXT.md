@@ -5,11 +5,27 @@
 - **Read first:** [`docs/decisions/INDEX.md`](../../docs/decisions/INDEX.md)
 
 ## Current sub-goals
-- **Blocking the first public announcement:** re-run the sim with the imperfect-sensor profile.
-  Every number marketing would publish today comes from a sim that knows its own tilt perfectly.
-  The numbers will get worse; we must publish the honest ones first. Nobody told this role it
-  was holding up a launch — that silence is the actual defect.
-- Closed-loop control is in sim; the estimator closes the loop on the shuttle.
+- **Was blocking the first public announcement, now partly cleared (PR TBD, issue #24 AC1):**
+  `RustController`'s `use_estimator` default flipped `False` → `True`, so the driverless
+  disturbance-rejection gate (`tests/test_closed_loop.py`), the ridden cascade gate, and
+  `scripts/render_scenario.py --compare` — the exact script that produces the artifact CI
+  publishes to `sim-latest` — now all run on the attitude **estimate**, not ground truth, by
+  default. hill.py/terrain.py/shuttle_run.py already did this; the driverless impulse gate,
+  which is what the published render and its `impulse_closed_loop_metrics.json` actually show,
+  did not. One pinned regression threshold moved with it and was re-measured rather than
+  loosened blindly: `test_there_is_large_margin_on_actuation_delay` was pinned at 6.80 deg
+  (truth pitch) and is now 9.71 deg (the honest number) — still clear of the 18.57 deg strike
+  angle, re-baselined to `< 10.5`.
+  **Still open — issue #24's other four ACs, deliberately not attempted in the same PR:**
+  disturbance-rejection **envelope** (currently one fixed magnitude, `NOMINAL_IMPULSE_NS = 20`,
+  not a sweep to a recovery boundary); the `r_eff` tyre-ground justification (geometry is
+  Mechanical's turf — this role can investigate and report, not edit `sim/models/`); confirming
+  every scenario already emits bit-identical metrics JSON (spot-checked true for impulse and
+  closed-loop via existing determinism tests, not re-verified for hill/terrain/shuttle); and an
+  audit marking every acceptance number in the scenario docs as measured vs. assumed. Each is
+  its own well-scoped increment, not a blocker for this one.
+- Closed-loop control is in sim; the estimator now closes the loop on the driverless impulse gate
+  and the ridden cascade too, not only the shuttle.
 
 ## Turf notes
 - Owns `crates/`, `tests/`, `scripts/`, most of `sim/` — but **not** `sim/models/`,
