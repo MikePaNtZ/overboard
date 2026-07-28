@@ -87,8 +87,7 @@ residual bias here — 0.99 still left R²=0.635; 0.9999 gives R²=0.9999, b/tau
 window-open time (12.5 ms) that costs nothing against a 2 s decay. No published friction figure
 had ever been derived through the STAGE0 path — only `IDEAL` was ever asserted — so nothing
 downstream needed correcting, only the `scripts/stage0b_runbook.py::step_coast_down` `IDEAL`
-workaround needs removing now, which is Senior Controls' file. PR: TBD (branch
-`feat/mech/spindown-settle-window`), closes #68.
+workaround needs removing now, which is Senior Controls' file. PR #70.
 
 ## Known dead ends
 
