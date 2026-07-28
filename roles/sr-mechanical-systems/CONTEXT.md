@@ -73,25 +73,20 @@ now cross-check: free-roll agreement 0.24–1.78% to 20% grade, bit-identical on
 asymmetry Controls measured falls out of geometry, because a board resting flat on a slope is
 already at world pitch −φ. PR #18.
 
-**2026-07-28 — `bench_rig.xml` now matches the parts actually purchased (#66).** Flywheel geometry
-was a 75 mm/12 mm custom aluminium disc estimate; the confirmed part is two goBILDA
-3628-0032-0082 units (82 mm OD, 152 g, 1651 g·cm² each, manufacturer-published). A same-mass solid
-disc at that radius computes to ~1277 g·cm² — 30% low — because the real part is a hub-and-rim
-casting, not a uniform disc, so each flywheel now carries an explicit `<inertial>` sourced directly
-from the datasheet rather than a density-derived guess. Plate stock corrected to the confirmed
-12″×12″ ¼″ 6061-T651 sheet (thickness 6 mm→6.35 mm exact); clamps confirmed as IRWIN Quick-Grip
-mini, noted as a second candidate resonance source alongside the riser (#64). Rotor can/hub stay
-geometry-derived estimates — no manufacturer figure exists for them, that's what the bare-run
-measurement is for.
+**2026-07-28 — The riser is undersized for the >50 Hz target, and a modest gusset fixes it.**
+`sim/scenarios/bench_riser.py` models the 200 mm riser as a cantilever with the motor + hub +
+both confirmed goBILDA flywheels (152 g each, #65/#66) hanging off the tip, weak-axis (out-of-
+plane) bending only — the axis the flywheel overhang loads, not the axis motor torque loads.
+First mode comes out **39.5–42.6 Hz** across an assumed 500–650 g motor-mass range (no datasheet
+in this repo states the real mass, and this environment has no web access to find one — the
+honest fix is a kitchen-scale weighing, not a better guess). That is below Runbook §3.2's 50 Hz
+target: **INADEQUATE as designed.** A diagonal gusset from the base plate to 80 mm up the riser
+(cut from the 12×12 stock's ~60% spare per #66, no new purchase) raises it to **86.7–93.7 Hz** —
+comfortably adequate. Both figures are a first-mode ROM (cantilever-beam closed form + Rayleigh
+mass correction), not an FEA; a tap test with a phone microphone is the cheap way to confirm it
+at the bench, and `describe_bench_signature()` says what a real riser mode looks like in the
+§6c step-response data so it isn't mistaken for plant behaviour. PR pending, issue #64.
 
-**Before/after, measured not assumed:** J_disc 1.6103e-3 → 3.3020e-4 kg·m² (matches 2×1651 g·cm²
-exactly), J_loaded 1.8510e-3 → 5.7085e-4 kg·m², ratio J_disc/J_bare 6.69 → 1.37. That drop is
-expected, not a regression — #65 already flagged 1.1–1.65 from these same confirmed figures and
-owns the decision of whether to accept it or add inertia; this issue only made the model match
-what's on the shaft. `sim/scenarios/bench_spinup.py`'s `known_disc_inertia_kg_m2()` now returns the
-manufacturer figure too (was a radius/thickness/density formula), since real hardware would know
-this from a datasheet, not a ruler. 202 tests pass, same count as master — updated in place, not
-added, since the affected assertions are model-inertia values, not new coverage.
 **2026-07-28 — `spindown()` gets the same settle window `identify()` got, mirrored for a decay.**
 Flagged by Senior Controls (#68) while dry-running the Stage-0B runbook: unlike `identify()`,
 `spindown()` had no data-driven settle window, so its friction fit ran straight through the

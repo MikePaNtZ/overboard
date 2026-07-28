@@ -57,6 +57,19 @@ gh pr merge <n> --squash --auto      # queues it; GitHub updates the branch and 
 Auto-merge and auto-delete-on-merge are enabled on all three repos. **Queue the merge and move
 on to the next thing.** Come back only if a check actually fails.
 
+## Recording what you did — write a NEW file, never append to a shared list
+
+**`roles/<role>/CONTEXT.md` is standing context** — sub-goals, turf notes, known dead ends. It
+changes rarely and is edited deliberately.
+
+**To record work you completed, add a new file:** `roles/<role>/log/YYYY-MM-DD-<slug>.md`.
+One entry, one file. Do **not** append to a shared list.
+
+The reason is mechanical, not stylistic. Every dispatched agent appending to one list means
+**every PR touches the same file, so every merge conflicts every other open PR.** On 2026-07-28
+that produced five simultaneous conflicts across eight PRs and serialised a queue that was
+otherwise entirely green. Separate files never collide.
+
 ## Escalate when any one is true — Promise, Door, or Turf
 
 - **Promise** — it changes something outside your role relies on: a public claim, a
