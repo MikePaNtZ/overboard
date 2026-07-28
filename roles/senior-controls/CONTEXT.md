@@ -16,15 +16,12 @@
   loosened blindly: `test_there_is_large_margin_on_actuation_delay` was pinned at 6.80 deg
   (truth pitch) and is now 9.71 deg (the honest number) — still clear of the 18.57 deg strike
   angle, re-baselined to `< 10.5`.
-  **AC2 also now cleared (PR TBD):** the disturbance-rejection envelope is mapped, not one
-  fixed magnitude — see the decision-log entry below. **Still open — issue #24's other three
-  ACs, deliberately not attempted in the same PR:** the `r_eff` tyre-ground justification
-  (geometry is Mechanical's turf — this role can investigate and report, not edit
-  `sim/models/`); confirming every scenario already emits bit-identical metrics JSON
-  (spot-checked true for impulse and closed-loop via existing determinism tests, not
-  re-verified for hill/terrain/shuttle); and an audit marking every acceptance number in the
-  scenario docs as measured vs. assumed. Each is its own well-scoped increment, not a blocker
-  for this one.
+  **AC2 also now cleared (#67):** the disturbance-rejection envelope is mapped, not one fixed
+  magnitude. **AC3 also now cleared (see the decision-log entry below):** the `r_eff` tyre-ground
+  question — couldn't be justified, so fixed. **AC4 addressed in a separate open PR (#74, not
+  yet merged as of this entry):** determinism audited across all four scenarios. **Still open —
+  issue #24's one remaining AC:** an audit marking every acceptance number in the scenario docs
+  as measured vs. assumed. Its own well-scoped increment, not a blocker for any of the above.
 - Closed-loop control is in sim; the estimator now closes the loop on the driverless impulse gate
   and the ridden cascade too, not only the shuttle.
 
@@ -66,6 +63,7 @@
   Stage-0's eventual bench measurement will produce.
   AC5 (measured-vs-assumed audit of every scenario-doc acceptance number) remains open, its own
   increment.
+
 - **Issue #24, AC2 — disturbance-rejection envelope (PR TBD).** Added
   `sim/scenarios/disturbance_envelope.py` (`sweep_closed_loop`, `EnvelopeResult`),
   `tests/test_disturbance_envelope.py`, and `scripts/disturbance_envelope.py`. A grid sweep
