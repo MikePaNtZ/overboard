@@ -6,6 +6,12 @@ license.workspace = true
 
 [dependencies]
 vesc-wire = { workspace = true }
+
+# socketcan binds Linux-specific socket constants (AF_CAN, PF_CAN) and does
+# not build on macOS/Windows. Target-gated here so `cargo build --workspace`
+# succeeds on those platforms; src/lib.rs cfg-gates the code that uses it to
+# match (issue #62). Do not move this back to an unconditional dependency.
+[target.'cfg(target_os = "linux")'.dependencies]
 socketcan = { workspace = true }
 
 [dev-dependencies]

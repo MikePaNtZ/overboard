@@ -89,6 +89,21 @@ resolves the 16× sourcing disagreement for free (mode 1 of `identify()` already
 buying before measuring risks sizing the disc against the wrong end of a 16×-wide guess.
 `recommend(j_bare_measured_kg_m2=...)` re-derives the pick once that number exists. PR pending,
 issue #65.
+**2026-07-28 — `spindown()` gets the same settle window `identify()` got, mirrored for a decay.**
+Flagged by Senior Controls (#68) while dry-running the Stage-0B runbook: unlike `identify()`,
+`spindown()` had no data-driven settle window, so its friction fit ran straight through the
+actuation-delay + current-loop-lag transient at the START of the coast-down. Under the default
+profile that collapsed R² to ~0.002 — noise, not a curve — because the friction regression's
+design matrix (`[w, sign(w)]`) has no column to absorb the transient's torque, unlike `identify()`
+where the same transient only ever scaled a slope. Fix: `decay_settle_time_s`, the decay-side twin
+of `settle_time_s`, waits for the *measured* current to decay to within `settle_fraction` of zero
+and stay there before either the two-term or the lumped-fit diagnostic runs. Needed a tighter
+`settle_fraction` than `identify()`'s 0.99 (0.9999) because there is no current column to absorb
+residual bias here — 0.99 still left R²=0.635; 0.9999 gives R²=0.9999, b/tau_c error <0.05%, at a
+window-open time (12.5 ms) that costs nothing against a 2 s decay. No published friction figure
+had ever been derived through the STAGE0 path — only `IDEAL` was ever asserted — so nothing
+downstream needed correcting, only the `scripts/stage0b_runbook.py::step_coast_down` `IDEAL`
+workaround needs removing now, which is Senior Controls' file. PR #70.
 
 ## Known dead ends
 
