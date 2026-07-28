@@ -1,0 +1,17 @@
+[package]
+name = "canary-ridden"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "canary-ridden"
+path = "src/main.rs"
+
+# NOT a template to copy. This crate exists to be a mistake --
+# `hal-actuate` should never be a dependency of a ridden-shaped binary --
+# and `crates/xtask`'s gate has to have something real to catch it on.
+[dependencies]
+board-types = { workspace = true }
+hal = { workspace = true }
+hal-actuate = { workspace = true }

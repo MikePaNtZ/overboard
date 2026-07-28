@@ -10,10 +10,23 @@ reconciled: 2316391
 **Executed by: CEO. Owned by: COO.** Written to be followed by one person, alone, safely,
 without reading anything else first.
 
-**Stage 0A deliberately needs NO Raspberry Pi.** Motor, controller and a laptop are enough to
-measure everything in this runbook. The Pi, the RT kernel and the CAN HAT are required only for
-the latency and jitter numbers, which are **Stage 0B** and are gated on the Pi image. Splitting
-them means assembly and the first real measurements can start the day the parts land.
+**Stage 0A needs no *tuned* Pi — but it does need a LINUX host, and that host is the Pi.**
+
+⚠️ **Correction, 2026-07-28.** An earlier version of this runbook said "motor, controller and a
+laptop are enough" and then, seven lines later, told you to run `ip link show can0`. That is a
+**Linux-only** command, and the CEO's laptop is macOS. SocketCAN does not exist on Darwin, and
+the CANable's candleLight firmware is a `gs_usb` device that only SocketCAN consumes. The two
+statements could not both be true.
+
+What is actually true: **the physics needs no Pi; the host does.** So the Pi and CAN HAT ship in
+the first order and act as the bench host from day one. That is strictly better than a macOS
+workaround — every 0A measurement is then taken through the same software path Stage 0B will
+use, so the CAN stack gets exercised weeks earlier than planned.
+
+The 0A/0B split still stands, and still earns its place: **0A is what you can measure with an
+untuned Pi; 0B is what needs the RT kernel, and it produces the latency and jitter go/no-go
+number.** You do not need a working RT image to do anything in this runbook — a stock Raspberry
+Pi OS boot is enough.
 
 > ⚠️ **The one rule that matters.** A 6374 outrunner with a flywheel bolted to it stores real
 > energy and will take a finger. **Nothing spins until the kill path is built and tested in
@@ -30,6 +43,11 @@ Everything in the **BoM-BENCH-001** view of the
 - Sensored ~6374 outrunner, 8 mm shaft · flywheel disc + set-screw hub · ¼″ 6061 plate ·
   bench clamps + fasteners
 - Little FOCer Rev4 · CANable 2.0 (USB→CAN) · bench power supply or interim pack
+- **Raspberry Pi 5 + power supply + storage** — the bench host. A stock Raspberry Pi OS image is
+  fine here; the RT kernel is Stage 0B's problem, not yours today.
+- *(Optional)* the Waveshare CAN HAT. **Not needed for 0A** — the CANable over USB is the
+  transport for this runbook. The HAT is Stage 0B, and its purchase is gated on the SPI
+  reproduction test in the Stage-0B design.
 - Fuse + holder · contactor · precharge resistor + momentary button
 - Klein CL800 clamp meter (**DC capable** — an AC-only meter reads nothing useful here)
 
@@ -90,8 +108,21 @@ motor power, and Stage 0A is the first time that rule becomes physical.
 1. Deadman switch **open**. Confirm it.
 2. Connect the supply. Press and hold precharge 1–2 s.
 3. Close the deadman. Controller LED should come up. **Hands clear of the disc.**
-4. On the laptop: `ip link show can0` (or the CANable's interface) — the link should exist.
-   Confirm frames arrive before commanding anything.
+4. **On the Pi** (not your Mac — these are Linux commands, and that is the whole reason the Pi
+   is here):
+
+   ```sh
+   sudo ip link set can0 up type can bitrate 500000   # bring the CANable up
+   ip -details link show can0                          # confirm it exists and is UP
+   candump can0                                        # watch frames before commanding anything
+   ```
+
+   `candump` showing traffic from the controller is the gate. **If nothing arrives, stop** — a
+   silent bus means you are about to command a motor you cannot hear, and every measurement in
+   §6 would be untrustworthy even if it looked fine.
+
+   You reach the Pi over SSH from the Mac, so you are still working from your own keyboard. The
+   Mac never talks to the CAN bus directly.
 5. Run the VESC motor detection / FOC setup. It will spin the motor briefly. **Stand out of the
    disc plane and keep the deadman within reach.**
 

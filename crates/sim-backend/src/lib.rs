@@ -20,12 +20,19 @@
 //!   imperfection profile.
 //! - **Cold start reports `Invalid`, not zeros.** A backend presenting zeros as
 //!   measurements before the drive has spoken is non-conforming (§12).
+//!
+//! [`SimBackend`] implements both [`hal::BoardObserve`] and
+//! [`hal_actuate::BoardActuate`], which makes this crate **driverless-only**:
+//! depending on it pulls in `hal-actuate` transitively, so `board-app-ridden`
+//! must not link it. `board-app-ridden` gets its own observe-only backend
+//! instead.
 
 use board_types::{
     Applied, Command, DisarmReason, ImuSample, IoError, Observation, Params, Profile, RunMetadata,
     Saturation, ValidityFlags,
 };
-use hal::{BoardActuate, BoardObserve, CallSequence, Disarm};
+use hal::{BoardObserve, CallSequence};
+use hal_actuate::{BoardActuate, Disarm};
 
 /// Nanoseconds per control cycle. 500 Hz, per ICD §11.2.
 const CYCLE_NS: u64 = 2_000_000;

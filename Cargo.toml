@@ -3,11 +3,17 @@ resolver = "2"
 members = [
     "crates/board-types",
     "crates/hal",
+    "crates/hal-actuate",
+    "crates/vesc-wire",
+    "crates/vesc-tx",
     "crates/control-core",
     "crates/safety",
     "crates/sim-backend",
     "crates/control-ffi",
-    "crates/board-app",
+    "crates/board-app-ridden",
+    "crates/board-app-driverless",
+    "crates/canary-ridden",
+    "crates/xtask",
 ]
 
 [workspace.package]
@@ -18,6 +24,9 @@ license = "MIT"
 [workspace.dependencies]
 board-types = { path = "crates/board-types" }
 hal = { path = "crates/hal" }
+hal-actuate = { path = "crates/hal-actuate" }
+vesc-wire = { path = "crates/vesc-wire" }
+vesc-tx = { path = "crates/vesc-tx" }
 control-core = { path = "crates/control-core" }
 safety = { path = "crates/safety" }
 sim-backend = { path = "crates/sim-backend" }
