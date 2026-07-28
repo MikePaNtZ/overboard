@@ -635,8 +635,17 @@ def run_terrain(params) -> tuple[object, np.ndarray]:
     return result, np.asarray(poses)
 
 
+#: How far ahead of the board the camera looks, metres. Enough that the board
+#: sits behind centre and the ground it is about to ride is the larger half of
+#: the frame -- a descent reads as somewhere to go rather than as a wall.
+CAM_LEAD_M = 1.6
+#: Aim point above the ground, metres. Roughly the rider's waist: it keeps the
+#: board off the bottom edge without pointing the lens at empty sky.
+CAM_AIM_HEIGHT_M = 0.55
+
+
 def terrain_camera(model, distance_m: float, fovy_deg: float,
-                   elevation_deg: float = -7.0):
+                   elevation_deg: float = -9.0):
     """Content's shot, defined here rather than in the scenario.
 
     `terrain.build_terrain_model` ships a world-fixed `terrain` camera whose own
@@ -645,24 +654,40 @@ def terrain_camera(model, distance_m: float, fovy_deg: float,
     8% a 24 m roller is only 0.6 m of relief, so from far enough back to frame
     the whole profile the hill flattens toward a texture.
 
-    A side-on TRACKING camera resolves it the other way. The board stays large
-    enough to read its pitch, and because the ground is genuinely tilted -- not
-    a flat plane under rotated gravity -- the ground line sweeps through frame
-    at the local slope. That, plus the profile strip in the HUD, is what makes
-    the grade legible without pretending the hill is steeper than it is.
+    A side-on camera that GLIDES ALONG THE RIDE resolves it the other way. The
+    board stays large enough to read its pitch, and because the ground is
+    genuinely tilted -- not a flat plane under rotated gravity -- the ground
+    line sweeps through frame at the local slope. That, plus the profile strip
+    in the HUD, is what makes the grade legible without pretending the hill is
+    steeper than it is.
+
+    Free rather than `mjCAMERA_TRACKING` because tracking aims at the tracked
+    body's centre of mass, which on a ridden board is most of a metre above the
+    wheel and drifts with the rider's lean. `aim_terrain_camera` points it at
+    the GROUND instead, so the horizon stays put and the only thing that tilts
+    in frame is the terrain.
     """
     import mujoco
 
     cam = mujoco.MjvCamera()
-    cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-    cam.trackbodyid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
     cam.distance = distance_m
-    cam.azimuth = 90.0
+    # Looking from -y, so forward travel (toward -x) crosses the frame left to
+    # right. The alternative reads as the board riding backwards.
+    cam.azimuth = -90.0
     cam.elevation = elevation_deg
     # Free and tracking cameras take their field of view from the model's
     # global visual settings rather than from the camera object.
     model.vis.global_.fovy = fovy_deg
     return cam
+
+
+def aim_terrain_camera(cam, board_x: float, amp: float, length: float) -> None:
+    """Point the camera at the ground just ahead of the board."""
+    lead_x = board_x - CAM_LEAD_M
+    cam.lookat[0] = lead_x
+    cam.lookat[1] = 0.0
+    cam.lookat[2] = amp * math.cos(2.0 * math.pi * lead_x / length) + CAM_AIM_HEIGHT_M
 
 
 def _chip(d, xy, text, font, fg, bg) -> float:
@@ -675,7 +700,8 @@ def _chip(d, xy, text, font, fg, bg) -> float:
     return tw + 20
 
 
-def _draw_profile_strip(d, box, params, amp, markers, fonts, *, compact=False) -> None:
+def _draw_profile_strip(d, box, params, amp, markers, fonts, *, compact=False,
+                        caption=True) -> None:
     """The ground itself, crest to crest, with a marker where the board is.
 
     This is the element that makes the grade readable. The camera can show a
@@ -691,7 +717,7 @@ def _draw_profile_strip(d, box, params, amp, markers, fonts, *, compact=False) -
     pad = 16
     s_lo, s_hi = -2.5, length + 2.5
     inner_w = (x1 - x0) - 2 * pad
-    top = y0 + (16 if compact else 26)
+    top = y0 + (10 if compact else 26)
     bot = y1 - (20 if compact else 26)
 
     def sx(s: float) -> float:
@@ -717,26 +743,30 @@ def _draw_profile_strip(d, box, params, amp, markers, fonts, *, compact=False) -
     for travel, colour, tag in markers:
         s = float(np.clip(travel, s_lo, s_hi))
         z = amp * math.cos(2.0 * math.pi * s / length)
-        cx, cy = sx(s), sz(z) - 7
+        # Clamped into the strip: at a crest the marker sits on the top of the
+        # curve, and an unclamped offset puts half of it outside the panel.
+        cx = sx(s)
+        cy = float(np.clip(sz(z) - 7, top + 7, bot))
         d.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=colour, outline=CLOUD)
         if tag:
-            d.text((cx + 10, cy - 8), tag, font=f_tiny, fill=colour)
+            d.text((cx + 10, cy - 7), tag, font=f_tiny, fill=colour)
 
-    exag = ((s_hi - s_lo) / inner_w) / ((2.0 * amp) / (bot - top))
-    cap = (f"{length:.0f} m crest to crest · {params.max_grade_pct:.0f}% peak grade "
-           f"· vertical ×{exag:.0f}")
-    d.text((x0 + pad, y0 + 5), cap, font=f_small if not compact else f_tiny,
-           fill=(*MUTED, 235))
+    if caption:
+        exag = ((s_hi - s_lo) / inner_w) / ((2.0 * amp) / (bot - top))
+        cap = (f"{length:.0f} m crest to crest · {params.max_grade_pct:.0f}% peak grade "
+               f"· vertical ×{exag:.0f}")
+        d.text((x0 + pad, y0 + 5), cap, font=f_small if not compact else f_tiny,
+               fill=(*MUTED, 235))
 
 
-def _draw_grade_panel(d, box, grade_pct: float, fonts) -> None:
-    """Local grade, as a number, a word, and a wedge drawn at the true angle.
+def _draw_grade_panel(d, box, grade_pct: float, peak_pct: float, fonts) -> None:
+    """Local grade: the number, the direction as a word, and a bar against peak.
 
-    The wedge is NOT exaggerated. At single-digit grades it is a shallow line,
-    which is the honest picture -- the board's envelope caps usable grade in
-    single digits and a single-digit grade is a gentle hill. The number and the
-    word carry the reading; the wedge only keeps them anchored to something
-    physical.
+    A wedge drawn at the true angle was the first attempt and it is unreadable:
+    8% is 4.6°, which at panel scale is a line indistinguishable from flat. The
+    honest fix is not to exaggerate the wedge but to drop it -- the number and
+    the word carry the reading, and the bar says how much of THIS profile's
+    peak grade the board is on right now.
     """
     f_small, f_body, f_big = fonts
     x0, y0, x1, y1 = box
@@ -752,12 +782,16 @@ def _draw_grade_panel(d, box, grade_pct: float, fonts) -> None:
     d.text((x0 + 18, y0 + 30), f"{abs(grade_pct):.1f}%", font=f_big, fill=colour)
     d.text((x0 + 18, y0 + 78), word, font=f_body, fill=CLOUD)
 
-    ang = math.atan(grade_pct / 100.0)
-    cx, cy, half = x1 - 62, y0 + 58, 44
-    dx, dy = half * math.cos(ang), half * math.sin(ang)
-    d.line([(cx - dx, cy - dy), (cx + dx, cy + dy)], fill=(*MUTED, 160), width=2)
-    d.line([(cx - half, cy), (cx + half, cy)], fill=(*MUTED, 60), width=1)
-    d.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=MINT)
+    bx0, bx1 = x1 - 116, x1 - 20
+    by = y0 + 48
+    d.rectangle([bx0, by, bx1, by + 14], fill=(*MUTED, 55), outline=(*MUTED, 110))
+    frac = min(1.0, abs(grade_pct) / max(peak_pct, 1e-6))
+    if frac > 0.01:
+        d.rectangle([bx0, by, bx0 + (bx1 - bx0) * frac, by + 14], fill=colour)
+    d.text((bx0, by - 18), "0", font=f_small, fill=MUTED)
+    lbl = f"{peak_pct:.0f}% peak"
+    d.text((bx1 - d.textlength(lbl, font=f_small), by - 18), lbl, font=f_small,
+           fill=MUTED)
 
 
 def _draw_terrain_hud(frame: np.ndarray, result, idx: int, source: Source,
@@ -812,7 +846,8 @@ def _draw_terrain_hud(frame: np.ndarray, result, idx: int, source: Source,
             d.text((cols[c_i], y), label, font=f_small, fill=MUTED)
             d.text((cols[c_i], y + 17), value, font=f_body, fill=colour)
 
-    _draw_grade_panel(d, (26, 256, 322, 366), grade, (f_small, f_body, f_big))
+    _draw_grade_panel(d, (26, 256, 322, 366), grade, p.max_grade_pct,
+                      (f_small, f_body, f_big))
 
     # --- bottom strips -----------------------------------------------------
     _draw_profile_strip(d, (26, HEIGHT - 172, 640, HEIGHT - 26), p, amp,
@@ -853,10 +888,18 @@ def _draw_terrain_hud(frame: np.ndarray, result, idx: int, source: Source,
 
     # --- event callouts ----------------------------------------------------
     CALLOUT_Y = 96
+
     def _callout(text: str, sub: str, colour, fade: int) -> None:
+        # Backed by a panel, not floated over the render: these sit against a
+        # pale sky, and amber-on-sky at 46 px is the one thing on the frame a
+        # viewer is guaranteed to have to squint at.
         tw = d.textlength(text, font=f_huge)
-        d.text(((WIDTH - tw) / 2, CALLOUT_Y), text, font=f_huge, fill=(*colour, fade))
         sw = d.textlength(sub, font=f_body)
+        half = max(tw, sw) / 2 + 26
+        d.rounded_rectangle([WIDTH / 2 - half, CALLOUT_Y - 14,
+                             WIDTH / 2 + half, CALLOUT_Y + 88], radius=8,
+                            fill=(*INK, int(fade * 0.78)))
+        d.text(((WIDTH - tw) / 2, CALLOUT_Y), text, font=f_huge, fill=(*colour, fade))
         d.text(((WIDTH - sw) / 2, CALLOUT_Y + 56), sub, font=f_body, fill=(*CLOUD, fade))
 
     if events:
@@ -893,9 +936,11 @@ def render_terrain_ride(result, qpos: np.ndarray, model, source: Source, amp: fl
         indices = ([only_index] if only_index is not None
                    else range(0, len(result.t), stride))
         frames = []
+        length = result.params.crest_to_crest_m
         for i in indices:
             data.qpos[:] = qpos[i]
             mujoco.mj_forward(model, data)
+            aim_terrain_camera(cam, float(qpos[i][0]), amp, length)
             renderer.update_scene(data, camera=cam, scene_option=opt)
             frames.append(_draw_terrain_hud(renderer.render().copy(), result, i,
                                             source, amp, strike_deg, events=events))
@@ -904,9 +949,15 @@ def render_terrain_ride(result, qpos: np.ndarray, model, source: Source, amp: fl
         renderer.close()
 
 
-def _terrain_pane(frame, result, idx: int, title: str, subtitle: str, colour,
-                  width: int, struck: bool) -> np.ndarray:
-    """Label one pane of the comparison, and say plainly when it has failed."""
+def _terrain_pane(frame, result, title: str, subtitle: str, colour,
+                  width: int, verdict: bool) -> np.ndarray:
+    """Label one pane of the comparison, and say plainly how it ended.
+
+    `verdict` goes true once the pane is holding its final frame. Both outcomes
+    get a band, not just the failure: a red banner with nothing opposite it
+    reads as an accusation rather than a comparison, and the point is that the
+    only difference between the two runs is where attitude came from.
+    """
     from PIL import Image, ImageDraw
 
     img = Image.fromarray(frame)
@@ -918,19 +969,36 @@ def _terrain_pane(frame, result, idx: int, title: str, subtitle: str, colour,
     tw = d.textlength(title, font=f_title)
     d.text((18 + tw + 16, 13), subtitle, font=f_sub, fill=CLOUD)
 
-    if struck:
-        m = result.metrics
-        # Persistent, not a fade. This pane has stopped; a viewer arriving at
-        # any later second has to be able to see that it stopped and why.
-        band_y = TERRAIN_PANE_H - 74
-        d.rectangle([0, band_y, width, TERRAIN_PANE_H], fill=(*ALARM, 210))
+    m = result.metrics
+    if not verdict or not (m.nose_strike or m.reached_next_crest):
+        return np.asarray(img)
+
+    # Persistent, not a fade. This pane has stopped; a viewer arriving at any
+    # later second has to be able to see that it stopped and why.
+    band_y = TERRAIN_PANE_H - 74
+    if m.nose_strike:
         head = f"{(m.struck_end or 'bumper').upper()} DOWN"
-        d.text((22, band_y + 8), head, font=f_big, fill=CLOUD)
-        hw = d.textlength(head, font=f_big)
-        d.text((22 + hw + 18, band_y + 20),
-               f"t = {m.t_strike_s:.2f} s   ride over at "
-               f"{m.fraction_completed * 100:.0f}% of {m.crest_to_crest_m:.0f} m",
-               font=f_sub, fill=CLOUD)
+        # Travel in metres, not a percentage of the ride. This run goes
+        # backwards before it goes forwards, so `fraction_completed` is
+        # negative and "-3% of 24 m" reads as a bug rather than as a board that
+        # slid back over the crest it started on.
+        travel = float(m.travel_m)
+        where = (f"{abs(travel):.1f} m back over the start crest" if travel < 0
+                 else f"{travel:.1f} m into a {m.crest_to_crest_m:.0f} m ride")
+        detail = f"t = {m.t_strike_s:.2f} s   {where}"
+        band = ALARM
+    else:
+        head = "NEXT CREST"
+        detail = (f"{m.crest_to_crest_m:.0f} m crest to crest in "
+                  f"{m.t_reached_crest_s:.1f} s")
+        band = (26, 110, 98)
+
+    d.rectangle([0, band_y, width, TERRAIN_PANE_H], fill=(*band, 215))
+    d.text((22, band_y + 8), head, font=f_big, fill=CLOUD)
+    hw = d.textlength(head, font=f_big)
+    d.text((22 + hw + 18, band_y + 20), detail, font=f_sub, fill=CLOUD)
+    if m.nose_strike:
+        # Once, on the pane that failed. On both it is just noise.
         d.text((22, band_y + 48),
                "same terrain, same controller — only the attitude source differs",
                font=f_small, fill=(*CLOUD, 230))
@@ -961,37 +1029,52 @@ def render_terrain_comparison(truth, truth_q: np.ndarray, est, est_q: np.ndarray
         opt = mujoco.MjvOption()
         opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
 
-        def pane(result, qpos, i, title, colour):
+        length = truth.params.crest_to_crest_m
+
+        def pane(result, qpos, i, title, colour, is_last):
             j = min(i, len(qpos) - 1)
             data.qpos[:] = qpos[j]
             mujoco.mj_forward(model, data)
+            aim_terrain_camera(cam, float(qpos[j][0]), amp, length)
             renderer.update_scene(data, camera=cam, scene_option=opt)
             sub = (f"t {float(result.t[j]):5.2f} s   "
                    f"travel {float(result.travel_m[j]):+5.1f} m   "
                    f"grade {abs(float(result.grade_pct[j])):4.1f}%   "
                    f"pitch {float(result.pitch_deg[j]):+6.2f}°")
-            struck = result.metrics.nose_strike and j >= len(qpos) - 1
-            return _terrain_pane(renderer.render().copy(), result, j, title, sub,
-                                 colour, WIDTH, struck), j
+            # A pane has delivered its verdict once it has nothing left to
+            # advance to. `is_last` covers the longer run, which the stride
+            # generally overshoots rather than landing exactly on.
+            verdict = is_last or i >= len(qpos) - 1
+            return _terrain_pane(renderer.render().copy(), result, title, sub,
+                                 colour, WIDTH, verdict), j
 
         f_small, f_tiny, f_body = _font(14), _font(12), _font(16)
         frames = []
-        for i in range(0, n, stride):
-            top, jt = pane(truth, truth_q, i, "TRUTH PITCH", MINT)
-            bottom, je = pane(est, est_q, i, "ATTITUDE ESTIMATE", AMBER)
+        steps = list(range(0, n, stride))
+        for i in steps:
+            is_last = i == steps[-1]
+            top, jt = pane(truth, truth_q, i, "TRUTH PITCH", MINT, is_last)
+            bottom, je = pane(est, est_q, i, "ATTITUDE ESTIMATE", AMBER, is_last)
 
+            # Footer: one header row, then the shared ground profile with a
+            # marker per pane. Two rows rather than one because the markers and
+            # their labels ride on the curve and collide with anything else put
+            # in the same band.
             footer = Image.new("RGB", (WIDTH, TERRAIN_FOOTER_H), INK)
             fd = ImageDraw.Draw(footer, "RGBA")
-            _draw_profile_strip(fd, (0, 0, WIDTH, TERRAIN_FOOTER_H), truth.params,
-                                amp, [(float(truth.travel_m[jt]), MINT, "truth"),
-                                      (float(est.travel_m[je]), AMBER, "estimate")],
-                                (f_small, f_tiny), compact=True)
+            HEAD_H = 30
+            _draw_profile_strip(fd, (0, HEAD_H, WIDTH, TERRAIN_FOOTER_H),
+                                truth.params, amp,
+                                [(float(truth.travel_m[jt]), MINT, "truth"),
+                                 (float(est.travel_m[je]), AMBER, "estimate")],
+                                (f_small, f_tiny), compact=True, caption=False)
+            fd.rectangle([0, 0, WIDTH, HEAD_H], fill=INK)
+            fd.text((18, 7), f"{truth.params.crest_to_crest_m:.0f} m crest to crest · "
+                    f"{truth.params.max_grade_pct:.0f}% peak grade · "
+                    f"v_ref {truth.params.v_ref_m_s:.1f} m/s",
+                    font=f_body, fill=MUTED)
             chip_w = fd.textlength(source.badge, font=f_small) + 20
-            _chip(fd, (WIDTH - chip_w - 20, 6), source.badge, f_small, AMBER, INK)
-            note = (f"{truth.params.max_grade_pct:.0f}% peak grade · "
-                    f"v_ref {truth.params.v_ref_m_s:.1f} m/s")
-            fd.text((WIDTH - chip_w - 34 - fd.textlength(note, font=f_small), 10),
-                    note, font=f_small, fill=MUTED)
+            _chip(fd, (WIDTH - chip_w - 20, 2), source.badge, f_small, AMBER, INK)
             frames.append(np.vstack([top, bottom, np.asarray(footer)]))
         return frames
     finally:
@@ -1013,7 +1096,7 @@ def save_terrain_plot(result, strike_deg: float, path: Path) -> None:
             ls="--", label="attitude estimate")
     for sign in (-1, 1):
         ax.axhline(sign * strike_deg, ls=":", lw=1.4, color="#C4650F")
-    ax.text(0.995, 0.02, f"bumper down at ±{strike_deg:.1f}° (from geometry)",
+    ax.text(0.995, 0.045, f"bumper down at ±{strike_deg:.1f}° (from geometry)",
             transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
             color="#C4650F")
     if m.t_strike_s is not None:
@@ -1065,7 +1148,7 @@ def save_terrain_compare_plot(truth, est, strike_deg: float, path: Path) -> None
         ax.annotate(f"{est.metrics.struck_end or 'bumper'} down @ "
                     f"{est.metrics.t_strike_s:.2f}s",
                     (est.metrics.t_strike_s, est.pitch_deg[-1]),
-                    textcoords="offset points", xytext=(14, -6), fontsize=9,
+                    textcoords="offset points", xytext=(14, 10), fontsize=9,
                     color="#D65A42")
     ax.set_ylabel("pitch (deg)")
     ax.set_title(f"Overboard — {p.max_grade_pct:.0f}% rolling terrain: truth pitch "
@@ -1076,7 +1159,7 @@ def save_terrain_compare_plot(truth, est, strike_deg: float, path: Path) -> None
     ax2.plot(truth.t, truth.travel_m, lw=1.8, color="#2AAE97")
     ax2.plot(est.t, est.travel_m, lw=1.8, color="#F2A24A")
     ax2.axhline(p.crest_to_crest_m, ls="--", lw=1.2, color="#8a99a0")
-    ax2.text(0.01, p.crest_to_crest_m, " next crest", va="bottom", fontsize=8,
+    ax2.text(0.01, p.crest_to_crest_m, " next crest", va="top", fontsize=8,
              color="#8a99a0")
     ax2.set_ylabel("travel (m)")
     ax2.set_xlabel("time (s)")
@@ -1176,6 +1259,9 @@ def render_terrain(args, source: Source) -> int:
             print(f"\ncomparison render unavailable ({type(exc).__name__}: {exc})")
             print("plots + metrics were still written; set MUJOCO_GL=osmesa or =egl.")
             return finish(f"plots + metrics only ({type(exc).__name__})")
+        # Both verdict bands only appear on the final frames; hold them so the
+        # clip ends on the comparison rather than cutting away from it.
+        frames += [frames[-1]] * int(round(1.6 * FPS))
         write_video(frames, out / "terrain_compare.mp4", "libx264", 6)
         written.append(out / "terrain_compare.mp4")
         print(f"wrote {out / 'terrain_compare.mp4'} ({len(frames)} frames @ {FPS}fps)")
@@ -1189,6 +1275,11 @@ def render_terrain(args, source: Source) -> int:
         print(f"\noffscreen rendering unavailable ({type(exc).__name__}: {exc})")
         print("plots + metrics were still written; set MUJOCO_GL=osmesa or =egl.")
         return finish(f"plots + metrics only ({type(exc).__name__})")
+
+    # Hold the last frame. The run stops the instant the far crest is reached,
+    # so without this the "NEXT CREST" callout is on screen for one frame and
+    # the clip ends on what looks like a cut rather than an arrival.
+    frames += [frames[-1]] * int(round(1.2 * FPS))
 
     write_video(frames, out / f"{TERRAIN_STEM}.mp4", "libx264", 6)
     written.append(out / f"{TERRAIN_STEM}.mp4")
@@ -1373,11 +1464,11 @@ def main() -> int:
                          help="tracking camera distance, m")
     terrain.add_argument("--terrain-fovy", type=float, default=26.0,
                          help="vertical field of view for the full-height ride, deg")
-    terrain.add_argument("--terrain-compare-fovy", type=float, default=13.0,
+    terrain.add_argument("--terrain-compare-fovy", type=float, default=20.0,
                          help="vertical field of view for a comparison pane, deg. "
-                              "Lower than the ride's because a pane is 306 px tall and "
-                              "fovy is VERTICAL -- the same number would shrink the "
-                              "board to something whose pitch cannot be read")
+                              "Tighter than the ride's because a pane is 306 px tall "
+                              "and fovy is VERTICAL -- the ride's number would leave "
+                              "the board too small to read its pitch")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
