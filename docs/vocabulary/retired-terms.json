@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "owner": "Archivist",
+  "canonical_definitions": "https://app.notion.com/p/3aa472a5fb6981ebaaa7cf2e996f1e8b",
+
+  "_comment": [
+    "Machine-readable retired -> current mapping. Data only: no definitions, no rationale.",
+    "Those live in the Notion page named above, which is the single place any of these terms",
+    "is defined. This file exists because CI cannot read Notion.",
+    "",
+    "Consumed by the `vocab` check in .github/policy_check.py (COO owns the gate,",
+    "Archivist owns this data). Adding a term here is a records fix, not a decision.",
+    "",
+    "The gate is expected to scan the WORKING TREE only. Git history, merged pull requests",
+    "and closed issues keep the old terms on purpose -- the record of how we got here is an",
+    "asset for a project whose thesis is building in public. Never rewrite history to match",
+    "current vocabulary."
+  ],
+
+  "escape": {
+    "commit_marker": "VOCAB-OK:",
+    "_note": "Mirrors ADR-0008's `DOC-OK:`. A commit carrying `VOCAB-OK: <reason>` bypasses this check, so an emergency is never blocked by a naming rule."
+  },
+
+  "exempt_paths": [
+    "docs/vocabulary/**",
+    "docs/decisions/ADR-*.md",
+    ".github/policy_check.py"
+  ],
+  "_exempt_paths_note": "ADRs are the immutable record of a decision at the time it was made; an ADR is superseded, never edited. This directory necessarily contains the retired terms themselves.",
+
+  "exempt_line_regex": "app\\.notion\\.com/p/3aa472a5fb6981ebaaa7cf2e996f1e8b",
+  "_exempt_line_note": [
+    "A line may name a retired term if it ALSO links the canonical page. That is deliberately",
+    "the same rule this vocabulary exists to enforce -- do not restate a definition, link to it.",
+    "It makes the only legal way to mention a retired term the one that also tells the reader",
+    "where the current definition lives.",
+    "",
+    "Learned the hard way on 2026-07-27: four documents were marked 'handled' because they",
+    "carried a pointer banner, while still RESTATING the old definition further down. Two of",
+    "those restatements had already gone false -- both said Lane A 'carries no signature',",
+    "which stopped being true the moment a Sim Replay gained a SIM tag. A banner at the top of",
+    "a page does not make the page correct. Checking per line does."
+  ],
+
+  "terms": [
+    {
+      "id": "lane-a",
+      "pattern": "\\bLane[ _-]?A\\b",
+      "replacement": "Sim Replay",
+      "severity": "error",
+      "note": "Ambiguous on purpose: a Replay always names its source, so the correct replacement is `Sim Replay` OR `Hardware Replay`. Default to Sim Replay -- no hardware telemetry exists yet. Do not auto-fix; a human picks the source."
+    },
+    {
+      "id": "lane-b",
+      "pattern": "\\bLane[ _-]?B\\b",
+      "replacement": "Concept",
+      "severity": "error",
+      "note": "Unambiguous. Safe to auto-fix."
+    },
+    {
+      "id": "lane-declaration",
+      "pattern": "\\blane declaration\\b",
+      "replacement": "category declaration",
+      "severity": "error",
+      "flags": "i"
+    },
+    {
+      "id": "lane-directories",
+      "pattern": "\\blane_[ab]\\b",
+      "replacement": "replay/ or concept/",
+      "severity": "error",
+      "note": "In overboard-viz the directory IS the category declaration, so a retired directory name is the mechanism rather than cosmetics. Renamed in overboard-viz PR #3."
+    },
+    {
+      "id": "two-lane",
+      "pattern": "\\btwo-lane\\b",
+      "replacement": "four categories",
+      "severity": "error",
+      "flags": "i",
+      "note": "The count changed, not just the names. There are four categories: Footage, Sim Replay, Hardware Replay, Concept."
+    },
+    {
+      "id": "simulation-burn-in",
+      "pattern": "burned-in `?SIMULATION`? mark",
+      "severity": "error",
+      "flags": "i",
+      "replacement": "the per-category on-frame mark (SIM / HARDWARE / CONCEPT)",
+      "note": "Retired with the lane vocabulary. `SIMULATION` read as a disclaimer and started an argument about watermarks."
+    },
+    {
+      "id": "watermark",
+      "pattern": "\\bwatermark",
+      "replacement": "signature",
+      "severity": "error",
+      "flags": "i",
+      "note": "Banned in overboard-viz/CLAUDE.md by its own rule: the word imports a defensive, anti-piracy framing that is wrong for what the mark does. Studios sign concept work."
+    },
+    {
+      "id": "bare-replay",
+      "pattern": "(?<!Sim )(?<!Hardware )\\bReplay\\b",
+      "replacement": "Sim Replay or Hardware Replay",
+      "severity": "warn",
+      "note": "ADVISORY, and expected to produce false positives -- it cannot tell prose about the concept from a category label. There is no bare `Replay`: the qualifier is what tells a viewer whether they are looking at physics or at a real board. Kept at warn so it informs without blocking; promote to error only if it proves precise in practice."
+    }
+  ]
+}
