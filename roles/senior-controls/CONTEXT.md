@@ -16,14 +16,15 @@
   loosened blindly: `test_there_is_large_margin_on_actuation_delay` was pinned at 6.80 deg
   (truth pitch) and is now 9.71 deg (the honest number) — still clear of the 18.57 deg strike
   angle, re-baselined to `< 10.5`.
-  **Still open — issue #24's other four ACs, deliberately not attempted in the same PR:**
-  disturbance-rejection **envelope** (currently one fixed magnitude, `NOMINAL_IMPULSE_NS = 20`,
-  not a sweep to a recovery boundary); the `r_eff` tyre-ground justification (geometry is
-  Mechanical's turf — this role can investigate and report, not edit `sim/models/`); confirming
-  every scenario already emits bit-identical metrics JSON (spot-checked true for impulse and
-  closed-loop via existing determinism tests, not re-verified for hill/terrain/shuttle); and an
-  audit marking every acceptance number in the scenario docs as measured vs. assumed. Each is
-  its own well-scoped increment, not a blocker for this one.
+  **AC2 also now cleared (PR TBD):** the disturbance-rejection envelope is mapped, not one
+  fixed magnitude — see the decision-log entry below. **Still open — issue #24's other three
+  ACs, deliberately not attempted in the same PR:** the `r_eff` tyre-ground justification
+  (geometry is Mechanical's turf — this role can investigate and report, not edit
+  `sim/models/`); confirming every scenario already emits bit-identical metrics JSON
+  (spot-checked true for impulse and closed-loop via existing determinism tests, not
+  re-verified for hill/terrain/shuttle); and an audit marking every acceptance number in the
+  scenario docs as measured vs. assumed. Each is its own well-scoped increment, not a blocker
+  for this one.
 - Closed-loop control is in sim; the estimator now closes the loop on the driverless impulse gate
   and the ridden cascade too, not only the shuttle.
 
@@ -65,6 +66,22 @@
   Stage-0's eventual bench measurement will produce.
   AC5 (measured-vs-assumed audit of every scenario-doc acceptance number) remains open, its own
   increment.
+- **Issue #24, AC2 — disturbance-rejection envelope (PR TBD).** Added
+  `sim/scenarios/disturbance_envelope.py` (`sweep_closed_loop`, `EnvelopeResult`),
+  `tests/test_disturbance_envelope.py`, and `scripts/disturbance_envelope.py`. A grid sweep
+  (20 N*s steps, `NOMINAL_IMPULSE_NS` to 320 N*s) on the driverless closed-loop board, not a
+  bisection to the exact recovery point: measured directly that `nose_strike` is **not
+  monotonic** in impulse magnitude near the 18.57 deg strike angle (280 and 300 N*s struck,
+  290 and 320 did not — `peak_abs_pitch_deg` sits within ~1 deg of the strike angle across
+  that whole band), so a bisection would converge on an arbitrary knife's-edge crossing that
+  moves with any small upstream change without the controller's real margin having changed. The
+  pinned number is the honest measured one: recovery boundary **260 N*s**, first sampled
+  failure **280 N*s** — 13x `NOMINAL_IMPULSE_NS`. Re-run twice to confirm the sweep itself is
+  deterministic before pinning.
+  **Deliberately left out:** the ridden/cascade plant (issue #24 only asked about the
+  driverless gate here — `test_closed_loop.py`'s ridden section is a separate, larger
+  configuration space); the `r_eff` justification, determinism audit and assumption audit are
+  issue #24's other three ACs, each its own increment.
 
 - **Issue #32, Stage-0B Pi image design (`docs/design-pi-image-stage0b.md`).** Design only, no
   implementation. Repo boundary: a `pi/` directory **in this repo**, argued on the *runtime
@@ -157,6 +174,21 @@
   than duplicated. No `--hardware` mode exists; there is no Pi image yet to run it against
   (O3, issues #51/#52 still open), and a stub with nothing to execute it would be exactly the
   unverifiable code this project rules out.
+
+- **Issue #62, target-gate `can-harness`'s `socketcan` dependency (PR TBD).** Follow-up from
+  #53: `socketcan` was an unconditional workspace dependency, so `cargo build --workspace` failed
+  on macOS (the CEO's machine). Moved `socketcan` to a
+  `[target.'cfg(target_os = "linux")'.dependencies]` table in `crates/can-harness/Cargo.toml` and
+  `#[cfg(target_os = "linux")]`-gated every item in `src/lib.rs` that touches it (`responder`,
+  `vcan`, `to_can_frame`/`from_can_frame`, their unit test); `tests/vcan_stack.rs` gets
+  `#![cfg(target_os = "linux")]` so it compiles to zero tests off Linux instead of failing to
+  compile against a crate with no socketcan items. **Verified for real, not assumed:** this
+  sandbox has no macOS runner, so verification used `rustup target add x86_64-apple-darwin` and
+  `cargo check`/`cargo clippy --workspace --all-targets --target x86_64-apple-darwin -- -D
+  warnings` — both clean, and `can-harness` compiles to an empty crate on that target as
+  intended. Linux side re-verified unchanged: `cargo test -p can-harness` still runs all four
+  vcan tests and prints `SKIP` for each (no `CAP_NET_ADMIN`/`vcan` module in this sandbox, the
+  expected unprivileged outcome), `cargo run -p xtask -- gate` still passes.
 
 _Older entries collapsed above this line as the log grows; nothing predates the crate-exclusion entry._
 
