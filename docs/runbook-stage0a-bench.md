@@ -34,6 +34,9 @@ Pi OS boot is enough.
 
 ---
 
+📷 *Capture plan: `docs/capture-plan-assembly.md`. This is the only assembly — every step
+below marked 📷 is unrepeatable and worth ~15–30s of phone footage.*
+
 ## 1. Parts, and what has to be true before you start
 
 Everything in the **BoM-BENCH-001** view of the
@@ -54,6 +57,8 @@ Everything in the **BoM-BENCH-001** view of the
 **Before you touch anything:** clear the bench, and stand where you are **not** in the plane of
 the disc. A shed set screw leaves along that plane.
 
+📷 **Capture: unboxing / first look** — see capture plan.
+
 ---
 
 ## 2. Build and TEST the kill path — before the motor is ever energised
@@ -71,6 +76,8 @@ motor power, and Stage 0A is the first time that rule becomes physical.
 
 ✅ **Gate: you may not proceed until opening that switch reliably kills controller power.**
 
+📷 **Capture: kill-path wiring + the 3x switch test** — see capture plan.
+
 ---
 
 ## 3. Mechanical assembly
@@ -82,6 +89,8 @@ motor power, and Stage 0A is the first time that rule becomes physical.
 3. Fit the set-screw hub to the shaft, then the disc. **Set screw onto the shaft flat**, not
    onto round stock. Thread-locker.
 4. Rotate by hand: free, no wobble, no contact with anything, full clearance all round.
+
+📷 **Capture: motor bolted to plate / bracket coming together** — see capture plan.
 
 **Record before going further** — these are inputs to the identification, not paperwork:
 
@@ -105,6 +114,9 @@ motor power, and Stage 0A is the first time that rule becomes physical.
 
 ## 5. First power-on
 
+📷 **Capture: first power-on** — phone propped facing the bench, recording before step 2. See
+capture plan.
+
 1. Deadman switch **open**. Confirm it.
 2. Connect the supply. Press and hold precharge 1–2 s.
 3. Close the deadman. Controller LED should come up. **Hands clear of the disc.**
@@ -123,8 +135,13 @@ motor power, and Stage 0A is the first time that rule becomes physical.
 
    You reach the Pi over SSH from the Mac, so you are still working from your own keyboard. The
    Mac never talks to the CAN bus directly.
+
+   📷 **Capture: first `candump` trace on screen** — see capture plan.
 5. Run the VESC motor detection / FOC setup. It will spin the motor briefly. **Stand out of the
    disc plane and keep the deadman within reach.**
+
+   📷 **Capture: first spin — the single most valuable second in the project.** Phone
+   recording **before** you run detection. See capture plan.
 
 ✅ **Gate: motor detection completes and reports hall sensors found.** If halls are not
 detected, stop — it is a pinout or harness fault, and running sensorless would silently change
@@ -144,6 +161,9 @@ the cleaner number.
 
 ### 6b. `kt` — the two-run inertia method
 The measurement Stage 0 exists for, and the reason no load cell was purchased.
+
+📷 **Capture: first `kt` measurement run** — screen/phone recording of the laptop plot,
+started before Run 1. See capture plan.
 
 1. **Run 1 — bare:** commanded current step, log the acceleration ramp.
 2. **Run 2 — with the disc:** *identical* commanded current, log the ramp.

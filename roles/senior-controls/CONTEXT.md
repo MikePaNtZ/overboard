@@ -95,6 +95,39 @@
   a live run on `ubuntu-latest` (it likely needs `CAP_NET_ADMIN`, which a
   plain job step doesn't have either) is flagged, not fixed, here.
 
+- **Issue #54, Stage-0B design doc split (PR TBD).** Design doc was at 39,633/40,000 chars —
+  367 bytes of headroom, one sentence from breaking the build. Split into the decision doc
+  (D1–D6, rationale, rejected alternatives; now ~19.8k) and a new companion
+  `docs/design-pi-image-stage0b-reference.md` (~24.9k) carrying the schemas, exact version
+  pins, AC table, verifiability table, credentials, data path and open-question ledger — same
+  shape as the existing `-verification.md` split. Nothing cut, only relocated; every internal
+  cross-reference updated to resolve across the new file. `TURF-OVERRIDE`'d against `docs/`
+  (COO turf) on the same precedent the original design doc used for issue #32.
+  **Left for a future pass, not invented here:** the design doc landed at 19,814 chars — under
+  ADR-0008's 20,000 warning line, but not with the multi-thousand-character margin the rest of
+  the split enjoys. Getting real headroom there would mean moving Safety §7.2–7.4 material
+  (already done) plus trimming further into D1/D2/D3/D6, which starts trading decision
+  rationale for size and wasn't worth doing without a second opinion.
+- **Issue #27, O4 — Stage-0B bench-test runbook (`docs/runbook-stage0b-bench.md`).** The
+  Pi-executed counterpart to Stage 0A's human checklist: ordered steps with purpose/falsifies/
+  pass-fail, abort criteria stated before the first powered step, a small JSON log schema
+  traceable to `git_sha`, and a sim dry run (`scripts/stage0b_runbook.py`,
+  `tests/test_stage0b_runbook.py`) exercising the sim-representable steps (current-step
+  response, coast-down, command→actuation latency) before hardware exists. AC-6's thresholds
+  (p99.9 ≤ 1 ms, max ≤ 2 ms, ≥10⁵ cycles) are reused verbatim from the ratified
+  `docs/design-pi-image-stage0b.md`, not re-derived.
+  **Finding, flagged rather than fixed:** `bench_spinup.spindown()` (Sr. Mechanical & Systems'
+  turf) has no equivalent of `identify()`'s data-driven `settle_time_s` windowing, so fitting
+  its decay under `STAGE0_PLACEHOLDER` runs the least-squares fit straight through the
+  actuation-delay + current-loop-lag transient at the start of the decay — R² collapsed to
+  ~0.002 (noise, not a curve) in testing here. The coast-down dry run uses `IDEAL` instead,
+  the only profile `spindown()` is actually validated against today.
+  **Deliberately left out:** the CAN round-trip step (2) is not re-implemented — it depends on
+  `can-harness` (issue #52, PR #53, not yet merged) and is documented as covered there rather
+  than duplicated. No `--hardware` mode exists; there is no Pi image yet to run it against
+  (O3, issues #51/#52 still open), and a stub with nothing to execute it would be exactly the
+  unverifiable code this project rules out.
+
 _Older entries collapsed above this line as the log grows; nothing predates the crate-exclusion entry._
 
 ## Known dead ends
