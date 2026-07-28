@@ -72,6 +72,19 @@
   `cargo run -p board-app` — stale after the split, but `README.md` is CEO
   turf, not mine to edit.
 
+- **Issue #54, Stage-0B design doc split (PR TBD).** Design doc was at 39,633/40,000 chars —
+  367 bytes of headroom, one sentence from breaking the build. Split into the decision doc
+  (D1–D6, rationale, rejected alternatives; now ~19.8k) and a new companion
+  `docs/design-pi-image-stage0b-reference.md` (~24.9k) carrying the schemas, exact version
+  pins, AC table, verifiability table, credentials, data path and open-question ledger — same
+  shape as the existing `-verification.md` split. Nothing cut, only relocated; every internal
+  cross-reference updated to resolve across the new file. `TURF-OVERRIDE`'d against `docs/`
+  (COO turf) on the same precedent the original design doc used for issue #32.
+  **Left for a future pass, not invented here:** the design doc landed at 19,814 chars — under
+  ADR-0008's 20,000 warning line, but not with the multi-thousand-character margin the rest of
+  the split enjoys. Getting real headroom there would mean moving Safety §7.2–7.4 material
+  (already done) plus trimming further into D1/D2/D3/D6, which starts trading decision
+  rationale for size and wasn't worth doing without a second opinion.
 - **Issue #27, O4 — Stage-0B bench-test runbook (`docs/runbook-stage0b-bench.md`).** The
   Pi-executed counterpart to Stage 0A's human checklist: ordered steps with purpose/falsifies/
   pass-fail, abort criteria stated before the first powered step, a small JSON log schema
