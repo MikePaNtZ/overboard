@@ -43,7 +43,8 @@ from sim.scenarios.bench_spinup import (
     load_model,
     replay,
     spindown,
-    _FLYWHEEL_GEOM_RE,
+    _FLYWHEEL_BODY_RE,
+    _INDEX_GEOM_RE,
     _joint_inertia,
     identify,
 )
@@ -54,12 +55,14 @@ def load_model_xml() -> str:
     """The raw MJCF text, for tests that build variants by stripping geoms."""
     return MODEL_PATH.read_text()
 
-#: The committed model's joint-space inertias, from bench_rig.xml's header --
-#: geometry-derived, not tuned. A change to the flywheel or rotor geometry
-#: should trip these and force the header's numbers to be updated alongside.
+#: The committed model's joint-space inertias, from bench_rig.xml's header.
+#: J_bare is geometry-derived (rotor can + hub); J_disc is the manufacturer's
+#: published figure for the two goBILDA 3628-0032-0082 flywheels (#66). A
+#: change to either should trip these and force the header's numbers to be
+#: updated alongside.
 KNOWN_GOOD_J_BARE = 2.4065e-4
-KNOWN_GOOD_J_LOADED = 1.8510e-3
-KNOWN_GOOD_J_DISC = 1.6103e-3
+KNOWN_GOOD_J_LOADED = 5.7085e-4
+KNOWN_GOOD_J_DISC = 3.3020e-4
 
 
 @pytest.fixture(scope="module")
@@ -89,8 +92,9 @@ def test_bare_variant_actually_strips_the_flywheel_geom(loaded_model, bare_model
     """Verified, not trusted -- a regex that silently failed to match would
     make the bare and loaded runs identical and the two-run fit a
     divide-by-zero."""
-    assert mujoco.mj_name2id(bare_model, mujoco.mjtObj.mjOBJ_GEOM, "flywheel") < 0
-    assert mujoco.mj_name2id(loaded_model, mujoco.mjtObj.mjOBJ_GEOM, "flywheel") >= 0
+    for name in ("flywheel_a_disc", "flywheel_b_disc"):
+        assert mujoco.mj_name2id(bare_model, mujoco.mjtObj.mjOBJ_GEOM, name) < 0
+        assert mujoco.mj_name2id(loaded_model, mujoco.mjtObj.mjOBJ_GEOM, name) >= 0
     assert _joint_inertia(bare_model) < _joint_inertia(loaded_model)
 
 
@@ -218,15 +222,18 @@ def test_fitting_from_zero_reproduces_the_original_50_percent_error(loaded_model
 # --------------------------------------------------------------------------
 
 def test_the_bare_model_carries_no_floating_index_mark(loaded_model):
-    """The index mark is drawn on the flywheel face, so it goes with the disc.
+    """The index mark is nested inside flywheel_b's body (#66), so stripping
+    the flywheel bodies removes it by construction, not by a second regex
+    that could drift out of sync.
 
-    Left behind, it renders as a white bar rotating in mid-air 52 mm off the
-    shaft, where the disc used to be. Raised by Digital Content Production after
-    it reached a render.
+    Left behind, it would render as a white bar rotating in mid-air where the
+    disc used to be. Raised by Digital Content Production after it reached a
+    render, back when the mark was a separate rotor-level geom.
     """
     bare = build_bare_model()
     assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "index") < 0
-    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel") < 0
+    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel_a_disc") < 0
+    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel_b_disc") < 0
     # Still present on the loaded rig -- the strip must be the only thing that
     # removes it, or the mark has simply been deleted from the model.
     assert mujoco.mj_name2id(loaded_model, mujoco.mjtObj.mjOBJ_GEOM, "index") >= 0
@@ -236,14 +243,17 @@ def test_removing_the_index_mark_changes_no_fitted_quantity(loaded_model):
     """It is massless with collision off, so this is model coherence, not
     correctness -- and that claim is worth checking rather than repeating.
 
-    Compares joint inertia of a bare model against one built by stripping only
-    the flywheel. Identical means the mark never contributed, so no previously
-    published J_bare or kt moves because of this change.
+    Strips ONLY the index geom (leaving both flywheel bodies intact) and
+    compares joint inertia against the full loaded model. Identical means the
+    mark never contributed, so no previously published J_disc, J_loaded or kt
+    moves because of this change.
     """
     xml = load_model_xml()
-    flywheel_only = mujoco.MjModel.from_xml_string(_FLYWHEEL_GEOM_RE.sub("", xml))
-    assert _joint_inertia(build_bare_model()) == pytest.approx(
-        _joint_inertia(flywheel_only), rel=1e-12
+    stripped, n = _INDEX_GEOM_RE.subn("", xml)
+    assert n == 1, f"expected exactly one index geom to strip, found {n}"
+    no_index_model = mujoco.MjModel.from_xml_string(stripped)
+    assert _joint_inertia(no_index_model) == pytest.approx(
+        _joint_inertia(loaded_model), rel=1e-12
     )
 
 

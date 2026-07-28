@@ -86,6 +86,7 @@ comfortably adequate. Both figures are a first-mode ROM (cantilever-beam closed 
 mass correction), not an FEA; a tap test with a phone microphone is the cheap way to confirm it
 at the bench, and `describe_bench_signature()` says what a real riser mode looks like in the
 §6c step-response data so it isn't mistaken for plant behaviour. PR pending, issue #64.
+
 **2026-07-28 — `spindown()` gets the same settle window `identify()` got, mirrored for a decay.**
 Flagged by Senior Controls (#68) while dry-running the Stage-0B runbook: unlike `identify()`,
 `spindown()` had no data-driven settle window, so its friction fit ran straight through the
