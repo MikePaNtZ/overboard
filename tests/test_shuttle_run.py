@@ -9,6 +9,27 @@ The thresholds here are **not tight**. The outer loop is deliberately slow, so
 the board trails its command by design; these bound the behaviour rather than
 certify it, and they are expected to move once an estimator and an imperfection
 profile are in the loop.
+
+GATE NUMBERS -- MEASURED VS ASSUMED (issue #24 AC5 audit, this session)
+-------------------------------------------------------------------------
+The module docstring above already says these bounds are loose by design --
+that is itself the "explicitly marked as an assumption" this audit asks for.
+Re-run against this checkout to put an actual number next to each bound:
+
+| Assertion                          | Threshold  | Observed this session | Status |
+|-------------------------------------|------------|------------------------|--------|
+| `test_it_returns_to_home`           | `< 0.30 m` | 0.233 m                | ASSUMED-but-loose -- the docstring above states outright these are not certified margins; 0.30 m was chosen as "not obviously broken," not derived from a stated worst case |
+| `test_it_holds_station_during_the_pauses` | `< 0.40 m` | 0.198 m          | ASSUMED-but-loose, same basis |
+| `test_it_never_strikes_and_never_saturates` (peak pitch) | `< 12.0 deg` | 7.825 deg | ASSUMED-but-loose, same basis |
+| `test_the_pitch_reference_stays_off_its_clamp` | `< 4.5 deg` | 3.467 deg | ASSUMED-but-loose, same basis |
+| `test_it_actually_goes_out_and_comes_back_past_home` | `> 1.5 m` out, `< -0.5 m` back | route legs are +2.0/-3.0/+1.0 m, so this is a geometric consequence of the route rather than a measured controller property | MEASURED (it is arithmetic on `DEFAULT_ROUTE`, not a sim result) |
+
+None of the four physics-derived bounds were tightened here -- the module
+docstring's "not tight, expected to move" framing already is the honest
+disclosure this audit exists to require, and re-deriving tighter margins is
+tuning work outside AC5's scope (an audit, not a re-tune). Recorded here so a
+future tightening pass has today's actual numbers to start from instead of
+re-measuring blind.
 """
 
 import pytest

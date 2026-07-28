@@ -12,6 +12,30 @@ Three kinds of test here, deliberately separated:
   GATE       what the board can actually do, and the evidence that the
              ATTITUDE ESTIMATE is what takes the hill away rather than the
              motor
+
+GATE NUMBERS -- MEASURED VS ASSUMED (issue #24 AC5 audit, this session)
+-------------------------------------------------------------------------
+Every GATE threshold re-run against this checkout before writing this table,
+so the "observed" column is a fact about this commit, not an inherited claim.
+
+| Assertion (grade, v_ref)                          | Threshold            | Observed this session          | Status |
+|-----------------------------------------------------|-----------------------|---------------------------------|--------|
+| medium descent, 10% @ {1,2,3} m/s: `abs(v_final-v_ref)` | `< 0.25 m/s`       | 0.062 / 0.085 / 0.097 m/s        | MEASURED -- band is 2.6-4x the actual error, not a guessed number |
+| medium climb, -5% @ 2 m/s: `held_speed`              | survives + holds      | survived, held                  | MEASURED |
+| climbing is harder: 10% descent vs -10% climb        | descent survives, climb does not | descent survived; climb did not | MEASURED |
+| estimator headline: 15% descent, truth vs estimate   | truth survives, estimate strikes the tail | truth: survived, held; estimate: struck, `struck_end="tail"` | MEASURED |
+| estimator absorbs the slope, 5%/10% @ 1 m/s          | `0.6 < err/slope < 1.3` | 0.785 (5%), 0.820 (10%)       | MEASURED -- band brackets the observed ~0.8x with real headroom on both sides, not just above it |
+| crash statistics, 20% descent: `peak_abs_pitch_deg`  | `< 25.0`              | 18.5° (this run's actual peak)  | ASSUMED / sanity ceiling -- 25° bounds against the wreckage-scale numbers the bug produced (179.97°), not a tight margin on today's 18.5°; not re-derived from a stated worst case |
+| `HillMetrics.ran_away` (`abs(v_final) > 2*v_ref + 1`) | heuristic             | not independently re-measured   | ASSUMED -- flagged as such in `hill.py` itself ("Deliberately crude... a tight threshold here would invite tuning") |
+| cutback never binds, 10% descent                     | `cutback_binding_cycles == 0` | 0 (`min_available_a` stayed at the 40 A ceiling) | MEASURED |
+
+The one real gap this audit found: the 25° ceiling on the crash-statistics
+test was never tied to an observed worst case the way every other GATE number
+here is -- it is a sanity bound against the *old* bug's 179.97° output, not a
+re-derived margin on the *current* 18.5°. Left as-is rather than tightened,
+because tightening a threshold nobody asked to tighten is exactly the kind of
+scope creep this audit is not for; flagged here so a future pass does not
+mistake "passes comfortably" for "was measured."
 """
 
 import math
