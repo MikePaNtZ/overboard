@@ -193,10 +193,18 @@ def test_there_is_large_margin_on_actuation_delay(ridden):
     times the estimate -- because at ~12 rad/s bandwidth a millisecond costs
     almost no phase. Measured, so the claim is not an assertion about a Bode
     plot nobody drew.
+
+    Re-baselined for the honest number: `RustController` now runs the
+    estimator by default (issue #24 AC1 -- every headline number was
+    previously measured against ground-truth pitch, which no real IMU has).
+    Fusing the estimate costs real margin here: 6.80 deg on truth pitch,
+    9.71 deg on the estimate. Both are well clear of the 18.57 deg strike
+    angle, so "unbothered" still holds -- but the number moved, which is
+    exactly the point of measuring it honestly instead of on truth.
     """
     r = _impulse(ridden, STAGE0_PLACEHOLDER, delay_s=0.020)
     assert not r.metrics.nose_strike
-    assert r.metrics.peak_abs_pitch_deg < 9.0
+    assert r.metrics.peak_abs_pitch_deg < 10.5
 
 
 def test_enough_delay_does_break_it(ridden):

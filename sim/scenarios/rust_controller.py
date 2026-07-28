@@ -153,7 +153,7 @@ class RustController:
         v_ref_fn=None,
         r_eff_m: float = DEFAULT_R_EFF_M,
         com_above_axle: bool = True,
-        use_estimator=False,
+        use_estimator=True,
         estimator_tau_s: float = 1.0,
         estimator_accel_aiding: int = 1,
         wheel_accel_tau_s: float = 0.05,
