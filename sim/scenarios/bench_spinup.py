@@ -119,6 +119,41 @@ acceleration directly against `[w, sign(w)]`:
 `J` is read directly off the compiled model (`_joint_inertia`) rather than
 re-derived here -- that is mode 1's job, not this one's.
 
+SPIN-DOWN HAD THE SAME WINDOWING BUG AS identify(), AND IT WAS WORSE (#68)
+---------------------------------------------------------------------------
+`identify()` opens its fit window once the measured current has settled INTO
+a step (`settle_time_s`). Until this fix, `spindown()` had no equivalent for
+the mirror-image transient: the command drops to zero, but under
+`STAGE0_PLACEHOLDER` the actuation delay and current-loop lag mean the
+current actually delivered decays away from `spin_up_current_a` rather than
+vanishing instantly. For the first few milliseconds of the "decay", the shaft
+is still seeing several amps -- and unlike `identify()`'s ramp, which is
+merely suppressed by a roughly constant factor, this puts a torque transient
+an order of magnitude larger than the genuine friction deceleration straight
+into a regression whose design matrix (`[w, sign(w)]`) has no column to
+absorb it. Measured result: R^2 ~ 0.002 under the default profile -- noise,
+not a curve (issue #68, raised by Senior Controls while dry-running the
+Stage-0B runbook, `spindown()` being this role's file).
+
+The fix is the same shape as `identify()`'s, mirrored for a falling rather
+than a rising current: `decay_settle_time_s` waits for the measured current
+to decay to within `settle_fraction` of zero and STAY there, data-driven off
+the current trace exactly like `settle_time_s` -- there is no profile object
+on real hardware, only a current sensor, and this rig's whole job is to
+characterise that signal path. Both the two-term and the lumped-fit
+diagnostic now run over the post-settle window only. On `IDEAL` the window
+opens at the very first sample (nothing to wait for) so behaviour there is
+unchanged; `test_spindown_recovers_friction_terms_under_the_stage0_profile`
+pins the STAGE0 recovery so this cannot regress silently the way the original
+bug did.
+
+No published friction figure was ever derived through the STAGE0 path: the
+only spindown assertions in this suite ran on `IDEAL`, and the Stage-0B
+runbook dry run (`scripts/stage0b_runbook.py::step_coast_down`) used `IDEAL`
+as an explicit, documented workaround pending this fix. There is nothing to
+correct downstream -- only the workaround to remove, which is Senior
+Controls' file to change.
+
 CATEGORY ERROR GUARD
 ---------------------
 This bench motor's kt is ~0.05 N*m/A (a 190 kv 6374). The onewheel hub
@@ -312,6 +347,45 @@ def settle_time_s(
         raise ValueError(
             "measured current settles only at the very last sample -- no ramp "
             "left to fit. Increase IdentifyParams.sim_seconds."
+        )
+    return float(t[idx])
+
+
+def decay_settle_time_s(
+    t: np.ndarray, i_measured: np.ndarray, initial_current_a: float, fraction: float,
+) -> float:
+    """First instant after which the measured current, released from
+    `initial_current_a` when the command drops to zero, STAYS within
+    `1 - fraction` of zero.
+
+    The decay-side twin of `settle_time_s` (see #68): that one waits for
+    current to rise INTO a held command; this one waits for it to fall AWAY
+    from one, because the actuation delay and current-loop lag delay the
+    fall exactly as they delay the rise. Same "stays within" search from the
+    end for the same reason -- a staircased or noisy current can cross the
+    threshold once on the way down and bounce back before it has genuinely
+    settled, and the LAST crossing is what bounds the transient.
+
+    Data-driven on purpose, exactly like `settle_time_s`: on hardware there
+    is no profile object to consult for how long the current loop takes to
+    unwind, only a current sensor, and characterising that signal path is
+    this rig's job.
+    """
+    threshold = (1.0 - fraction) * abs(initial_current_a)
+    ok = np.abs(np.asarray(i_measured)) <= threshold
+    if not ok.any():
+        raise ValueError(
+            f"measured current never decayed within {1.0 - fraction:.0%} of "
+            f"{initial_current_a} A of zero. Either the current-loop lag "
+            "exceeds SpindownParams.decay_s or the run is too short to "
+            "contain a settled decay."
+        )
+    violations = np.flatnonzero(~ok)
+    idx = 0 if violations.size == 0 else int(violations[-1]) + 1
+    if idx >= len(t):
+        raise ValueError(
+            "measured current settles only at the very last sample -- no "
+            "decay left to fit friction against. Increase SpindownParams.decay_s."
         )
     return float(t[idx])
 
@@ -566,6 +640,34 @@ class SpindownParams:
     constant is ~18 s, so the decay is nowhere near complete, but the speed
     swept is still wide enough to separate the two friction terms)."""
 
+    settle_fraction: float = 0.9999
+    """Fraction of the way from `spin_up_current_a` to zero the measured
+    current must decay -- and stay -- before the friction-fit window opens.
+
+    Mirrors `IdentifyParams.settle_fraction` (see #68), but tighter, and for
+    a reason specific to this fit: the friction regression's design matrix is
+    `[w, sign(w)]`, with no column for a current term, so ANY residual
+    current-loop torque left in the window is pure unmodelled signal, not a
+    small bias the way Coulomb is for `identify()`'s kt. `identify()` can
+    afford 0.99 because its 14 ms window is itself tiny; this decay runs for
+    `decay_s` (2 s by default), so there is no cost to waiting for the
+    transient to genuinely die out.
+
+    Measured on the default profile (fraction -> window opens at / R^2 /
+    b error / tau_c error):
+
+        0.99     ->  7.0 ms  /  R^2=0.635   /  4.51%   /  1.95%
+        0.999    -> 10.0 ms  /  R^2=0.996   /  0.389%  /  0.165%
+        0.9999   -> 12.5 ms  /  R^2=0.9999  /  0.043%  /  0.015%
+        0.99999  -> 15.5 ms  /  R^2=0.99999 /  0.0049% /  0.0058%
+
+    0.99 is what `identify()` uses and is not nearly tight enough here --
+    0.2 A of residual current (1% of the 20 A spin-up) still produces ~5.4
+    rad/s^2 of unmodelled torque, comparable to the friction deceleration
+    itself. 0.9999 clears the same R^2 > 0.999 bar the ideal run holds, with
+    a wide margin still visible in the 0.99999 row; going tighter buys very
+    little further and starts trading away decay data for no real gain."""
+
 
 @dataclass
 class SpindownMetrics:
@@ -575,6 +677,15 @@ class SpindownMetrics:
     b_fit_nm_s_per_rad: float = 0.0
     tau_c_fit_nm: float = 0.0
     r2: float = 0.0
+
+    #: Where the friction-fit window actually started, seconds from current-cut
+    #: (t=0 of the decay). DERIVED FROM THE DATA (`decay_settle_time_s`), not a
+    #: parameter -- reported for the same reason `identify()` reports
+    #: `fit_start_s`: a fit is not reproducible unless the window it used is
+    #: stated alongside it. On `IDEAL` this is ~0 (nothing to wait for); under
+    #: `STAGE0_PLACEHOLDER` it is the time the current-loop transient took to
+    #: unwind. See #68.
+    fit_start_s: float = 0.0
 
     #: What the model was actually built with -- read off the compiled model
     #: rather than hardcoded, so a change to bench_rig.xml's placeholders
@@ -633,7 +744,7 @@ def spindown(
 
     n_decay = int(round(params.decay_s / dt))
     t0 = float(data.time)
-    ts, ws, accs = [], [], []
+    ts, ws, accs, i_meas = [], [], [], []
     for _ in range(n_decay):
         current = imp.apply_current(0.0)
         data.ctrl[0] = current * NAMEPLATE_KT_NM_PER_A
@@ -641,27 +752,41 @@ def spindown(
         ts.append(float(data.time) - t0)
         ws.append(imp.wheel_rate(float(data.qvel[0]), float(data.time)))
         accs.append(float(data.qacc[0]))
+        i_meas.append(current)
 
     t = np.asarray(ts)
     w = np.asarray(ws)
     acc = np.asarray(accs)
+    i_dec = np.asarray(i_meas)
     j = _joint_inertia(model)
 
-    # Two-term fit: qacc = -(b/J)*w - (tau_c/J)*sign(w).
-    sgn = np.sign(w)
-    design = np.vstack([w, sgn]).T
-    (c1, c2), *_ = np.linalg.lstsq(design, acc, rcond=None)
+    # The friction fit must not see the current-loop's own unwind -- see the
+    # module docstring (#68). Data-driven, exactly like identify()'s settle
+    # window: wait for the MEASURED current, not the profile, to say the
+    # transient is over.
+    t_start = decay_settle_time_s(t, i_dec, params.spin_up_current_a, params.settle_fraction)
+    fit_mask = t >= t_start
+    w_fit = w[fit_mask]
+    acc_fit = acc[fit_mask]
+
+    # Two-term fit: qacc = -(b/J)*w - (tau_c/J)*sign(w), over the settled
+    # window only.
+    sgn = np.sign(w_fit)
+    design = np.vstack([w_fit, sgn]).T
+    (c1, c2), *_ = np.linalg.lstsq(design, acc_fit, rcond=None)
     b_fit = -c1 * j
     tau_c_fit = -c2 * j
     pred = design @ np.array([c1, c2])
-    ss_res = float(np.sum((acc - pred) ** 2))
-    ss_tot = float(np.sum((acc - acc.mean()) ** 2))
+    ss_res = float(np.sum((acc_fit - pred) ** 2))
+    ss_tot = float(np.sum((acc_fit - acc_fit.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 1.0
 
-    # Lumped (viscous-only) fit -- the defect the two-term fit replaces.
-    b_lump = -float(np.dot(w, acc) / np.dot(w, w))
-    resid_lump = acc - (-b_lump * w)
-    order = np.argsort(w)
+    # Lumped (viscous-only) fit -- the defect the two-term fit replaces. Same
+    # settled window, so the diagnostic is a fair comparison against the
+    # two-term fit above rather than against a different slice of the data.
+    b_lump = -float(np.dot(w_fit, acc_fit) / np.dot(w_fit, w_fit))
+    resid_lump = acc_fit - (-b_lump * w_fit)
+    order = np.argsort(w_fit)
     k = max(1, len(order) // 20)  # slowest / fastest 5% of the logged speeds
     resid_lo = float(resid_lump[order[:k]].mean())
     resid_hi = float(resid_lump[order[-k:]].mean())
@@ -675,6 +800,7 @@ def spindown(
         b_fit_nm_s_per_rad=b_fit,
         tau_c_fit_nm=tau_c_fit,
         r2=r2,
+        fit_start_s=t_start,
         b_placeholder_nm_s_per_rad=b_true,
         tau_c_placeholder_nm=tau_c_true,
         b_error_pct=abs(b_fit - b_true) / b_true * 100.0 if b_true else 0.0,
@@ -858,6 +984,8 @@ def main() -> int:
         result = spindown(params, profile=profile)
         m = result.metrics
         print(f"=== bench spindown  [profile={m.imperfection_profile_id}]")
+        print(f"  fit window opens at {m.fit_start_s*1e3:.2f} ms "
+              "(current-loop transient excluded)")
         print(f"  speed swept     {m.w0_rad_s:.2f} -> {m.w_end_rad_s:.2f} rad/s")
         print(f"  b fit           {m.b_fit_nm_s_per_rad:.6e} N*m*s/rad "
               f"(placeholder {m.b_placeholder_nm_s_per_rad:.2e}, {m.b_error_pct:.3f}% off)")

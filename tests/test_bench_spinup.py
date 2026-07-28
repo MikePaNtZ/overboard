@@ -38,6 +38,7 @@ from sim.scenarios.bench_spinup import (
     IdentifyParams,
     SpindownParams,
     build_bare_model,
+    decay_settle_time_s,
     known_disc_inertia_kg_m2,
     load_model,
     replay,
@@ -280,6 +281,107 @@ def test_spindown_lumped_fit_residual_changes_sign(loaded_model):
     assert m.lumped_residual_changes_sign, (
         f"lo={m.lumped_residual_low_speed_rad_s2}, hi={m.lumped_residual_high_speed_rad_s2}"
     )
+
+
+def test_spindown_recovers_friction_terms_under_the_stage0_profile(loaded_model):
+    """**The assertion whose absence let R^2 collapse to ~0.002 ship green** (#68).
+
+    Before the fix, `spindown()` had no settle window: the least-squares fit
+    ran from the instant current was commanded to zero, straight through the
+    actuation-delay + current-loop-lag transient while real current was still
+    decaying off the shaft. Under the default profile that produced an R^2 of
+    ~0.002 -- noise, not a curve -- yet nothing asserted it, so the only
+    spindown test in this suite (on `IDEAL`, where there is no transient to
+    hide) stayed green regardless.
+
+    Tolerances match the ideal run's (1%) because after the fix there is no
+    reason STAGE0 should be worse: both profiles now fit over a settled
+    window, and the only thing STAGE0 adds is a longer wait for the transient
+    to clear, not a bias in the result.
+    """
+    m = spindown(SpindownParams(), model=loaded_model, profile=STAGE0_PLACEHOLDER).metrics
+    assert m.r2 > 0.999, (
+        f"R^2={m.r2:.4f} -- if this is near zero the fit window is back inside "
+        "the current-loop's unwind transient"
+    )
+    assert m.b_fit_nm_s_per_rad == pytest.approx(m.b_placeholder_nm_s_per_rad, rel=0.01)
+    assert m.tau_c_fit_nm == pytest.approx(m.tau_c_placeholder_nm, rel=0.01)
+
+
+def test_the_spindown_fit_window_opens_after_the_current_has_decayed(loaded_model):
+    """The mechanism, pinned so it cannot regress back to fitting from t=0.
+
+    Under Stage-0 there is 1 ms of actuation delay plus a 1 ms current-loop
+    time constant on the way DOWN to zero, just as there is on the way up in
+    `identify()`, so a settled window cannot start at t=0. On IDEAL there is
+    nothing to wait for, so it must start immediately. Both directions are
+    asserted, exactly mirroring
+    `test_the_fit_window_opens_after_the_current_has_settled` for `identify()`.
+    """
+    stage0 = spindown(SpindownParams(), model=loaded_model, profile=STAGE0_PLACEHOLDER).metrics
+    ideal = spindown(SpindownParams(), model=loaded_model, profile=IDEAL).metrics
+
+    assert stage0.fit_start_s > 0.005, (
+        f"window opened at {stage0.fit_start_s*1e3:.1f} ms -- too early to have "
+        "cleared the current-loop's unwind transient"
+    )
+    assert ideal.fit_start_s < 0.002, (
+        f"window opened at {ideal.fit_start_s*1e3:.1f} ms on a profile with no "
+        "delay and no lag -- the settle detector is not data-driven"
+    )
+
+
+def test_spindown_fitting_from_zero_reproduces_the_r2_collapse(loaded_model):
+    """The counterfactual, so the reason for the window is measured and not
+    just asserted in a docstring -- mirrors
+    `test_fitting_from_zero_reproduces_the_original_50_percent_error` for
+    `identify()`.
+
+    `settle_fraction=0.0` reconstructs the pre-fix behaviour (window opens at
+    the first sample, i.e. fits straight through the transient) without
+    duplicating `spindown()`'s internals. If this stops reproducing a
+    near-zero R^2, the current-loop model has changed and the windowing
+    rationale needs revisiting rather than being trusted.
+    """
+    m = spindown(
+        SpindownParams(settle_fraction=0.0), model=loaded_model, profile=STAGE0_PLACEHOLDER,
+    ).metrics
+    assert m.r2 < 0.1, (
+        f"R^2={m.r2:.4f} fitting from t=0 -- expected a collapse close to the "
+        "~0.002 reported in #68; the current-loop model may have changed"
+    )
+    assert m.b_error_pct > 20.0 and m.tau_c_error_pct > 20.0, (
+        "expected the from-zero fit to badly mis-recover both friction terms, "
+        f"got b_error={m.b_error_pct:.2f}%, tau_c_error={m.tau_c_error_pct:.2f}%"
+    )
+
+
+# --------------------------------------------------------------------------
+# decay_settle_time_s -- unit-level, no sim
+# --------------------------------------------------------------------------
+
+def test_decay_settle_time_s_waits_for_the_last_violation():
+    """"Stays within", not "first reaches": a current that dips under the
+    threshold and bounces back out must not open the window early."""
+    t = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    i_measured = np.array([20.0, 0.05, 5.0, 0.05, 0.02, 0.01])  # dip at t=1, then back up at t=2
+    t_start = decay_settle_time_s(t, i_measured, initial_current_a=20.0, fraction=0.99)
+    assert t_start == pytest.approx(3.0), (
+        "must skip past the t=2 bounce-back, not stop at the first dip under threshold"
+    )
+
+
+def test_decay_settle_time_s_opens_immediately_when_already_settled():
+    t = np.array([0.0, 1.0, 2.0])
+    i_measured = np.array([0.0, 0.0, 0.0])
+    assert decay_settle_time_s(t, i_measured, initial_current_a=20.0, fraction=0.99) == 0.0
+
+
+def test_decay_settle_time_s_raises_if_current_never_decays():
+    t = np.array([0.0, 1.0, 2.0])
+    i_measured = np.array([20.0, 19.0, 18.0])
+    with pytest.raises(ValueError, match="never decayed"):
+        decay_settle_time_s(t, i_measured, initial_current_a=20.0, fraction=0.99)
 
 
 # --------------------------------------------------------------------------
