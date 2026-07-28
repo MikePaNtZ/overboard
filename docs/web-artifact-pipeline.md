@@ -4,7 +4,7 @@
 covers:
   - .github/workflows/ci.yml
   - scripts/render_scenario.py
-reconciled: e4ddb82
+reconciled: e4f40d5
 -->
 
 **Status: design only. Nothing here is implemented.** Phases A (sim scenario)
@@ -124,6 +124,63 @@ and `workflow_dispatch` (manual).
 
 - The dispatch step, currently a no-op until `WEB_DISPATCH_TOKEN` exists.
 
+### What `publish-sim-artifact` films
+
+Two scenarios, in two separate steps so a failure in one is attributable on
+sight and cannot suppress the other:
+
+| Step | Command | Headline outputs |
+|---|---|---|
+| Render impulse scenario | `render_scenario.py --compare` | `impulse_open_loop.{mp4,webm,gif}`, `impulse_compare.mp4`, `impulse_poster.jpg`, `impulse_pitch.png`, `impulse_metrics.json`, `impulse_closed_loop_metrics.json` |
+| Render rolling-terrain ride | `render_scenario.py --scenario terrain --compare --source sim` | `terrain_ride.{mp4,webm}`, `terrain_compare.mp4`, `terrain_poster.jpg`, `terrain_ride.png`, `terrain_compare.png`, `terrain_metrics.json`, `terrain_truth_metrics.json`, `terrain_estimate_metrics.json` |
+
+The terrain pair is the rolling ride at 8% peak grade over 24 m, and a two-pane
+comparison at 10% in which truth pitch completes the ride and the attitude
+estimate does not. `sim/scenarios/terrain.py` exists in order to be filmable —
+`hill.py` models a slope by rotating gravity on flat ground, which is exact for
+a uniform plane and shows nothing in a render.
+
+### Categorisation and provenance
+
+Every artifact this pipeline produces is generated from a recorded simulator
+run. It is categorised accordingly and carries a source tag burned into the
+frame. **The categories are defined in exactly one place — the [shared
+vocabulary](https://app.notion.com/p/3aa472a5fb6981ebaaa7cf2e996f1e8b) — and are
+not restated here or in the renderer.** Two rules from it bear directly on this
+pipeline:
+
+- A Replay always names its source. There is no bare "Replay".
+- The source is a **parameter** of the renderer (`--source`), not a literal, so
+  the same code path can carry real telemetry without a change to it.
+
+Each render writes a **manifest** — `impulse_render_manifest.json`,
+`terrain_render_manifest.json` — alongside the clips, and both are published to
+`sim-latest`. The manifest is the publishing record, kept separate from any
+scenario's `metrics.json` so downstream consumers never reach into a scenario's
+internal schema:
+
+```json
+{
+  "schema": 1,
+  "generated_at_utc": "…",
+  "category": "…", "source_tag": "…",
+  "vocabulary": "…",
+  "scenario": "rolling terrain",
+  "source": { "commit": "…", "commit_short": "…", "commit_url": "…", "run_url": "…" },
+  "runs": { "ride": { "params": {…}, "metrics": {…} }, "compare_truth": {…}, "compare_estimate": {…} },
+  "renderer": { "script": "scripts/render_scenario.py", "mujoco": "…", "camera": "…", "status": "ok" },
+  "outputs": [ { "name": "terrain_ride.mp4", "bytes": 0, "sha256": "…" } ]
+}
+```
+
+That is what makes "this clip came from that run" checkable by someone who was
+not in the room: the commit, the exact scenario parameters, and a digest of
+every file that left the building. The CI verification step fails the job if a
+manifest names no source commit.
+
+`sim-run.json` is unchanged and remains impulse-specific — it is the flat
+caption feed for the page, not the provenance record.
+
 ### Remaining work
 
 | # | Task | Repo |
@@ -143,10 +200,12 @@ and `workflow_dispatch` (manual).
 
 ---
 
-## 3.5 Repo visibility — decide this before building C1
+## 3.5 Repo visibility — settled
 
-**Both `overboard` and `overboard-web` are currently private.** That does not
-break the pipeline, but it changes one step and rules out a few shortcuts:
+**Both `overboard` and `overboard-web` are now public**, which is what
+`CLAUDE.md` records and what the README embed relies on. The constraints below
+applied while they were private and are kept for the reasoning, not as current
+state; the private-repo workarounds are no longer needed:
 
 - The deploy workflow must fetch the release assets **authenticated** (`gh
   release download -R MikePaNtZ/overboard` with a PAT), not with a plain
@@ -160,9 +219,8 @@ break the pipeline, but it changes one step and rules out a few shortcuts:
   visibility, since Pages serves it from the deploy bundle. Worth being
   deliberate about: the first public artifact is a video of the board failing.
 
-If the repo goes public, several things get simpler at once (README inline,
-direct Notion video embed, unauthenticated deploy fetch). Worth deciding
-deliberately rather than by default.
+With both repos public, several things are simpler at once: README inline,
+direct Notion video embed, unauthenticated deploy fetch.
 
 ## 4. Constraints the implementation must respect
 
