@@ -289,6 +289,54 @@ jobs:
           print(f"strike {m['t_strike_s']:.3f}s  peak |pitch| {m['peak_abs_pitch_deg']:.2f}deg")
           PY
 
+      # The rolling-terrain ride, and the truth-vs-estimate pair at 10%. That
+      # pair is the more valuable artifact: it shows a limitation the project
+      # is actively working on rather than a clean success, and terrain.py was
+      # built specifically because it is the one scenario that can be filmed --
+      # a gravity-rotated hill is invisible in a render.
+      #
+      # Its own step rather than folded into the impulse one, so a terrain
+      # failure is attributable on sight and cannot take the impulse clip --
+      # which the public README embeds -- down with it.
+      - name: Render rolling-terrain ride
+        env:
+          MUJOCO_GL: osmesa
+          PYOPENGL_PLATFORM: osmesa
+        run: python scripts/render_scenario.py --scenario terrain --compare --source sim
+
+      - name: Verify the terrain clips were actually produced
+        run: |
+          test -s sim/out/terrain_ride.mp4 || {
+            echo "::error::no terrain mp4 - offscreen GL likely failed"; exit 1; }
+          test -s sim/out/terrain_poster.jpg
+          test -s sim/out/terrain_metrics.json
+          test -s sim/out/terrain_render_manifest.json
+          test -s sim/out/terrain_compare.mp4 || {
+            echo "::error::no terrain comparison clip"; exit 1; }
+          # The comparison is only worth publishing if the two panes reach
+          # different outcomes. Equal outcomes mean the attitude source made no
+          # difference, and the clip would be captioned with a result it does
+          # not have.
+          python - <<'PYT'
+          import json, pathlib
+          def metrics(name):
+              return json.loads(pathlib.Path(f"sim/out/{name}.json").read_text())["metrics"]
+          truth, est = metrics("terrain_truth_metrics"), metrics("terrain_estimate_metrics")
+          assert truth["reached_next_crest"], "truth pitch did not complete the ride"
+          assert not est["reached_next_crest"] and est["nose_strike"], (
+              "the estimate completed the ride too, so this is not the comparison "
+              "it is captioned as -- re-derive the envelope with Senior Controls")
+          print(f"truth: crest at {truth['t_reached_crest_s']:.2f}s   "
+                f"estimate: {est['struck_end']} down at {est['t_strike_s']:.2f}s")
+          # The manifest is what makes "this came from that run" checkable, so
+          # a manifest that names no commit is a manifest that proves nothing.
+          man = json.loads(pathlib.Path("sim/out/terrain_render_manifest.json").read_text())
+          assert man["source"]["commit"], "render manifest carries no source commit"
+          assert man["category"] and man["source_tag"], "render manifest is uncategorised"
+          print(f"manifest: {man['category']} / {man['source_tag']} from "
+                f"{man['source']['commit_short']}")
+          PYT
+
       - name: Record provenance for downstream consumers
         run: |
           python - <<'PY'
@@ -338,9 +386,9 @@ jobs:
           gh release view sim-latest >/dev/null 2>&1 || \
             gh release create sim-latest \
               --title "Latest sim artifacts (mainline)" \
-              --notes "Auto-published by CI. Impulse disturbance response, open loop."
+              --notes "Auto-published by CI. Sim Replay: impulse disturbance response (open loop) and the rolling-terrain ride."
           gh release edit sim-latest \
-            --notes "Auto-published by CI from ${{ github.sha }}. Impulse disturbance response, open loop."
+            --notes "Auto-published by CI from ${{ github.sha }}. Sim Replay: impulse disturbance response (open loop) and the rolling-terrain ride, truth pitch against the attitude estimate. Provenance for each is in its *_render_manifest.json."
           gh release upload sim-latest --clobber \
             sim/out/impulse_open_loop.mp4 \
             sim/out/impulse_open_loop.webm \
@@ -350,6 +398,17 @@ jobs:
             sim/out/impulse_pitch.png \
             sim/out/impulse_metrics.json \
             sim/out/impulse_closed_loop_metrics.json \
+            sim/out/impulse_render_manifest.json \
+            sim/out/terrain_ride.mp4 \
+            sim/out/terrain_ride.webm \
+            sim/out/terrain_compare.mp4 \
+            sim/out/terrain_poster.jpg \
+            sim/out/terrain_ride.png \
+            sim/out/terrain_compare.png \
+            sim/out/terrain_metrics.json \
+            sim/out/terrain_truth_metrics.json \
+            sim/out/terrain_estimate_metrics.json \
+            sim/out/terrain_render_manifest.json \
             sim/out/sim-run.json
 
       # Per-commit preview. Filenames are sha-stamped and the release is never
