@@ -13,6 +13,7 @@ members = [
     "crates/board-app-ridden",
     "crates/board-app-driverless",
     "crates/canary-ridden",
+    "crates/can-harness",
     "crates/xtask",
 ]
 
@@ -31,3 +32,4 @@ control-core = { path = "crates/control-core" }
 safety = { path = "crates/safety" }
 sim-backend = { path = "crates/sim-backend" }
 serde = { version = "1", default-features = false, features = ["derive"] }
+socketcan = "3.6"

@@ -72,6 +72,29 @@
   `cargo run -p board-app` — stale after the split, but `README.md` is CEO
   turf, not mine to edit.
 
+- **Issue #52, virtual CAN harness (PR TBD).** New crate `can-harness`: a
+  self-managed `vcan` bring-up/teardown (via `socketcan`'s netlink API, no
+  `ip link` shell-out), a simulated VESC-shaped responder on a background
+  thread, and transport-level round-trip + timeout tests. **Deliberately did
+  not fill in `vesc-wire`/`vesc-tx`'s real byte layouts.** Tried to source
+  them from the official (non-firmware) "VESC 6 CAN Formats" PDF at
+  vesc-project.com — every fetch of that site 403'd from this session, for
+  every page on the domain, not just that one file, so I could not confirm
+  it either way. Left the stubs as they were and tested the transport layer
+  (sign/scale byte fidelity through a real vcan round trip) instead, per the
+  issue's own fallback instruction.
+  **Deliberately left undone:** did not add a privileged CI step to make the
+  vcan tests run for real. This sandbox returns `Operation not supported`
+  for `vcan` interface creation even under `sudo` — looks like the container
+  kernel has no `vcan` support at all, not just a permissions gap — so I had
+  no way to verify a privileged step would actually work on the GH-hosted
+  runner, and didn't want to gamble a required check on an unverified guess.
+  The crate rides the existing unprivileged `cargo test --workspace` step,
+  where every vcan test is expected to print `SKIP` and pass — which is
+  itself the acceptance criterion for "vcan unavailable." Turning that into
+  a live run on `ubuntu-latest` (it likely needs `CAP_NET_ADMIN`, which a
+  plain job step doesn't have either) is flagged, not fixed, here.
+
 - **Issue #54, Stage-0B design doc split (PR TBD).** Design doc was at 39,633/40,000 chars —
   367 bytes of headroom, one sentence from breaking the build. Split into the decision doc
   (D1–D6, rationale, rejected alternatives; now ~19.8k) and a new companion
@@ -105,8 +128,15 @@
   (O3, issues #51/#52 still open), and a stub with nothing to execute it would be exactly the
   unverifiable code this project rules out.
 
-_Older: nothing recorded before this entry._
+_Older entries collapsed above this line as the log grows; nothing predates the crate-exclusion entry._
 
 ## Known dead ends
 
-_Nothing recorded yet._
+- **Fetching vesc-project.com for the VESC 6 CAN Formats PDF (2026-07-28).**
+  `WebFetch` returned HTTP 403 for every URL tried on that domain (the PDF
+  itself, and two different documentation pages) — looked like the fetcher
+  was being blocked outright rather than any one page being gated. Did not
+  find a working alternative source for real, non-GPL-firmware VESC CAN
+  byte layouts in the time this session had. Next session: worth trying a
+  different fetch path (cache, a mirror, or asking Mike for a manual pull)
+  before assuming the constants are simply unobtainable.

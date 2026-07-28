@@ -1,0 +1,12 @@
+[package]
+name = "can-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vesc-wire = { workspace = true }
+socketcan = { workspace = true }
+
+[dev-dependencies]
+vesc-tx = { workspace = true }
