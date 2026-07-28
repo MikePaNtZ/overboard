@@ -17,11 +17,20 @@
 //! top of: [`RawFrame`] in, over a real Linux CAN socket, [`RawFrame`] out,
 //! byte-for-byte, including the sign and scaling bits a fabricated constant
 //! could not be trusted to get right anyway.
+//!
+//! **Linux-only.** `socketcan` and `vcan` are both Linux kernel facilities,
+//! so everything here is `#[cfg(target_os = "linux")]`-gated (issue #62):
+//! on another platform this crate compiles to an empty, harmless no-op
+//! rather than failing `cargo build --workspace`.
 
+#[cfg(target_os = "linux")]
 pub mod responder;
+#[cfg(target_os = "linux")]
 pub mod vcan;
 
+#[cfg(target_os = "linux")]
 use socketcan::{CanDataFrame, EmbeddedFrame, Frame as SocketCanFrame};
+#[cfg(target_os = "linux")]
 use vesc_wire::RawFrame;
 
 /// Converts a [`RawFrame`] to the frame type `socketcan` sends on the wire.
@@ -29,12 +38,14 @@ use vesc_wire::RawFrame;
 /// `RawFrame::id`'s magnitude picks standard (11-bit) vs extended (29-bit)
 /// automatically, the same convention `ip link`/`candump` use -- callers
 /// don't choose a frame flavour, the id's range does.
+#[cfg(target_os = "linux")]
 pub fn to_can_frame(frame: RawFrame) -> Option<CanDataFrame> {
     CanDataFrame::from_raw_id(frame.id, frame.bytes())
 }
 
 /// Converts a received `socketcan` frame back to the shape `vesc-wire` and
 /// `vesc-tx` share.
+#[cfg(target_os = "linux")]
 pub fn from_can_frame(frame: &CanDataFrame) -> RawFrame {
     let bytes = frame.data();
     let mut data = [0u8; 8];
@@ -46,7 +57,7 @@ pub fn from_can_frame(frame: &CanDataFrame) -> RawFrame {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
