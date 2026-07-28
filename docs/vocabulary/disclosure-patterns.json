@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "owner": "Archivist",
+
+  "_comment": [
+    "Patterns that must NOT appear on public GitHub. Data only -- consumed by sweep_public.py.",
+    "",
+    "Why this exists: on 2026-07-28 a public issue was opened titled",
+    "'EPIC: Funding pitch deck -- ...'. It was renamed and closed within hours, but GitHub",
+    "still served the ORIGINAL title to anyone, unauthenticated, through the issue timeline.",
+    "Editing a public issue does not un-publish it. Only deleting it does.",
+    "",
+    "So the sweep checks renamed-event history too, not just current text. That is the check",
+    "that actually caught the one real leak; a scan of live text alone would have reported clean.",
+    "",
+    "Every pattern is word-anchored. An unanchored scan is worse than useless here: it cries",
+    "wolf until people stop reading it. Measured false positives from the manual sweep that",
+    "these anchors exist to kill -- 'CI gates' (10x), 'SoC family', a 'relative' table column,",
+    "and '@lru_cache' read as a user tag."
+  ],
+
+  "patterns": [
+    {
+      "id": "funder-name",
+      "pattern": "\\bGates Foundation\\b|\\bChan Zuckerberg\\b|\\bSloan Foundation\\b|\\bMoore Foundation\\b",
+      "severity": "error",
+      "note": "Named funders. Deliberately NOT a bare \\bGates\\b -- that matched 10 CI/architecture 'gates' and nothing else."
+    },
+    {
+      "id": "funding-strategy",
+      "pattern": "\\bpitch deck\\b|\\bfunding (?:round|strategy|outreach|pitch|deck|target)\\b|\\bseek(?:ing)? funding\\b|\\bfundrais\\w*|\\bgrant (?:application|proposal|funding)\\b|\\bdonor\\b|\\bphilanthrop\\w*",
+      "severity": "error",
+      "note": "The strategy itself, not the word 'grant' -- 'grants nobody anything' (a licence phrase) matched a naive pattern twice."
+    },
+    {
+      "id": "personal-relation",
+      "pattern": "\\b(?:my|his|her|their|the CEO's) (?:sister|brother|mother|father|wife|husband|partner|cousin|relative)\\b",
+      "severity": "error",
+      "note": "Qualified only. A bare \\bfamily\\b matched 'SoC family' and 'same family/listing style'; a bare \\brelative\\b matched a table column header."
+    },
+    {
+      "id": "programme-strategy",
+      "pattern": "\\bAI[- ]literacy\\b|\\beducation(?:al)? (?:non-?profit|programme|program)\\b|\\bnon-?profit (?:arm|entity|vehicle|strategy)\\b",
+      "severity": "error",
+      "note": "The portfolio/P0 strategy. Public repos should carry the engineering story, not the funding vehicle behind it."
+    },
+    {
+      "id": "stray-user-tag",
+      "pattern": "(?<![\\w/`@])@(?!MikePaNtZ\\b)(?!lru_cache\\b)(?!staticmethod\\b)(?!classmethod\\b)(?!property\\b)(?!dataclass\\b)(?!pytest\\b)[A-Za-z][A-Za-z0-9-]{2,38}\\b",
+      "severity": "warn",
+      "note": "Tagging a stranger on a public repo pulls an uninvolved person into our thread -- happened once with an '@COO' tag that resolved to a real, unrelated GitHub user. Owner and Python decorators allowlisted. WARN because role names in prose are legitimate; a human reads the list."
+    }
+  ],
+
+  "exempt_paths": [
+    "docs/vocabulary/"
+  ],
+  "_exempt_note": "This file necessarily contains the patterns themselves. It lives in the repo, not on the issue tracker, so it is not swept -- but the exemption is recorded for whatever consumes this next."
+}
