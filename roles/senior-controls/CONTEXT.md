@@ -36,6 +36,19 @@
 
 ## Decisions made (append as you go)
 
+- **Issue #24 AC4, scenario determinism audit (PR TBD).** Checked the claim rather than assuming
+  it: `impulse_response` and `closed_loop` already pinned full-trajectory bit-identical repeat
+  runs; `shuttle_run` had a determinism test but it compared only the metrics dict, which could
+  pass while the sample-by-sample trajectory silently diverged; `hill` and `terrain` had **no**
+  determinism test at all. Added `test_repeat_runs_are_bit_identical` to `tests/test_hill.py` and
+  `tests/test_terrain.py` (two runs of the same params, `np.array_equal` on the pitch/speed/travel
+  trajectories plus full `to_json_dict()` equality — params and plant summary included, not just
+  metrics), and strengthened `shuttle_run`'s existing test the same way. All four scenarios now
+  measured, not spot-checked: every one emits a bit-identical trajectory on repeat.
+  **Deliberately left for other increments (issue #24's own convention):** AC3 (`r_eff`
+  tyre-ground justification) and AC5 (measured-vs-assumed audit of every scenario-doc acceptance
+  number) are untouched here — each is its own well-scoped piece, not bundled into this one.
+
 - **Issue #32, Stage-0B Pi image design (`docs/design-pi-image-stage0b.md`).** Design only, no
   implementation. Repo boundary: a `pi/` directory **in this repo**, argued on the *runtime
   contract* (kernel flavour, `isolcpus` layout, RT priority budget, CAN naming/bitrate, systemd

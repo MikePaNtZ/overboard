@@ -202,3 +202,22 @@ def test_cutback_does_not_bind_on_the_default_ride():
     m = run(TerrainParams()).metrics
     assert m.imperfection_profile_id == STAGE0_CUTBACK.profile_id
     assert m.cutback_binding_cycles == 0
+
+
+# --------------------------------------------------------------------------
+# DETERMINISM
+# --------------------------------------------------------------------------
+
+def test_repeat_runs_are_bit_identical():
+    """Same property `impulse_response` and `closed_loop` already pin. A
+    rolling terrain run adds the heightfield contact and the crest/dip/crest
+    transitions on top of hill.py's state, so it is checked here rather than
+    assumed from either of those. Short duration -- determinism does not
+    depend on whether the ride completes, only on repeatability."""
+    p = TerrainParams(duration_s=6.0)
+    a = run(p)
+    b = run(p)
+    assert np.array_equal(a.pitch_deg, b.pitch_deg)
+    assert np.array_equal(a.v_m_s, b.v_m_s)
+    assert np.array_equal(a.travel_m, b.travel_m)
+    assert a.to_json_dict() == b.to_json_dict()
