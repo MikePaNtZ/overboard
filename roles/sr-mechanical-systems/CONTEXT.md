@@ -73,22 +73,20 @@ now cross-check: free-roll agreement 0.24–1.78% to 20% grade, bit-identical on
 asymmetry Controls measured falls out of geometry, because a board resting flat on a slope is
 already at world pitch −φ. PR #18.
 
-**2026-07-28 — Add a $20-30 steel disc, sequenced behind the bare-run measurement, not before it.**
-Issue #65: the confirmed goBILDA flywheels (3302 g·cm² total, manufacturer figure) give a ratio
-against the estimated bare-rotor band of 1.1–1.65, against a 6.69 design point that was never
-actually buildable (it assumed a heavier custom disc that was never bought). Derived the
-error-amplification formula `sqrt(1+ρ²)/(ρ-1)` (ρ = alpha1/alpha2 = 1+ratio) from `identify()`'s
-own two-run algebra and cross-checked it numerically (independent finite-difference derivative,
-not a restatement) — `sim/scenarios/bench_inertia_ratio.py`. Result: 1.72×–2.11× amplification on
-the confirmed flywheels, 1.48×–1.82× worse than the 1.159× design point — a firm number where the
-issue only had "roughly doubles." **Decision: add inertia, not accept-and-carry.** A single ~150 mm/
-600 g steel disc stacked on the confirmed flywheels restores the ratio to 6.7–10.1 (amplification
-back to ~1.16×) for the cost the issue itself named, against torque figures every later stage
-inherits. **But order it only after the bench's own bare-rotor run measures `J_bare`** — that
-resolves the 16× sourcing disagreement for free (mode 1 of `identify()` already measures it), so
-buying before measuring risks sizing the disc against the wrong end of a 16×-wide guess.
-`recommend(j_bare_measured_kg_m2=...)` re-derives the pick once that number exists. PR pending,
-issue #65.
+**2026-07-28 — The riser is undersized for the >50 Hz target, and a modest gusset fixes it.**
+`sim/scenarios/bench_riser.py` models the 200 mm riser as a cantilever with the motor + hub +
+both confirmed goBILDA flywheels (152 g each, #65/#66) hanging off the tip, weak-axis (out-of-
+plane) bending only — the axis the flywheel overhang loads, not the axis motor torque loads.
+First mode comes out **39.5–42.6 Hz** across an assumed 500–650 g motor-mass range (no datasheet
+in this repo states the real mass, and this environment has no web access to find one — the
+honest fix is a kitchen-scale weighing, not a better guess). That is below Runbook §3.2's 50 Hz
+target: **INADEQUATE as designed.** A diagonal gusset from the base plate to 80 mm up the riser
+(cut from the 12×12 stock's ~60% spare per #66, no new purchase) raises it to **86.7–93.7 Hz** —
+comfortably adequate. Both figures are a first-mode ROM (cantilever-beam closed form + Rayleigh
+mass correction), not an FEA; a tap test with a phone microphone is the cheap way to confirm it
+at the bench, and `describe_bench_signature()` says what a real riser mode looks like in the
+§6c step-response data so it isn't mistaken for plant behaviour. PR pending, issue #64.
+
 **2026-07-28 — `spindown()` gets the same settle window `identify()` got, mirrored for a decay.**
 Flagged by Senior Controls (#68) while dry-running the Stage-0B runbook: unlike `identify()`,
 `spindown()` had no data-driven settle window, so its friction fit ran straight through the

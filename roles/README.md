@@ -7,7 +7,10 @@ and it dies with the window. An org cannot be built on that.
 So each role's durable state lives here, in the repo:
 
 - **Every dispatched agent reads its role's `CONTEXT.md` first.**
-- **Every dispatched agent may append to it in its PR** — decisions made, dead ends hit.
+- **To record completed work, add `roles/<role>/log/YYYY-MM-DD-<slug>.md`** — one entry per
+  file. Do NOT append to a shared list in `CONTEXT.md`: parallel agents all touching one file
+  means every PR conflicts every other, which is exactly what happened on 2026-07-28.
+- `CONTEXT.md` itself holds **standing** context — sub-goals, turf, dead ends — and changes rarely.
 - This is what makes dispatch to a fresh agent safe rather than amnesiac (ADR-0007).
 
 Keep each file short. It is a working brief, not a history. Move anything that has become a

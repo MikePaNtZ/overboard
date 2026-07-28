@@ -278,3 +278,21 @@ def test_margin_table_renders():
           for g in (5.0, 20.0)]
     text = margin_table(rs)
     assert "grade" in text and "upright" in text and "TAIL" in text
+
+
+# --------------------------------------------------------------------------
+# DETERMINISM
+# --------------------------------------------------------------------------
+
+def test_repeat_runs_are_bit_identical():
+    """Same property `impulse_response` and `closed_loop` already pin, checked
+    here too rather than assumed: a hill run crosses more state per step --
+    rotated gravity, cutback, the estimator -- than either of those, so
+    determinism elsewhere is not evidence of determinism here."""
+    p = HillParams(grade_pct=10.0, v_ref_m_s=2.0, duration_s=SHORT)
+    a = run(p)
+    b = run(p)
+    assert np.array_equal(a.pitch_deg, b.pitch_deg)
+    assert np.array_equal(a.v_m_s, b.v_m_s)
+    assert np.array_equal(a.travel_m, b.travel_m)
+    assert a.to_json_dict() == b.to_json_dict()
