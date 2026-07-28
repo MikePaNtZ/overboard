@@ -39,8 +39,18 @@ DEFAULT_KD_A_PER_RAD_S = 11.0
 #: Envelope clamp, amps. Matches the model's derived ctrlrange (40 A * kt).
 DEFAULT_MAX_CURRENT_A = 40.0
 
-#: Loaded rolling radius, m (ICD 10.5). Stage-0 will measure it.
-DEFAULT_R_EFF_M = 0.14605
+#: Loaded rolling radius, m (ICD 10.5). Stage-0 will measure the real, loaded
+#: figure; until then this is pinned to the sim model's actual tire geometry
+#: (`wheel_geom` in `sim/models/overboard_onewheel.xml`, 145.4 mm -- the
+#: mesh-derived enclosure-clearance radius documented in that file's header),
+#: not an independent nominal-tire-spec guess. It previously read 0.14605 m
+#: (an 11.5" OD / 2 figure) -- LARGER than the model's own unloaded tire
+#: radius, which cannot be right for a *loaded* rolling radius (compression
+#: under load only ever shrinks it) and was never actually checked against
+#: the model that every other closed-loop metric is measured against. See
+#: `tests/test_r_eff_matches_model.py`, which reads the compiled model
+#: directly so this cannot silently drift again.
+DEFAULT_R_EFF_M = 0.1454
 
 #: Outer-loop clamp: the most lean it may ask the inner loop to hold.
 DEFAULT_MAX_PITCH_REF_RAD = 0.087   # 5 degrees

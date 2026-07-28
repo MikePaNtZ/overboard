@@ -74,8 +74,7 @@ from .plant import (
     plant_summary,
     rider_geoms,
 )
-
-R_EFF_M = 0.14605
+from .rust_controller import DEFAULT_R_EFF_M as R_EFF_M
 
 #: Samples along the ride. 512 over a ~30 m ride is ~6 cm between samples --
 #: fine enough that the wheel never sees a facet, coarse enough to compile fast.

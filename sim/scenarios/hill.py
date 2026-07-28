@@ -75,9 +75,7 @@ from .impulse_response import (
     nose_strike_angle_deg,
 )
 from .plant import MODEL_PATH, build_model, imu_readings, plant_summary
-
-#: Effective rolling radius, m. Matches the tire in the model header.
-R_EFF_M = 0.14605
+from .rust_controller import DEFAULT_R_EFF_M as R_EFF_M
 
 G = 9.81
 

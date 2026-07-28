@@ -36,6 +36,36 @@
 
 ## Decisions made (append as you go)
 
+- **Issue #24, AC3 — `r_eff` tyre-ground justification (PR TBD).** Could not be justified, so
+  fixed rather than justified. `R_EFF_M`/`DEFAULT_R_EFF_M` (converts `wheel_hinge` angular rate
+  to forward speed, and current to force, in `hill.py`/`terrain.py`/`shuttle_run.py`/
+  `rust_controller.py`/`tests/test_closed_loop.py`/two `scripts/analyse_estimator*.py`) was
+  hand-copied as `0.14605` m in every one of those places, one of them (`hill.py`) claiming in a
+  comment that it "matches the tire in the model header." It did not: the model's actual
+  `wheel_geom` radius (`sim/models/overboard_onewheel.xml`, Mechanical's turf, not edited) is
+  `0.1454` m, the mesh-derived, enclosure-clearance figure that file's own header documents. A
+  *loaded* rolling radius bigger than the tire's own unloaded geometric radius is not physically
+  sensible regardless of provenance — compression under load only ever shrinks it — so this was
+  a stale figure (an 11.5" OD / 2 nominal-spec guess) that predated the mesh integration and was
+  never checked against the model everything else in this repo is measured against.
+  Consolidated to one constant (`rust_controller.DEFAULT_R_EFF_M`), imported everywhere instead
+  of re-declared, and added `tests/test_r_eff_matches_model.py`, which reads the *compiled*
+  model's `wheel_geom` size directly rather than re-asserting a literal, so this cannot silently
+  drift again. Full suite re-run clean (205 passed, 2 xfailed, no regressions; no pinned
+  threshold moved — the shift is 0.45%, inside every existing tolerance).
+  **Deliberately left out, flagged rather than fixed:** the same `0.14605` literal also appears,
+  independently, four times in `crates/` (`sim-backend`, `control-ffi` ×2, `canary-ridden`,
+  `board-app-ridden`) as FFI-boundary defaults — real hardware/ridden-mode code, not sim
+  scenarios, and touching it needs its own increment and a decision on which crate should own a
+  shared constant (this PR does not invent one). Not part of issue #24's AC3, which is scoped to
+  the sim scenarios; reported separately in the PR as an out-of-scope finding.
+  **Could not verify:** what the BoardIo ICD §10.5 entry for `r_eff_m` actually specifies — that
+  document lives in Notion, which this session has no access to. This fix only pins internal
+  consistency against the sim model; it does not claim to have confirmed or superseded whatever
+  Stage-0's eventual bench measurement will produce.
+  AC5 (measured-vs-assumed audit of every scenario-doc acceptance number) remains open, its own
+  increment.
+
 - **Issue #32, Stage-0B Pi image design (`docs/design-pi-image-stage0b.md`).** Design only, no
   implementation. Repo boundary: a `pi/` directory **in this repo**, argued on the *runtime
   contract* (kernel flavour, `isolcpus` layout, RT priority budget, CAN naming/bitrate, systemd

@@ -42,6 +42,7 @@ import numpy as np
 from .imperfections import STAGE0_PLACEHOLDER, ImperfectionProfile, ImperfectionState
 from .impulse_response import KT_NM_PER_A, frame_pitch_rad
 from .plant import MODEL_PATH, build_model, imu_readings, plant_summary
+from .rust_controller import DEFAULT_R_EFF_M as R_EFF_M
 
 #: Cruise speed for every leg, m/s. Modest on purpose: the outer loop's pitch
 #: reference is clamped at 5 deg, which caps acceleration at about
@@ -372,7 +373,7 @@ def run(
 
             commanded_pos += vprofile.v_ref(t) * dt
             fwd = float(-(data.xpos[frame][0] - x0))
-            v = float(data.qvel[6]) * 0.14605
+            v = float(data.qvel[6]) * R_EFF_M
 
             ts.append(float(data.time))
             pos.append(fwd)

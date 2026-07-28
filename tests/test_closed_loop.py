@@ -29,7 +29,7 @@ from sim.scenarios.impulse_response import (
     load_model,
     run,
 )
-from sim.scenarios.rust_controller import RustController, library_path
+from sim.scenarios.rust_controller import DEFAULT_R_EFF_M, RustController, library_path
 
 
 @pytest.fixture(scope="module")
@@ -212,7 +212,7 @@ def test_a_speed_setpoint_is_tracked(ridden_model):
     r, _ = _run(ridden_model, secs=14.0, **INNER, **dict(OUTER, v_ref_m_s=1.0))
     import numpy as np
 
-    v = np.asarray(r.wheel_rate_rads) * 0.14605
+    v = np.asarray(r.wheel_rate_rads) * DEFAULT_R_EFF_M
     settled = v[r.t >= r.t[-1] - 2.0]
     assert not r.metrics.nose_strike
     assert abs(float(settled.mean()) - 1.0) < 0.25, f"settled at {settled.mean():.2f} m/s"
