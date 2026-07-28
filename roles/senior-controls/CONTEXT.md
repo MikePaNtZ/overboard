@@ -20,6 +20,26 @@
 
 ## Decisions made (append as you go)
 
+- **Issue #32, Stage-0B Pi image design (`docs/design-pi-image-stage0b.md`).** Design only, no
+  implementation. Repo boundary: a `pi/` directory **in this repo**, argued on the *runtime
+  contract* (kernel flavour, `isolcpus` layout, RT priority budget, CAN naming/bitrate, systemd
+  expectations) — assumptions the Rust code encodes and only this repo's CI can test end-to-end.
+  Needs one COO `CODEOWNERS` line; `scripts/pi/` is the non-blocking fallback. Deliverable:
+  **an image + checksum + provenance, produced exclusively by a CI-scripted flow** — never a
+  flash-time provisioning script, which would make live-mirror state a runtime input.
+  **Kernel finding that matters:** Raspberry Pi *do* officially package PREEMPT_RT
+  (`linux-image-rpi-v8-rt`), so RT on Pi is no longer a community build — but **there is no
+  `-2712-rt` flavour**, so RT on a Pi 5 means the generic 4K-page v8 kernel with no
+  `NO_HZ_FULL`. Verified by unpacking the .deb: RP1 support and the whole CAN stack are intact
+  in that flavour, so the design holds. **Biggest open risk: an unresolved Pi 5 report of RP1
+  SPI transactions spiking to 1.5–2 ms under load — a full control period at 500 Hz.** Answered
+  by carrying USB-CAN as a second transport (a control variable, not a contingency) and by
+  running a `spidev` reproduction *before* the CAN HAT is bought.
+  **Deliberately left open rather than invented:** the §7.2 current limits are `PROVISIONAL`
+  placeholders — no Stage-0A data exists yet — and Little FOCer command-timeout semantics are
+  unverified, so the safety case rests on the deadman and the controller current ceiling, not
+  on the software timeout.
+
 - **Issue #1, crate-exclusion boundary (PR TBD).** Split `hal` -> `hal` (observe) +
   `hal-actuate` (motion authority); split `board-app` -> `board-app-ridden` +
   `board-app-driverless`; added `vesc-wire` (decode-only), `vesc-tx` (encode-only),
