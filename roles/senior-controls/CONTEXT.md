@@ -72,6 +72,26 @@
   `cargo run -p board-app` — stale after the split, but `README.md` is CEO
   turf, not mine to edit.
 
+- **Issue #27, O4 — Stage-0B bench-test runbook (`docs/runbook-stage0b-bench.md`).** The
+  Pi-executed counterpart to Stage 0A's human checklist: ordered steps with purpose/falsifies/
+  pass-fail, abort criteria stated before the first powered step, a small JSON log schema
+  traceable to `git_sha`, and a sim dry run (`scripts/stage0b_runbook.py`,
+  `tests/test_stage0b_runbook.py`) exercising the sim-representable steps (current-step
+  response, coast-down, command→actuation latency) before hardware exists. AC-6's thresholds
+  (p99.9 ≤ 1 ms, max ≤ 2 ms, ≥10⁵ cycles) are reused verbatim from the ratified
+  `docs/design-pi-image-stage0b.md`, not re-derived.
+  **Finding, flagged rather than fixed:** `bench_spinup.spindown()` (Sr. Mechanical & Systems'
+  turf) has no equivalent of `identify()`'s data-driven `settle_time_s` windowing, so fitting
+  its decay under `STAGE0_PLACEHOLDER` runs the least-squares fit straight through the
+  actuation-delay + current-loop-lag transient at the start of the decay — R² collapsed to
+  ~0.002 (noise, not a curve) in testing here. The coast-down dry run uses `IDEAL` instead,
+  the only profile `spindown()` is actually validated against today.
+  **Deliberately left out:** the CAN round-trip step (2) is not re-implemented — it depends on
+  `can-harness` (issue #52, PR #53, not yet merged) and is documented as covered there rather
+  than duplicated. No `--hardware` mode exists; there is no Pi image yet to run it against
+  (O3, issues #51/#52 still open), and a stub with nothing to execute it would be exactly the
+  unverifiable code this project rules out.
+
 _Older: nothing recorded before this entry._
 
 ## Known dead ends
