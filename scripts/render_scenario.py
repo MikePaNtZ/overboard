@@ -1460,9 +1460,10 @@ def main() -> int:
                          help="peak grade for the truth-vs-estimate comparison "
                               "(default 10, where the two outcomes diverge)")
     terrain.add_argument("--terrain-speed", type=float, default=2.0, help="v_ref, m/s")
-    terrain.add_argument("--terrain-distance", type=float, default=7.5,
-                         help="tracking camera distance, m")
-    terrain.add_argument("--terrain-fovy", type=float, default=26.0,
+    terrain.add_argument("--terrain-distance", type=float, default=9.0,
+                         help="camera distance, m. Closer than this and the board "
+                              "drifts left into the HUD's readout panel")
+    terrain.add_argument("--terrain-fovy", type=float, default=28.0,
                          help="vertical field of view for the full-height ride, deg")
     terrain.add_argument("--terrain-compare-fovy", type=float, default=20.0,
                          help="vertical field of view for a comparison pane, deg. "
