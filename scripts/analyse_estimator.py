@@ -54,10 +54,28 @@ def collect(kind: str) -> dict:
         n = int(8.0 / dt)
 
     t, th, ax, az, gy, v = [], [], [], [], [], []
+    # TRUTH PITCH, DELIBERATELY, AND STATED SO RATHER THAN INHERITED.
+    #
+    # `harvest` flies the trajectory on truth and records the raw IMU; the
+    # filter is then run OFFLINE over those arrays by `run_filter` below. That
+    # is a legitimate open-loop analysis and it is what this function is for.
+    #
+    # It is written out because leaving it to the default cost real time. The
+    # numbers this produces (<1 deg RMS) were compared against the scenario
+    # harness's closed-loop numbers (7.4 deg RMS) as though the two measured the
+    # same thing, and the 10x gap was carried in the handoff as an unexplained
+    # defect. They are not the same measurement: open-loop replay over a
+    # truth-flown trajectory versus closed-loop error that moves the trajectory
+    # it is measured on. Nothing was broken; the comparison was.
+    #
+    # Do NOT "fix" this to use_estimator=1. That would make `run_filter`'s
+    # offline pass meaningless, because the trajectory would already have been
+    # flown on the estimate.
     with RustController(
         kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0,
         kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True,
         v_ref_fn=vref_fn,
+        use_estimator=False,
     ) as c:
         for _ in range(n):
             now = float(data.time)
