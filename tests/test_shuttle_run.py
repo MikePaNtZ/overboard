@@ -116,5 +116,14 @@ def test_the_board_trails_its_command_rather_than_leading_it(result):
 
 
 def test_runs_are_deterministic():
+    """Same property `impulse_response` and `closed_loop` pin on the full
+    trajectory, not just the summary metrics -- two runs could agree on every
+    metric while differing sample-by-sample, and a metrics-only check would
+    never see it."""
+    import numpy as np
+
     a, b = run(), run()
-    assert a.to_json_dict()["metrics"] == b.to_json_dict()["metrics"]
+    assert np.array_equal(a.pos_m, b.pos_m)
+    assert np.array_equal(a.pitch_deg, b.pitch_deg)
+    assert np.array_equal(a.motor_current_a, b.motor_current_a)
+    assert a.to_json_dict() == b.to_json_dict()
