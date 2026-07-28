@@ -240,6 +240,49 @@ def _shuttle(**kw):
     )
 
 
+def test_the_shuttle_runs_the_estimator_BY_DEFAULT():
+    """**The default is the claim.** A headline scenario must not measure the
+    control law with the hardest part of the problem deleted.
+
+    The shuttle used to default to truth pitch -- a board that knows its own
+    tilt exactly, which no hardware will ever be. Two things followed: the
+    published return error was flattering by ~3.6x, and a fresh session could
+    believe the estimator was running when it was not. Both happened.
+
+    Gated here because the whole test suite passed before and after the default
+    was flipped -- every other test supplies its own controller factory, so
+    nothing exercised the default at all. A default nothing tests is a default
+    that will silently revert.
+
+    Checked by OUTCOME rather than by inspecting the factory: truth pitch
+    returns to 0.0648 m and the estimator to 0.2331 m, so the number itself says
+    which one ran.
+    """
+    from sim.scenarios.shuttle_run import run as shuttle_run
+
+    default = shuttle_run().metrics
+    assert not default.nose_strike
+
+    # Far from the truth-pitch figure, close to the estimator's.
+    assert default.return_error_m > 0.15, (
+        f"default shuttle returned {default.return_error_m:.4f} m, which is the "
+        "truth-pitch answer (0.0648 m). The estimator is not in the default path"
+    )
+    assert default.return_error_m == pytest.approx(0.2331, abs=0.02), (
+        f"default shuttle returned {default.return_error_m:.4f} m; expected the "
+        "estimator+command-feedforward figure of 0.2331 m. If the recommended "
+        "configuration changed, re-derive this rather than widening it"
+    )
+
+    # And the recommended configuration is what it runs -- same number.
+    recommended = _shuttle(use_estimator=1, estimator_tau_s=2.0,
+                           estimator_accel_aiding=COMMAND_FEEDFORWARD).metrics
+    assert default.return_error_m == pytest.approx(recommended.return_error_m, abs=1e-9), (
+        "the default is no longer the recommended tau=2 s + command-feedforward "
+        "configuration"
+    )
+
+
 def test_the_shuttle_hands_the_controller_a_live_imu():
     """The regression for a bug that ran clean and reported garbage.
 
