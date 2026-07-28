@@ -128,6 +128,21 @@
   (O3, issues #51/#52 still open), and a stub with nothing to execute it would be exactly the
   unverifiable code this project rules out.
 
+- **Issue #62, target-gate `can-harness`'s `socketcan` dependency (PR TBD).** Follow-up from
+  #53: `socketcan` was an unconditional workspace dependency, so `cargo build --workspace` failed
+  on macOS (the CEO's machine). Moved `socketcan` to a
+  `[target.'cfg(target_os = "linux")'.dependencies]` table in `crates/can-harness/Cargo.toml` and
+  `#[cfg(target_os = "linux")]`-gated every item in `src/lib.rs` that touches it (`responder`,
+  `vcan`, `to_can_frame`/`from_can_frame`, their unit test); `tests/vcan_stack.rs` gets
+  `#![cfg(target_os = "linux")]` so it compiles to zero tests off Linux instead of failing to
+  compile against a crate with no socketcan items. **Verified for real, not assumed:** this
+  sandbox has no macOS runner, so verification used `rustup target add x86_64-apple-darwin` and
+  `cargo check`/`cargo clippy --workspace --all-targets --target x86_64-apple-darwin -- -D
+  warnings` — both clean, and `can-harness` compiles to an empty crate on that target as
+  intended. Linux side re-verified unchanged: `cargo test -p can-harness` still runs all four
+  vcan tests and prints `SKIP` for each (no `CAP_NET_ADMIN`/`vcan` module in this sandbox, the
+  expected unprivileged outcome), `cargo run -p xtask -- gate` still passes.
+
 _Older entries collapsed above this line as the log grows; nothing predates the crate-exclusion entry._
 
 ## Known dead ends

@@ -13,6 +13,13 @@
 //!
 //! Each test uses its own interface name so they can run concurrently
 //! without colliding.
+//!
+//! Gated on `target_os = "linux"` (issue #62): `can_harness` compiles to a
+//! no-op on other platforms, so this whole file would fail to compile
+//! against it there. On a non-Linux `cargo test --workspace` this binary
+//! builds with zero tests, which is the correct outcome, not a weakening --
+//! `vcan`/`socketcan` do not exist to skip against off Linux.
+#![cfg(target_os = "linux")]
 
 use can_harness::responder::SimResponder;
 use can_harness::vcan::up_or_skip;
