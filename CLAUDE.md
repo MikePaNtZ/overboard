@@ -2,6 +2,15 @@
 
 Extends the global `~/.claude/CLAUDE.md`. Project: a DIY **lean-to-steer self-balancing board** (rideable inverted pendulum) — Rust real-time control on PREEMPT_RT Linux, off-the-shelf smart drive (torque mode) + hoverboard hub motors, sim-first. A deferred companion **PX4 drone** lives in its own Notion doc. Full context: memory `[[balance-board-project]]`.
 
+## Starting and ending a session — read this first
+**If you have just been told which role you are, open
+[Session start & teardown prompts](https://app.notion.com/p/3ab472a5fb69819984f9c1bd44be9dea)
+and follow the start block for your role.** It points you at your standing context, the
+decision record, and today's board doc — in that order. **Run the teardown block before the
+session ends**: it writes your state where your successor and your peer roles can see it.
+Skipping teardown is how two roles end up waiting on each other over work that is already
+finished, which has now happened three times in two days.
+
 ## Org protocol — you hold a role in a multi-session org. Read `docs/decisions/INDEX.md` before any PR.
 - **Three lanes.** A **decision** (choose between options) → the Notion Escalations queue. A
   **handoff** (finished work crossing a boundary) → a **pull request**, review requested from the
