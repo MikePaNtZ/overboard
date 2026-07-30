@@ -4,6 +4,21 @@ The headline this file exists to pin: **a rolling profile is harder than a
 steady grade of the same steepness.** The uniform-grade gate passes the
 estimator on a steady +10% descent; the same peak grade with a crest, a dip and
 two transitions puts the board down.
+
+GATE NUMBERS -- MEASURED VS ASSUMED (issue #24 AC5 audit, this session)
+-------------------------------------------------------------------------
+| Assertion                                              | Threshold                     | Observed this session | Status |
+|---------------------------------------------------------|--------------------------------|------------------------|--------|
+| default ride, 8% peak grade: `survived`/`reached_next_crest`/`held_speed` | must all be true | survived, reached the crest, held speed; dip reached before the crest (t_dip < t_crest) | MEASURED |
+| the headline: steady 10% descent vs rolling 10% peak     | steady survives, rolling does not | steady: survived; rolling: struck (`struck_phase` one of descent/dip/ascent) | MEASURED -- this is the actual comparison the scenario exists to make, re-run rather than assumed |
+| estimator costs the envelope, 10% peak, truth vs estimate | truth completes, estimate does not | truth: survived + reached crest; estimate: did not survive | MEASURED |
+| estimator error lowest through the dip, 4%/8% peak       | `est_rms_dip < est_rms_descent` | reached the crest at both grades; dip RMS below descent RMS at both | MEASURED. The module docstring's own aside -- total RMS is roughly grade-independent, "~0.96 deg across 2-8%" -- was itself stated as measured when written and was not re-derived here |
+| cutback never binds on the default 8%/24 m ride           | `cutback_binding_cycles == 0` | 0 | MEASURED |
+
+No gaps found in this file: every GATE assertion already ties to a stated
+comparison (steady vs rolling, truth vs estimate) rather than a bare
+round-number threshold, so there was nothing here in the shape of `hill.py`'s
+25 deg sanity ceiling to flag.
 """
 
 import math

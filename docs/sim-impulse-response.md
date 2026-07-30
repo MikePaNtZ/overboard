@@ -206,6 +206,19 @@ The positive case is always paired with a negative one. A suite that only
 checked "big kick → falls over" would still pass against the old
 falls-over-by-itself model — which is the exact bug being retired.
 
+### 4.1 Measured vs. assumed (issue #24, AC5 audit)
+
+Every number in the table above is already stated with its provenance —
+`NOMINAL_IMPULSE_NS`/`SUBTHRESHOLD_IMPULSE_NS` against the measured 12.5 N·s
+knee (§3), the 18.57° strike angle computed from the collision hull rather
+than hardcoded, `KT_NM_PER_A = 0.7` named an explicit **unfitted placeholder**
+awaiting a bench measurement, `actuation_delay_cycles` named an explicit
+placeholder for ICD §12. Re-checked here rather than re-asserted: this
+scenario has no unlabelled acceptance number left to flag, which is the
+opposite finding from `tests/test_hill.py` (see that file's own audit table),
+where one threshold — a 25° sanity ceiling, not a re-derived margin — was
+found and flagged rather than fixed.
+
 ## 5. Determinism
 
 MuJoCo is bit-reproducible for a fixed version on a fixed platform, so
