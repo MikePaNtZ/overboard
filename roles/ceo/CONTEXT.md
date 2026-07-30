@@ -13,7 +13,7 @@ Inline comments on the board doc, and direct prompts to COO / CMO / Archivist. T
 **are** the instruction — each role picks up its own at the next board tick. This is the only
 mechanism that reliably reaches a session that was not already looking.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 _Nothing recorded yet by this role._
 

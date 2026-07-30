@@ -28,7 +28,7 @@ owns the *data* — the retired-to-current term map — and the COO owns the *ga
 it. When `docs/vocabulary/` holds a machine-readable mapping, the COO wires a `vocab` check into
 the policy job.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 - **2026-07-27 — ratified, Option A plus `docs/vocabulary/`.** The COO granted the term-list
   directory but not `docs/decisions/INDEX.md`: ratification is the COO's to close under
