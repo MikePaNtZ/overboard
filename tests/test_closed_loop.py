@@ -18,6 +18,28 @@ A closed-loop test that quietly passes because the controller was absent is the
 CI plumbing, and it would be far more expensive here.
 
     cargo build --release -p control-ffi
+
+GATE NUMBERS -- MEASURED VS ASSUMED (issue #24 AC5 audit, this session)
+-------------------------------------------------------------------------
+| Assertion                                                    | Threshold             | Observed this session | Status |
+|----------------------------------------------------------------|------------------------|------------------------|--------|
+| `test_closed_loop_prevents_the_nose_strike` (driverless, nominal impulse) | `peak_abs_pitch_deg < 3.0` | 0.879 deg | MEASURED -- open-loop the same impulse peaks at 18.6 deg; the threshold has ~3.4x headroom over the observed closed-loop peak |
+| `test_closed_loop_beats_open_loop_on_the_same_disturbance`     | `closed < 0.25 * open` | ratio 0.047           | MEASURED |
+| `test_the_gains_leave_headroom` (peak current)                 | `< 20.0 A` (half the 40 A clamp) | 8.12 A, 0 saturated cycles | MEASURED |
+| `test_the_ridden_board_survives_the_impulse_at_all` (inner loop only) | `peak_abs_pitch_deg < 8.0` | 4.879 deg | MEASURED |
+| `test_the_cascade_brings_the_ridden_board_back_to_rest`        | `travel_m < 0.25`, `wheel_rate < 0.5 rad/s` | 0.106 m, 0.065 rad/s, 0 saturated cycles | MEASURED |
+| `test_the_cascade_costs_some_pitch_and_that_is_the_trade`      | `inner < both < 2*inner` | inner 4.879 deg, cascade 7.712 deg (1.58x) | MEASURED |
+| `test_a_speed_setpoint_is_tracked` (1 m/s command)              | `abs(settled - 1.0) < 0.25` | settled at 1.003 m/s | MEASURED -- band is ~60x the actual error, deliberately loose so normal tuning drift does not flake the gate |
+| `test_the_outer_loop_does_not_suit_the_driverless_plant` (characterisation, not a gate) | `peak_abs_pitch_ref_deg > 4.9`, `travel_m > 1.0` | not re-run this session -- an intentional characterisation of a known-bad configuration, not a margin | MEASURED, per the docstring's own "-29 m at 40 s, -64 m at 90 s" figures, not re-verified here |
+| `test_there_is_large_margin_on_actuation_delay` (`tests/test_imperfections.py`) | `peak_abs_pitch_deg < 10.5` | 9.71 deg on the estimate (re-baselined and recorded in `roles/senior-controls/CONTEXT.md` when issue #24 AC1 landed) | MEASURED, already audited when the threshold was set |
+
+Every driverless and ridden-cascade GATE number in this file re-runs against a
+real measured value with a stated margin -- there is no `hill.py`-style
+sanity-ceiling gap here. The one number not re-run this session
+(`test_the_outer_loop_does_not_suit_the_driverless_plant`) is explicitly a
+characterisation of a plant configuration the design already rejects, not a
+margin anyone is meant to tighten, so re-running it would not have changed its
+classification.
 """
 
 import pytest

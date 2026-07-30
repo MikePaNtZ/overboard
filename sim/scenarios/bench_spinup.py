@@ -20,23 +20,26 @@ story:
     kt*i - b*w - tau_c*sign(w) = J*dw/dt
 
 so the initial slope of w(t) is alpha ~= kt*i/J. Two runs at the SAME current
--- bare rotor, then with the flywheel disc added -- give two equations in two
-unknowns once `J_disc` is treated as known (it is a machined aluminium disc,
-weighed and measured, not fitted):
+-- bare rotor, then with the flywheels added -- give two equations in two
+unknowns once `J_disc` is treated as known. As of #66 that is two goBILDA
+3628-0032-0082 flywheels, and "known" means the manufacturer's published
+axial inertia (1651 g*cm^2 each), not a weighed-and-measured custom disc --
+see `known_disc_inertia_kg_m2` and bench_rig.xml's header for why a
+solid-cylinder derivation would be wrong for this part:
 
     kt*i = J_bare*alpha_1
     kt*i = (J_bare + J_disc)*alpha_2
     =>  kt = J_disc / (i * (1/alpha_2 - 1/alpha_1))
         J_bare = kt*i/alpha_1
 
-The bare variant is built by REGEX-STRIPPING the `flywheel` geom out of the
-XML string and compiling with `mujoco.MjModel.from_xml_string` -- `MjsGeom`
-has no `.delete()` and hand-rolling `MjSpec` surgery for one geom is not worth
-the fragility it buys. The strip is verified, not trusted: `build_bare_model`
-asserts the geom is actually gone and that the resulting joint inertia is
-lower than the loaded rig's. A silent failure to strip would make the two
-runs identical, which is a divide-by-zero waiting to happen rather than a
-loud one.
+The bare variant is built by REGEX-STRIPPING the two `flywheel_a`/`flywheel_b`
+bodies out of the XML string and compiling with `mujoco.MjModel.from_xml_string`
+-- `MjsGeom`/`MjsBody` has no `.delete()` and hand-rolling `MjSpec` surgery for
+two bodies is not worth the fragility it buys. The strip is verified, not
+trusted: `build_bare_model` asserts both flywheel geoms are actually gone and
+that the resulting joint inertia is lower than the loaded rig's. A silent
+failure to strip would make the two runs identical, which is a divide-by-zero
+waiting to happen rather than a loud one.
 
 kt IS BIASED BY A SMALL, KNOWN AMOUNT. The algebra above assumes zero
 friction at the initial instant; Coulomb does not vanish at w=0, so the fit
@@ -176,7 +179,6 @@ import argparse
 import csv
 import hashlib
 import json
-import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -202,15 +204,16 @@ OUT_DIR = REPO / "sim" / "out" / "bench"
 #: the module docstring's category-error guard.
 NAMEPLATE_KT_NM_PER_A = 9.5493 / 190.0
 
-#: Flywheel geometry, independent of the compiled model -- mass on a kitchen
-#: scale and radius with a ruler, per the model header, is what makes this
-#: trustworthy where the rotor's own inertia is not. Kept as named constants
-#: (mirroring bench_rig.xml exactly) rather than read back off the compiled
-#: model, because reading it off the model would make `J_disc` circular with
-#: the very quantity the two-run fit is solving for.
-FLYWHEEL_RADIUS_M = 0.075
-FLYWHEEL_THICKNESS_M = 0.012
-FLYWHEEL_DENSITY_KG_M3 = 2700.0  # 6061 aluminium
+#: Flywheel identity, independent of the compiled model -- the manufacturer's
+#: published mass and axial inertia for the goBILDA 3628-0032-0082 (#66), not
+#: derived from a radius/thickness/density geometry guess (a same-mass solid
+#: disc would be ~30% low; see bench_rig.xml's header). Kept as named
+#: constants rather than read back off the compiled model, because reading it
+#: off the model would make `J_disc` circular with the very quantity the
+#: two-run fit is solving for.
+FLYWHEEL_COUNT = 2  # both purchased units are on the shaft; see #65
+FLYWHEEL_MASS_KG = 0.152
+FLYWHEEL_INERTIA_KG_M2 = 1.651e-4  # manufacturer, about the shaft axis, per unit
 
 #: Threshold for `current_tracking_ok`. Past this the drive has derated by
 #: more than plausible measurement jitter -- ICD noise floors on reported
@@ -218,13 +221,20 @@ FLYWHEEL_DENSITY_KG_M3 = 2700.0  # 6061 aluminium
 #: is meaningless until this is understood.
 CURRENT_TRACKING_TOLERANCE_A = 0.5
 
-_FLYWHEEL_GEOM_RE = re.compile(r'<geom name="flywheel"[^>]*/>')
+#: Matches the whole `<body name="flywheel_a">...</body>` /
+#: `<body name="flywheel_b">...</body>` blocks, not just a geom -- since #66,
+#: each flywheel's manufacturer-sourced inertia lives on an `<inertial>` at
+#: body scope, so a self-closing-geom regex can no longer isolate it. The
+#: index mark is nested inside `flywheel_b` (see bench_rig.xml's header), so
+#: stripping these two bodies removes it too, by construction rather than by
+#: a second regex that could drift out of sync.
+_FLYWHEEL_BODY_RE = re.compile(r'\s*<body name="flywheel_[ab]".*?</body>', re.DOTALL)
 
-#: The index mark goes with the disc it is drawn on.
-#:
-#: `index` sits at `pos="0 0.046 0.052"` -- the same y as the flywheel, at 52 mm
-#: radius, i.e. on the disc face. Strip the disc and leave the mark and you get
-#: a white bar rotating in mid-air where the flywheel used to be.
+#: The index mark, kept as its own regex even though `_FLYWHEEL_BODY_RE`
+#: already removes it (it is nested inside `flywheel_b`) -- this one isolates
+#: JUST the mark, for `test_removing_the_index_mark_changes_no_fitted_quantity`,
+#: which strips only this geom to confirm it is really massless rather than
+#: assuming it.
 #:
 #: It is massless with collision off, so `J_bare` and every fitted number are
 #: unaffected either way; this is model coherence, not correctness. But a plant
@@ -237,15 +247,16 @@ _INDEX_GEOM_RE = re.compile(r'<geom name="index"[^>]*/>')
 
 
 def known_disc_inertia_kg_m2() -> float:
-    """`J_disc` from geometry and material, NOT from the compiled model.
+    """`J_disc` from the manufacturer's published figure, NOT from geometry.
 
-    `1/2*m*r^2` is exact here because every rotor geom in bench_rig.xml is
-    centred ON the shaft axis (see the model header's note on the eccentric-
-    offset defect this replaced) -- an off-axis disc would need a parallel-
-    axis correction this does not have.
+    Two goBILDA 3628-0032-0082 flywheels (#66), each 1651 g*cm^2 about the
+    shaft axis per the datasheet. They sum directly because both are coaxial
+    with the shaft: offsets along the axis of rotation contribute nothing to
+    inertia about that axis (see bench_rig.xml's header note on the
+    eccentric-offset defect this replaced) -- an off-axis disc would need a
+    parallel-axis correction this does not have.
     """
-    mass = FLYWHEEL_DENSITY_KG_M3 * math.pi * FLYWHEEL_RADIUS_M**2 * FLYWHEEL_THICKNESS_M
-    return 0.5 * mass * FLYWHEEL_RADIUS_M**2
+    return FLYWHEEL_COUNT * FLYWHEEL_INERTIA_KG_M2
 
 
 def load_model(path: Path = MODEL_PATH) -> mujoco.MjModel:
@@ -266,30 +277,21 @@ def _joint_inertia(model: mujoco.MjModel) -> float:
 
 
 def strip_flywheel_geom(xml: str) -> str:
-    """Remove the flywheel geom -- and the index mark drawn on it -- from the
-    MJCF string.
+    """Remove the two flywheel bodies -- and the index mark nested inside
+    `flywheel_b` -- from the MJCF string.
 
-    A regex, not `MjSpec` surgery: `MjsGeom` has no `.delete()`, and building
-    the bare variant through spec editing is not worth the fragility for one
-    geom. The caller MUST verify the strip actually worked -- see
+    A regex, not `MjSpec` surgery: `MjsGeom`/`MjsBody` has no `.delete()`, and
+    building the bare variant through spec editing is not worth the fragility
+    for two bodies. The caller MUST verify the strip actually worked -- see
     `build_bare_model` -- because a silent no-op here would make the bare and
     loaded runs identical and turn the two-run fit into a divide-by-zero.
-
-    The index mark is removed with the disc because it is ON the disc; see
-    `_INDEX_GEOM_RE`. It is massless, so no fitted number moves.
     """
-    stripped, n = _FLYWHEEL_GEOM_RE.subn("", xml)
-    if n != 1:
+    stripped, n = _FLYWHEEL_BODY_RE.subn("", xml)
+    if n != 2:
         raise RuntimeError(
-            f"expected exactly one <geom name=\"flywheel\".../> to strip, found {n}. "
-            "The bench_rig.xml flywheel geom's markup may have changed; update the regex."
-        )
-    stripped, n_index = _INDEX_GEOM_RE.subn("", stripped)
-    if n_index != 1:
-        raise RuntimeError(
-            f"expected exactly one <geom name=\"index\".../> to strip, found {n_index}. "
-            "The mark is drawn on the flywheel face, so it must go with it -- "
-            "otherwise the bare model renders a decal floating where the disc was."
+            f"expected exactly two <body name=\"flywheel_[ab]\">...</body> blocks "
+            f"to strip, found {n}. The bench_rig.xml flywheel markup may have "
+            "changed; update the regex."
         )
     return stripped
 
@@ -297,17 +299,20 @@ def strip_flywheel_geom(xml: str) -> str:
 def build_bare_model(xml_text: str | None = None) -> mujoco.MjModel:
     """The bare-rotor variant used as run 1 of the two-run identification.
 
-    Verified, not trusted: asserts the flywheel geom is actually gone and that
-    the resulting joint inertia is lower than a loaded rig's would be. Either
-    assertion failing means the strip silently did nothing.
+    Verified, not trusted: asserts both flywheel geoms are actually gone and
+    that the resulting joint inertia is lower than a loaded rig's would be.
+    Either assertion failing means the strip silently did nothing.
     """
     xml_text = xml_text if xml_text is not None else MODEL_PATH.read_text()
     bare = mujoco.MjModel.from_xml_string(strip_flywheel_geom(xml_text))
-    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel") < 0, (
-        "flywheel geom is still present after stripping -- the regex did not match"
+    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel_a_disc") < 0, (
+        "flywheel_a geom is still present after stripping -- the regex did not match"
+    )
+    assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "flywheel_b_disc") < 0, (
+        "flywheel_b geom is still present after stripping -- the regex did not match"
     )
     assert mujoco.mj_name2id(bare, mujoco.mjtObj.mjOBJ_GEOM, "index") < 0, (
-        "index mark survived the flywheel strip -- it is drawn on the disc face, "
+        "index mark survived the flywheel strip -- it is nested inside flywheel_b, "
         "so the bare model would render a decal floating in mid-air"
     )
     return bare

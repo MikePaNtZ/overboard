@@ -64,6 +64,19 @@
   AC5 (measured-vs-assumed audit of every scenario-doc acceptance number) remains open, its own
   increment.
 
+- **Issue #24 AC4, scenario determinism audit (PR TBD).** Checked the claim rather than assuming
+  it: `impulse_response` and `closed_loop` already pinned full-trajectory bit-identical repeat
+  runs; `shuttle_run` had a determinism test but it compared only the metrics dict, which could
+  pass while the sample-by-sample trajectory silently diverged; `hill` and `terrain` had **no**
+  determinism test at all. Added `test_repeat_runs_are_bit_identical` to `tests/test_hill.py` and
+  `tests/test_terrain.py` (two runs of the same params, `np.array_equal` on the pitch/speed/travel
+  trajectories plus full `to_json_dict()` equality — params and plant summary included, not just
+  metrics), and strengthened `shuttle_run`'s existing test the same way. All four scenarios now
+  measured, not spot-checked: every one emits a bit-identical trajectory on repeat.
+  **Deliberately left for other increments (issue #24's own convention):** AC3 (`r_eff`
+  tyre-ground justification) and AC5 (measured-vs-assumed audit of every scenario-doc acceptance
+  number) are untouched here — each is its own well-scoped piece, not bundled into this one.
+
 - **Issue #24, AC2 — disturbance-rejection envelope (PR TBD).** Added
   `sim/scenarios/disturbance_envelope.py` (`sweep_closed_loop`, `EnvelopeResult`),
   `tests/test_disturbance_envelope.py`, and `scripts/disturbance_envelope.py`. A grid sweep
@@ -187,6 +200,41 @@
   intended. Linux side re-verified unchanged: `cargo test -p can-harness` still runs all four
   vcan tests and prints `SKIP` for each (no `CAP_NET_ADMIN`/`vcan` module in this sandbox, the
   expected unprivileged outcome), `cargo run -p xtask -- gate` still passes.
+
+- **Issue #24, AC5 — measured-vs-assumed audit of scenario acceptance numbers
+  (PR TBD).** Re-ran every GATE-tier acceptance number in `tests/test_hill.py`,
+  `tests/test_terrain.py`, `tests/test_shuttle_run.py`, `tests/test_closed_loop.py`
+  and `docs/sim-impulse-response.md` against this checkout and recorded the
+  actual observed value next to each threshold, in a per-file table matching
+  the convention `docs/sim-impulse-response.md` §4 already used. Put the
+  tables in `tests/` and the doc I already own rather than a new `docs/` file
+  — a new file under `/docs/` is COO turf (`.github/CODEOWNERS`), and the
+  tests are the closer thing to "scenario docs" for the three scenarios that
+  have no `.md` mirror at all.
+  **One real gap found, not fixed:** `tests/test_hill.py`'s
+  `test_a_crashed_run_can_never_report_that_it_held_speed` pins
+  `peak_abs_pitch_deg < 25.0` as a sanity ceiling against the old bug's 179.97°
+  wreckage output, not a re-derived margin on today's actual 18.5° peak. Left
+  alone and flagged rather than tightened — tightening an untightened
+  threshold is a tuning change nobody asked for, which is exactly the scope
+  creep AC5 is not license for.
+  **Everything else audited came back MEASURED**, several already stated as
+  such in the code (the shuttle-run file's own "the thresholds here are not
+  tight" disclosure predates this pass and already satisfied AC5's intent for
+  that file; this pass put numbers next to it). `tests/test_closed_loop.py`'s
+  ridden-cascade and driverless numbers all re-ran clean with real margin
+  (e.g. driverless nominal-impulse peak pitch: 0.879° against a 3.0° gate).
+  **Deliberately left out:** did not touch `sim/scenarios/hill.py`,
+  `terrain.py`, or `shuttle_run.py` themselves — their module docstrings
+  already carry extensive measured/assumed language (e.g. `KT_NM_PER_A`'s
+  "unfitted placeholder," `HillMetrics.ran_away`'s "deliberately crude"), and
+  duplicating that into the test files would have been noise, not audit. Did
+  not build a general claims-manifest mechanism — that is issue #61's remit
+  (`Dispatch: COO only`, reserved), and this audit is a one-time snapshot, not
+  ongoing enforcement.
+  Issue #24 now has AC1/AC2/AC3/AC4/AC5 each landed or in flight (AC2
+  merged, AC3 via #76, AC4 via #74, AC5 here) — this PR does not close #24
+  itself since AC3/AC4 are still open PRs, not merged.
 
 _Older entries collapsed above this line as the log grows; nothing predates the crate-exclusion entry._
 

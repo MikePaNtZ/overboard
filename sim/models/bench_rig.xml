@@ -3,9 +3,9 @@
     Overboard bench rig plant model — wave-0, desk-scale.
 
     A sensored outrunner bolted face-on to a plate, the plate clamped to a desk
-    edge, and a disc of known inertia on the shaft. One hinge, one actuator.
-    That is the whole vehicle here, and it is deliberately the simplest plant
-    that still exercises the real signal path.
+    edge, and two discs of known inertia on the shaft. One hinge, one
+    actuator. That is the whole vehicle here, and it is deliberately the
+    simplest plant that still exercises the real signal path.
 
     WHY THIS MODEL EXISTS, AND WHAT IT IS NOT FOR
     --------------------------------------------
@@ -41,10 +41,12 @@
     GEOMETRY
     --------
     Desk top is z = 0 and the desk edge is x = 0; the rig hangs off +x. The
-    motor axis sits at x = 0.06, i.e. 60 mm PAST the edge, so the disc (75 mm
-    radius) swings in free air. That overhang is load-bearing, not styling: a
-    plate clamped flush would put the disc over the desk surface, which kills
-    the pendulum upgrade and lets a shed set screw take a chunk out of the desk.
+    motor axis sits at x = 0.06, i.e. 60 mm PAST the edge, so the flywheels
+    (41 mm radius each, confirmed #66 -- was a 75 mm placeholder disc) swing
+    in free air with margin to spare. That overhang is load-bearing, not
+    styling: a plate clamped flush would put the discs over the desk surface,
+    which kills the pendulum upgrade and lets a shed set screw take a chunk
+    out of the desk.
 
     THE MOUNT IS TWO GEOMS, NOT ONE, AND THAT FOLLOWS FROM THE MOTOR'S MOUNTING
     FACE
@@ -61,14 +63,30 @@
     So the mount is a base plate + a riser, matching the buildable bracket
     (base the clamps grip, riser carrying the motor, joined at the desk edge):
 
-      base_plate   x in [-0.10, 0], thin in Z (6 mm, the 1/4" stock), lying
-                   flat on the desk top (z in [0, 0.006]). This is the part
-                   the two bench clamps grip (Stage-0A Sec 3.2).
+      base_plate   x in [-0.10, 0], thin in Z (1/4" = 6.35 mm exactly, the
+                   confirmed stock thickness -- see #66), lying flat on the
+                   desk top (z in [0, 0.00635]). This is the part the two
+                   bench clamps grip (Stage-0A Sec 3.2).
 
-      riser        x in [0, 0.12], thin in Y (6 mm), standing from the desk
-                   top to z = 0.2. Its face is in the X-Z plane, which is what
-                   lets the motor face-mount to it with the shaft along Y.
-                   The motor axis at x = 0.06 sits mid-riser, past the edge.
+      riser        x in [0, 0.12], thin in Y (6.35 mm, same stock), standing
+                   from the desk top to z = 0.2. Its face is in the X-Z plane,
+                   which is what lets the motor face-mount to it with the
+                   shaft along Y. The motor axis at x = 0.06 sits mid-riser,
+                   past the edge.
+
+    RAW STOCK, NOW CONFIRMED RATHER THAN ASSUMED (#66)
+    ----------------------------------------------------
+    Both pieces are cut from a single 12"x12" (304.8 mm square) sheet of 1/4"
+    6061-T651 -- ordered, cut, and non-returnable. base_plate (100x90 mm) and
+    riser (120x200 mm) together use well under half that area, leaving ~60%
+    of the sheet spare (see #64, which asks whether 1/4" is stiff enough for
+    the 200 mm riser under flywheel load -- unresolved here, tracked there).
+    The bench clamps are confirmed as IRWIN Quick-Grip mini one-handed
+    clamps, materially lower clamping force than screw-type F-clamps. That is
+    a second candidate source of a low-frequency mode beyond riser bending --
+    if bench data shows a structural resonance inside the control bandwidth,
+    the clamp interface is now a named suspect alongside riser compliance,
+    not just the riser.
 
     Both are visual only (contype/conaffinity 0, not a body with an
     <inertial>), so this is a rendering and buildability fix with no dynamics
@@ -80,34 +98,75 @@
     the disc for an arm-and-mass a genuine inverted pendulum rather than a
     turntable.
 
-    MASS AND INERTIA COME FROM GEOMETRY
-    -----------------------------------
-    No <inertial> block is given. MuJoCo derives body mass and inertia from the
-    geoms and their densities, exactly the way the onewheel model derives its
-    nose-strike angle from collision hulls instead of a tuned constant. The
-    disc is 6061 aluminium at 2700 kg/m^3, r = 75 mm, t = 12 mm, which is
-    0.5726 kg and 1.6103e-3 kg*m^2 about the axis. As compiled, the joint-space
-    inertias are:
+    MASS AND INERTIA: GEOMETRY FOR THE ROTOR, MANUFACTURER FIGURE FOR THE
+    FLYWHEELS (#66)
+    -----------------------------------------------------------------------
+    rotor_can and hub have no <inertial> block: MuJoCo derives their mass and
+    inertia from geometry and density, exactly the way the onewheel model
+    derives its nose-strike angle from collision hulls instead of a tuned
+    constant. That is correct for them because they ARE estimates awaiting
+    measurement -- no manufacturer publishes rotor inertia for e-skate 6374s,
+    and the two sources found during sourcing disagreed by 16x (roughly
+    2000-3000 g*cm^2, see #65). This model's rotor_can density is chosen to
+    land near the middle of that band; the disagreement is the finding, not
+    something to paper over, and it is exactly what the bare-run measurement
+    exists to resolve.
 
-        J_bare   = 2.4065e-4 kg*m^2   (rotor can + hub)
-        J_loaded = 1.8510e-3 kg*m^2
-        J_disc   = 1.6103e-3 kg*m^2   == 1/2*m*r^2 exactly, because every
-                                         rotor geom is centred on the axis
+    The flywheels are different: they are a bought, catalogued part, so
+    deriving their inertia from an assumed solid-cylinder geometry would be
+    replacing a known number with a guess. #66 confirmed the purchased part is
+    a goBILDA 3628-0032-0082 (82 mm OD), manufacturer-published at 152 g and
+    1651 g*cm^2 (1.651e-4 kg*m^2) about its own axis -- and a same-mass solid
+    41 mm-radius disc would compute to ~1277 g*cm^2, about 30% low, because
+    goBILDA's flywheel is a hub-and-rim casting with mass biased toward the
+    rim, not a uniform disc. So each flywheel carries an explicit <inertial>
+    stating that published figure directly, rather than a <geom> density
+    chosen to reverse-engineer it. The two flywheels are the ×2 hedge #65
+    describes as already bought; both are modelled, because that is what is
+    on the shaft, not a decision about which to keep -- #65 stays open for
+    that. Their transverse (non-axial) moments are not published and are
+    approximated as I_axial/2, the exact thin-disc identity; this is a
+    placeholder, but a provably inert one, because the rig has a single hinge
+    DOF about the shaft (Y) and nothing here couples the transverse inertia
+    into that joint's equation of motion -- it would only matter for reaction
+    forces on the frame, which this model does not analyse.
 
-    The ratio matters more than either number: J_disc / J_bare = 6.69. The
-    two-run identification (spin up bare, spin up loaded, solve for kt and
+    As compiled, the joint-space inertias are:
+
+        J_bare   = 2.4065e-4 kg*m^2   (rotor can + hub, unchanged by #66)
+        J_disc   = 3.3020e-4 kg*m^2   (two flywheels, manufacturer figure:
+                                         2 x 1651 g*cm^2, exact -- offsets
+                                         along the shaft axis contribute
+                                         nothing to inertia about that axis,
+                                         so the two add directly)
+        J_loaded = 5.7085e-4 kg*m^2
+
+    BEFORE / AFTER (#66 replaced a custom 75 mm aluminium disc, an estimate,
+    with the two goBILDA flywheels actually purchased):
+
+                     before (guess)    after (measured/mfr)
+        J_disc       1.6103e-3         3.3020e-4    (-79.5%)
+        J_loaded     1.8510e-3         5.7085e-4    (-69.2%)
+        ratio                6.69             1.37    (see #65)
+
+    The ratio drop is real and expected, not a regression: #65 already flagged
+    that the confirmed manufacturer figures (152 g, 1651 g*cm^2 each) give a
+    ratio of roughly 1.1-1.65 against the bare-rotor estimate, well below the
+    6.7 design point. This issue (#66) is scoped to making the model match
+    what was bought, not to deciding whether to add inertia -- that is #65's
+    open question, and 1.37 sits inside the range #65 already reported.
+
+    The two-run identification (spin up bare, spin up loaded, solve for kt and
     J_rotor) is only well conditioned when the added inertia is comparable to
-    or larger than the unknown one. At ~6.7x the two acceleration slopes differ
-    by 7.4x, well clear of measurement noise. A disc that merely nudged the
-    total would produce two nearly identical ramps and an ill-posed fit.
+    or larger than the unknown one. At the design point (~6.7x) the two
+    acceleration slopes differed by 7.4x, well clear of measurement noise; at
+    1.37x the two slopes are closer together and error amplification on kt is
+    roughly double (see #65). Still solvable -- the requirement was "added
+    inertia comparable to or larger than the unknown," which 1.1-1.65 clears
+    -- just with a wider error bar than the design point assumed.
 
     The rotor is balanced: COM sits exactly on the shaft axis, so there is no
     angle-dependent gravity torque to contaminate the friction fit.
-
-    Both of these are nameplate/geometry estimates awaiting measurement, which
-    is the point of the exercise. The scenario reports fitted values against
-    them, and a large disagreement on J_rotor is a real finding about the
-    motor, not a modelling error to be tuned away.
 
     ACTUATOR RANGE IS DERIVED, AND THAT IS A KNOWN TRAP
     ---------------------------------------------------
@@ -158,18 +217,21 @@
           material="grid_mat"/>
 
     <!-- Base plate. Flat on the desk top (thin in Z), x in [-0.10, 0] -- the
-         part the two bench clamps grip. Visual only: it is ground, and
-         modelling its compliance would be a claim the rig cannot yet
-         support. If bench data shows a structural resonance inside the
-         control bandwidth, that assumption is what to revisit first. -->
-    <geom name="base_plate" type="box" size="0.050 0.045 0.003" pos="-0.050 -0.045 0.003"
+         part the two bench clamps grip. 1/4" (6.35 mm) stock, confirmed
+         (#66), cut from the 12"x12" sheet described in the header. Visual
+         only: it is ground, and modelling its compliance would be a claim
+         the rig cannot yet support. If bench data shows a structural
+         resonance inside the control bandwidth, both riser bending (#64)
+         and the mini clamps' lower grip force are named suspects. -->
+    <geom name="base_plate" type="box" size="0.050 0.045 0.003175" pos="-0.050 -0.045 0.003175"
           material="cloud"/>
 
     <!-- Riser. A panel in the X-Z plane, thin in Y, standing from the desk
          top out past the edge to carry the motor -- see the header for why
          this has to be a separate geom from the base plate rather than one
-         panel doing both jobs. Visual only, same as the base plate. -->
-    <geom name="riser" type="box" size="0.060 0.003 0.100" pos="0.060 -0.045 0.100"
+         panel doing both jobs. Same confirmed 1/4" (6.35 mm) stock as the
+         base plate. Visual only, same as the base plate. -->
+    <geom name="riser" type="box" size="0.060 0.003175 0.100" pos="0.060 -0.045 0.100"
           material="cloud"/>
 
     <!-- Motor stator, static half. Bolted to the plate face, axis along Y. -->
@@ -193,7 +255,11 @@
       <joint name="shaft" type="hinge" axis="0 1 0" damping="1e-4"
              frictionloss="5e-3"/>
 
-      <!-- Rotor can. density set to land near 2.4e-4 kg*m^2 about the axis. -->
+      <!-- Rotor can. density set to land near the middle of the 2000-3000
+           g*cm^2 sourcing estimate (#65) -- an estimate awaiting the bare-run
+           measurement, not a fact; see the header. Motor confirmed 6374-class,
+           8 mm shaft, sensored (#66) -- the shaft diameter does not change
+           this geom, which models hub mass, not a shaft bore. -->
       <geom name="rotor_can" type="cylinder" size="0.0315 0.018" euler="90 0 0"
             pos="0 0 0" density="4300" material="ink"/>
 
@@ -201,24 +267,47 @@
       <geom name="hub" type="cylinder" size="0.011 0.010" euler="90 0 0"
             pos="0 0.028 0" density="2700" material="mint"/>
 
-      <!-- Flywheel: 6061 aluminium, r = 75 mm, t = 12 mm.
-           This is the KNOWN inertia in the two-run identification. Its value
-           comes from mass on a kitchen scale and radius with a ruler, which is
-           why it is trustworthy in a way the rotor's is not. -->
-      <geom name="flywheel" type="cylinder" size="0.075 0.006" euler="90 0 0"
-            pos="0 0.046 0" density="2700" material="amber"/>
+      <!-- Flywheel A: goBILDA 3628-0032-0082, 82 mm OD -- one of the two
+           units purchased as the #65 hedge. mass and diaginertia are the
+           manufacturer's published figures (152 g, 1651 g*cm^2 about the
+           shaft axis), not derived from this geom -- see the header for why
+           a solid-disc guess would be ~30% low for this part. The <inertial>
+           carries the same euler as the geom so its third (Z, pre-rotation)
+           diaginertia component lands on the physical shaft axis. The geom
+           itself is a rendering placeholder only (82 mm OD, 10 mm assumed
+           thickness); its density is irrelevant once <inertial> is given. -->
+      <body name="flywheel_a" pos="0 0.046 0">
+        <inertial pos="0 0 0" euler="90 0 0" mass="0.152"
+                  diaginertia="8.255e-5 8.255e-5 1.651e-4"/>
+        <geom name="flywheel_a_disc" type="cylinder" size="0.041 0.005"
+              euler="90 0 0" material="amber"/>
+      </body>
 
-      <!-- Index mark, so rotation is legible in a render and a strobe or phone
-           video can cross-check shaft speed against reported ERPM.
+      <!-- Flywheel B: identical part, the second unit of the ×2 hedge. Both
+           are modelled because both are on the shaft -- #65 decides whether
+           to keep both, not this file. -->
+      <body name="flywheel_b" pos="0 0.057 0">
+        <inertial pos="0 0 0" euler="90 0 0" mass="0.152"
+                  diaginertia="8.255e-5 8.255e-5 1.651e-4"/>
+        <geom name="flywheel_b_disc" type="cylinder" size="0.041 0.005"
+              euler="90 0 0" material="amber"/>
 
-           MASSLESS ON PURPOSE. In hardware this is paint or a strip of tape.
-           Given mass, it sits off-axis and applies a gravity torque of order
-           2e-3 N*m that varies with shaft angle — the same order as the
-           Coulomb friction term the spin-down test is trying to identify, so
-           it would show up as a systematic bias in the fit and be
-           indistinguishable from real friction. -->
-      <geom name="index" type="box" size="0.004 0.006 0.020" pos="0 0.046 0.052"
-            mass="0" material="cloud"/>
+        <!-- Index mark, so rotation is legible in a render and a strobe or
+             phone video can cross-check shaft speed against reported ERPM.
+             Nested inside flywheel_b (rather than kept a rotor sibling and
+             matched by a second strip regex) so stripping the flywheel body
+             cannot again leave the mark floating -- see the DCP bug this
+             replaced when the mark and disc were separate rotor geoms.
+
+             MASSLESS ON PURPOSE. In hardware this is paint or a strip of
+             tape. Given mass, it sits off-axis and applies a gravity torque
+             that varies with shaft angle -- the same order as the Coulomb
+             friction term the spin-down test is trying to identify, so it
+             would show up as a systematic bias in the fit and be
+             indistinguishable from real friction. -->
+        <geom name="index" type="box" size="0.004 0.005 0.010" pos="0 0 0.030"
+              mass="0" material="cloud"/>
+      </body>
     </body>
   </worldbody>
 
