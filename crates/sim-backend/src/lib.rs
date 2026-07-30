@@ -28,8 +28,8 @@
 //! instead.
 
 use board_types::{
-    Applied, Command, DEFAULT_R_EFF_M, DisarmReason, ImuSample, IoError, Observation, Params,
-    Profile, RunMetadata, Saturation, ValidityFlags,
+    Applied, Command, DisarmReason, ImuSample, IoError, Observation, Params, Profile, RunMetadata,
+    Saturation, ValidityFlags, DEFAULT_R_EFF_M,
 };
 use hal::{BoardObserve, CallSequence};
 use hal_actuate::{BoardActuate, Disarm};
