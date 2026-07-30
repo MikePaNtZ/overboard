@@ -51,10 +51,15 @@ def main() -> None:
         print("    EMPTY -- this is a reportable condition, not a quiet state.")
 
     print("\nROADMAP  (the numbers that actually matter)")
+    # No exceptions here on purpose. 'Hardware ordered ($)' used to print a
+    # hardcoded '0 (nothing ordered to date)'. Purchasing then happened -- $977
+    # across 10 orders, reported by the COO on the 2026-07-28 board -- and the
+    # literal kept printing 0, because it was never computed from anything.
+    # A hardcoded figure ages into a lie the moment the world moves; a
+    # NOT MEASURED never does. This script's own docstring already says so.
     for label in ("BoMs published", "Hardware ordered ($)", "Hardware delivered",
                   "Assembly videos", "Public posts published", "Impressions / engagement"):
-        print(f"  {label:<27}NOT MEASURED" if label != "Hardware ordered ($)"
-              else f"  {label:<27}0  (nothing ordered to date)")
+        print(f"  {label:<27}NOT MEASURED")
 
 
 if __name__ == "__main__":
