@@ -18,7 +18,7 @@ design; the surface is `overboard-web`.
 - Lead with the measured surprise, not the ambition. Tag every link so we can tell which
   community sent people. End the post with an ask — the GitHub click-through is the conversion.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 _Nothing recorded yet by this role._
 

@@ -50,8 +50,22 @@ CAPABILITY = re.compile(
     re.I,
 )
 
-TURF_OVERRIDE = re.compile(r"TURF-OVERRIDE:\s*(\S.*)")
-DOC_OK = re.compile(r"DOC-OK:\s*(\S.*)")
+# Anchored to the START OF A LINE, deliberately. Unanchored, a commit message
+# that merely QUOTES the token activates it: the commit introducing the role-log
+# check explained its own escape hatch in prose -- "'CONTEXT-OK: <reason>' in a
+# commit message is the escape hatch" -- and thereby overrode the check it was
+# adding. An override has to be a declaration, not a mention, so it must be the
+# first thing on its line.
+TURF_OVERRIDE = re.compile(r"^[ \t]*TURF-OVERRIDE:\s*(\S.*)", re.MULTILINE)
+DOC_OK = re.compile(r"^[ \t]*DOC-OK:\s*(\S.*)", re.MULTILINE)
+CONTEXT_OK = re.compile(r"^[ \t]*CONTEXT-OK:\s*(\S.*)", re.MULTILINE)
+
+# A work-log entry appended to the shared CONTEXT.md is what makes every open PR
+# conflict every other one. An edit to standing context replaces text; an
+# appended log entry only adds. So: growth past this many lines with nothing
+# removed is an append, not an edit.
+CONTEXT_APPEND_LINES = 12
+LOG_ENTRY = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*\.md$")
 
 # A doc declares what it describes in an HTML comment, so it stays invisible
 # when rendered:  <!-- covers: [glob, ...]  reconciled: <sha> -->
@@ -290,6 +304,82 @@ def check_turf(roles: dict, rules: list) -> None:
         )
 
 
+def check_role_log() -> None:
+    """Work-log entries go in roles/<role>/log/, never appended to CONTEXT.md.
+
+    This was ratified as prose in #77 and enforced by nothing, so it changed no
+    behaviour at all: within 24 hours PR #76 stalled on a conflict in
+    `roles/senior-controls/CONTEXT.md` and PR #78 was carrying another append to
+    the same file. Parallel agents all appending to one file means every PR
+    conflicts every other -- five at once on 2026-07-28, serialising a queue
+    that was otherwise entirely green.
+
+    The rule is mechanical because the failure is mechanical. Standing context
+    is EDITED -- stale entries come out as new ones go in, so a real edit roughly
+    breaks even. A log entry only ever grows the file. `CONTEXT-OK: <reason>` in
+    a commit message is the escape hatch, same shape as TURF-OVERRIDE and DOC-OK.
+
+    NET growth, not "added with no deletions". The first version of this check
+    skipped whenever a file had any deletion at all, and the very PR that
+    introduced it defeated it: a one-line heading fix elsewhere in the same file
+    supplied the deletion, so a 20-line append sailed through. One unrelated
+    edit anywhere in the file would have bought a free pass to append forever.
+    Caught by testing the check against the thing it exists to stop, which is
+    the only way anyone finds this class of bug.
+    """
+    base = os.environ.get("POLICY_BASE_REF", "origin/master")
+    merge_base = git("merge-base", base, "HEAD")
+    if not merge_base:
+        cannot_resolve("role-log", f"base {base!r}")
+        return
+
+    override_text = (os.environ.get("POLICY_PR_BODY", "") + "\n"
+                     + git("log", f"{merge_base}..HEAD", "--format=%B"))
+    om = CONTEXT_OK.search(override_text)
+
+    numstat = git("diff", "--numstat", f"{merge_base}...HEAD")
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        added_s, removed_s, path = parts
+        m = re.fullmatch(r"roles/([^/]+)/CONTEXT\.md", path)
+        if not m or not added_s.isdigit() or not removed_s.isdigit():
+            continue
+        added, removed = int(added_s), int(removed_s)
+        net = added - removed
+        if net <= CONTEXT_APPEND_LINES:
+            continue  # an edit, or a small standing-context change
+        role_dir = m.group(1)
+        if om:
+            print(f"role-log: {path} grew by a net {net} lines (+{added}/-{removed}), "
+                  f"overridden -- {om.group(1).strip()}")
+            continue
+        fail(
+            "role-log",
+            f"{path} grew by a NET {net} lines (+{added}/-{removed}) -- that is an "
+            f"appended work-log entry, not an edit to standing context. Move it "
+            f"to roles/{role_dir}/log/YYYY-MM-DD-<slug>.md (one entry, one file) "
+            f"so it cannot conflict with every other open PR. If it really is "
+            f"standing context, edit the stale entry it replaces, or put "
+            f"'CONTEXT-OK: <reason>' in a COMMIT MESSAGE on this branch",
+        )
+
+    # The other direction: a log file that does not match the convention is a
+    # log directory drifting back into being a shared list.
+    for log_dir in sorted((REPO / "roles").glob("*/log")):
+        for entry in sorted(log_dir.iterdir()):
+            if entry.name == "README.md" or entry.name.startswith("."):
+                continue
+            if not LOG_ENTRY.fullmatch(entry.name):
+                fail(
+                    "role-log",
+                    f"{entry.relative_to(REPO)} is not named "
+                    f"YYYY-MM-DD-<slug>.md. One entry, one file, sortable by "
+                    f"date -- that is what stops the directory becoming a list",
+                )
+
+
 # ---------------------------------------------------------------------------
 # Documentation drift
 # ---------------------------------------------------------------------------
@@ -471,6 +561,7 @@ def main(argv: list[str]) -> int:
     check_adr_index()
     check_ownership(roles, rules)
     check_turf(roles, rules)
+    check_role_log()
     check_doc_drift()
     check_doc_size()
     check_claims()

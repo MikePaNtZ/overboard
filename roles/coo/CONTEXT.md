@@ -14,7 +14,7 @@
 - Ratify a cross-role Promise without a row, or ratify one-way/public work without the Oracle.
 - Build documentation where a CI check would do. Documentation is a polling surface.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 - **2026-07-27 — match the agent type to the work before dispatching.** `sonnet-executor`
   carries Read/Write/Edit/Bash/Grep/Glob only. A Notion + web-research task sent to it burned

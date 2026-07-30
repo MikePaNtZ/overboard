@@ -19,7 +19,7 @@ session with a commit.
 - Owns `scripts/render_scenario.py` and `docs/web-artifact-pipeline.md` in this repo.
 - Does **not** own the landing page markup or CSS — that is the Senior Digital Marketer's.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 - **The ride the weighted-board sub-goal needs already exists: `sim/scenarios/terrain.py`.**
   It runs a 70 kg ballast with a rider figure by default, so a terrain clip *is* a clip of the

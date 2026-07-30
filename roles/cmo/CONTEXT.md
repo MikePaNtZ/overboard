@@ -18,7 +18,7 @@
 - Peer of the COO. Neither escalates to the other; both go to the CEO. A cross-line dispute
   reaches the CEO as ONE joint write-up with both positions in each other's terms.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 _Nothing recorded yet by this role._
 

@@ -32,7 +32,7 @@
   Mass, inertia, geometry, contact and friction are Mechanical's and do.
 - `.github/workflows/ci.yml` is yours. `.github/policy_check.py` and `CODEOWNERS` are the COO's.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 - **Issue #24, AC3 — `r_eff` tyre-ground justification (PR TBD).** Could not be justified, so
   fixed rather than justified. `R_EFF_M`/`DEFAULT_R_EFF_M` (converts `wheel_hinge` angular rate

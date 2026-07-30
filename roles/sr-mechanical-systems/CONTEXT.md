@@ -17,7 +17,7 @@
 - A bench-fitted `kt` must never be written into the board model. What transfers from the bench
   is the **imperfection profile**, not motor numbers.
 
-## Decisions made (append as you go)
+## Decisions made (edit in place — completed work goes in log/, not here)
 
 **2026-07-26 — The BoM is delivered as a spreadsheet, not a document.** Four sheets (Read me /
 BoM / Tools / Inventory), clickable Status dropdowns, real vendor links, spares as a deliberate
