@@ -13,7 +13,9 @@
 //! compiles it (proving the graph edge is real, not just declared and
 //! unused), and `xtask` is what actually inspects it.
 
-use board_types::{Applied, Command, DisarmReason, IoError, Observation, RunMetadata};
+use board_types::{
+    Applied, Command, DisarmReason, IoError, Observation, RunMetadata, DEFAULT_R_EFF_M,
+};
 use hal::BoardObserve;
 use hal_actuate::{BoardActuate, Disarm};
 
@@ -47,7 +49,7 @@ impl BoardObserve for CanaryBackend {
             control_rate_hz: 500.0,
             params: Default::default(),
             imu_mounting_rotation: [1.0, 0.0, 0.0, 0.0],
-            r_eff_m: 0.14605,
+            r_eff_m: DEFAULT_R_EFF_M,
             imperfection_profile_id: None,
             schema_hash: [0; 32],
             binary_hash: [0; 32],

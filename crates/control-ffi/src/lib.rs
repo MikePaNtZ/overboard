@@ -32,7 +32,7 @@
 //! state that produced it.
 
 use board_types::ImuSample;
-use board_types::{Command, Faults, Params, Saturation};
+use board_types::{Command, Faults, Params, Saturation, DEFAULT_R_EFF_M};
 use control_core::{
     Attitude, CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator, PlantCoupling,
     VelocityLoop, WheelAccelEstimator,
@@ -284,8 +284,11 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
                 if p.accel_ff_gain_m_s2_per_a > 0.0 {
                     p.accel_ff_gain_m_s2_per_a
                 } else {
-                    // kt 0.7 N·m/A / (r_eff 0.14605 m × 82.5 kg ridden).
-                    0.0581
+                    // kt 0.7 N·m/A / (r_eff 0.1454 m × 82.5 kg ridden).
+                    // Re-derived for #89: was 0.0581 against the stale
+                    // 0.14605 m r_eff, a 0.45% shift that does not change
+                    // which regime this feedforward gain lands in.
+                    0.0584
                 },
             ))
         } else {
@@ -306,7 +309,11 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
             None
         },
         outer,
-        r_eff_m: if p.r_eff_m > 0.0 { p.r_eff_m } else { 0.14605 },
+        r_eff_m: if p.r_eff_m > 0.0 {
+            p.r_eff_m
+        } else {
+            DEFAULT_R_EFF_M
+        },
         last_t_ns: None,
         last_saturated: false,
         envelope: Envelope::new(Params {
@@ -475,7 +482,7 @@ mod tests {
             kp_v_rad_per_m_s: 0.0,
             ki_v_rad_per_m: 0.0,
             max_pitch_ref_rad: 0.087,
-            r_eff_m: 0.14605,
+            r_eff_m: DEFAULT_R_EFF_M,
             com_above_axle: 1,
             use_estimator: 0,
             estimator_tau_s: 1.0,
