@@ -418,7 +418,13 @@ def check_claims() -> None:
 
 def who(path: str) -> int:
     roles, rules = load_roles(), load_codeowners()
-    hit = owner_of(path.lstrip("./"), rules)
+    # removeprefix, not lstrip: lstrip takes a SET of characters, so
+    # ".github/workflows/ci.yml".lstrip("./") returned "github/workflows/ci.yml",
+    # which matches no specific rule and fell through to the '*' catch-all. Every
+    # path under .github/ -- CODEOWNERS and this file included -- reported the
+    # wrong owner, from the one command CLAUDE.md tells roles to trust to answer
+    # "am I trespassing?". The turf check never used this path and was correct.
+    hit = owner_of(path.removeprefix("./"), rules)
     if hit is None:
         print(f"{path}: no rule matches (this should be impossible -- '*' is a catch-all)")
         return 1
