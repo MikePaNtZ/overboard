@@ -160,7 +160,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # fetch-depth: 0 is load-bearing, not hygiene. The default depth-1
+      # checkout has no origin/master and no merge-base, so every diff-based
+      # check (turf, doc-drift) resolved no base and SKIPPED ITSELF while the
+      # gate still printed "all hard checks pass". Both had never once run in
+      # CI. See POLICY_BRANCH below for the second half of the same bug.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -171,6 +178,16 @@ jobs:
       # status: `tee` succeeds even when the check does not, and a policy gate
       # that reports green because its logger worked would be worse than none.
       - name: Policy gate
+        env:
+          # `actions/checkout` leaves a detached HEAD, so the script's own
+          # `rev-parse --abbrev-ref HEAD` returned the literal string "HEAD",
+          # which matches no registered branch prefix -- so the turf check
+          # skipped on every PR. Pass the real branch name in.
+          POLICY_BRANCH: ${{ github.head_ref || github.ref_name }}
+          POLICY_BASE_REF: origin/${{ github.base_ref || github.event.repository.default_branch }}
+          # POLICY_PR_BODY is deliberately NOT set. Overrides must live in a
+          # commit message so the reason is in git history rather than in a
+          # field anyone can edit after the gate went green.
         run: |
           { echo '### Policy gate'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           set +e

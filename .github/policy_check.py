@@ -73,6 +73,28 @@ def git(*args: str) -> str:
     ).stdout.strip()
 
 
+IN_CI = bool(os.environ.get("GITHUB_ACTIONS"))
+
+
+def cannot_resolve(check: str, what: str) -> None:
+    """A diff-based check could not find its base.
+
+    Locally this is normal and skipping is right. **In CI it is the gate
+    failing open**, which is strictly worse than having no gate: `turf` and
+    `doc-drift` both skipped themselves on every PR for as long as they had
+    existed -- depth-1 checkout, no merge-base -- while the run still printed
+    "all hard checks pass". A skip that reports green is a lie the whole org
+    then builds on, so in CI it is a hard failure.
+    """
+    if IN_CI:
+        fail(check, f"cannot resolve {what} IN CI -- this check would have "
+                    f"silently skipped and the gate would have reported green. "
+                    f"Check the workflow's fetch-depth and POLICY_BRANCH/"
+                    f"POLICY_BASE_REF wiring")
+    else:
+        print(f"{check}: cannot resolve {what} -- skipping (local run)")
+
+
 # ---------------------------------------------------------------------------
 # The role registry -- docs/decisions/ROLES.md is the single home.
 # ---------------------------------------------------------------------------
@@ -226,12 +248,17 @@ def check_turf(roles: dict, rules: list) -> None:
     prefixes = {m["prefix"]: r for r, m in roles.items() if m["prefix"]}
     role = next((r for p, r in prefixes.items() if branch.startswith(p)), None)
     if role is None:
-        print(f"turf: branch {branch!r} matches no registered branch prefix -- skipping")
+        # "HEAD" means the workflow did not pass POLICY_BRANCH and we are on a
+        # detached checkout -- that is the wiring bug, not an unregistered role.
+        if branch == "HEAD":
+            cannot_resolve("turf", "the branch name (got the literal 'HEAD')")
+        else:
+            print(f"turf: branch {branch!r} matches no registered branch prefix -- skipping")
         return
 
     merge_base = git("merge-base", base, "HEAD")
     if not merge_base:
-        print(f"turf: cannot resolve {base} -- skipping")
+        cannot_resolve("turf", f"base {base!r}")
         return
     changed = [p for p in git("diff", "--name-only", f"{merge_base}...HEAD").split() if p]
     if not changed:
@@ -293,7 +320,7 @@ def check_doc_drift() -> None:
     base = os.environ.get("POLICY_BASE_REF", "origin/master")
     merge_base = git("merge-base", base, "HEAD")
     if not merge_base:
-        print("doc-drift: cannot resolve base -- skipping")
+        cannot_resolve("doc-drift", f"base {base!r}")
         return
     changed = set(p for p in git("diff", "--name-only", f"{merge_base}...HEAD").split() if p)
     if not changed:
