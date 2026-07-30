@@ -26,7 +26,7 @@ import mujoco  # noqa: E402
 from sim.scenarios.imperfections import STAGE0_PLACEHOLDER, ImperfectionState  # noqa: E402
 from sim.scenarios.impulse_response import frame_pitch_rad  # noqa: E402
 from sim.scenarios.plant import build_model, imu_readings  # noqa: E402
-from sim.scenarios.rust_controller import RustController  # noqa: E402
+from sim.scenarios.rust_controller import DEFAULT_R_EFF_M, RustController  # noqa: E402
 from sim.scenarios.shuttle_run import ShuttleParams, VelocityProfile  # noqa: E402
 
 INK, AMBER, MINT, MUTED = "#16232E", "#F2A24A", "#2AAE97", "#96A8B0"
@@ -90,7 +90,7 @@ def collect(kind: str) -> dict:
             t.append(float(data.time))
             th.append(frame_pitch_rad(model, data))
             ax.append(a[0]); az.append(a[2]); gy.append(g[1])
-            v.append(float(data.qvel[6]) * 0.14605)
+            v.append(float(data.qvel[6]) * DEFAULT_R_EFF_M)
     return {k: np.asarray(x) for k, x in
             dict(t=t, truth=th, ax=ax, az=az, gyro=gy, v=v, dt=dt).items()}
 

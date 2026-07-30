@@ -16,15 +16,12 @@
   loosened blindly: `test_there_is_large_margin_on_actuation_delay` was pinned at 6.80 deg
   (truth pitch) and is now 9.71 deg (the honest number) — still clear of the 18.57 deg strike
   angle, re-baselined to `< 10.5`.
-  **AC2 also now cleared (PR TBD):** the disturbance-rejection envelope is mapped, not one
-  fixed magnitude — see the decision-log entry below. **Still open — issue #24's other three
-  ACs, deliberately not attempted in the same PR:** the `r_eff` tyre-ground justification
-  (geometry is Mechanical's turf — this role can investigate and report, not edit
-  `sim/models/`); confirming every scenario already emits bit-identical metrics JSON
-  (spot-checked true for impulse and closed-loop via existing determinism tests, not
-  re-verified for hill/terrain/shuttle); and an audit marking every acceptance number in the
-  scenario docs as measured vs. assumed. Each is its own well-scoped increment, not a blocker
-  for this one.
+  **AC2 also now cleared (#67):** the disturbance-rejection envelope is mapped, not one fixed
+  magnitude. **AC3 also now cleared (see the decision-log entry below):** the `r_eff` tyre-ground
+  question — couldn't be justified, so fixed. **AC4 addressed in a separate open PR (#74, not
+  yet merged as of this entry):** determinism audited across all four scenarios. **Still open —
+  issue #24's one remaining AC:** an audit marking every acceptance number in the scenario docs
+  as measured vs. assumed. Its own well-scoped increment, not a blocker for any of the above.
 - Closed-loop control is in sim; the estimator now closes the loop on the driverless impulse gate
   and the ridden cascade too, not only the shuttle.
 
@@ -36,6 +33,36 @@
 - `.github/workflows/ci.yml` is yours. `.github/policy_check.py` and `CODEOWNERS` are the COO's.
 
 ## Decisions made (append as you go)
+
+- **Issue #24, AC3 — `r_eff` tyre-ground justification (PR TBD).** Could not be justified, so
+  fixed rather than justified. `R_EFF_M`/`DEFAULT_R_EFF_M` (converts `wheel_hinge` angular rate
+  to forward speed, and current to force, in `hill.py`/`terrain.py`/`shuttle_run.py`/
+  `rust_controller.py`/`tests/test_closed_loop.py`/two `scripts/analyse_estimator*.py`) was
+  hand-copied as `0.14605` m in every one of those places, one of them (`hill.py`) claiming in a
+  comment that it "matches the tire in the model header." It did not: the model's actual
+  `wheel_geom` radius (`sim/models/overboard_onewheel.xml`, Mechanical's turf, not edited) is
+  `0.1454` m, the mesh-derived, enclosure-clearance figure that file's own header documents. A
+  *loaded* rolling radius bigger than the tire's own unloaded geometric radius is not physically
+  sensible regardless of provenance — compression under load only ever shrinks it — so this was
+  a stale figure (an 11.5" OD / 2 nominal-spec guess) that predated the mesh integration and was
+  never checked against the model everything else in this repo is measured against.
+  Consolidated to one constant (`rust_controller.DEFAULT_R_EFF_M`), imported everywhere instead
+  of re-declared, and added `tests/test_r_eff_matches_model.py`, which reads the *compiled*
+  model's `wheel_geom` size directly rather than re-asserting a literal, so this cannot silently
+  drift again. Full suite re-run clean (205 passed, 2 xfailed, no regressions; no pinned
+  threshold moved — the shift is 0.45%, inside every existing tolerance).
+  **Deliberately left out, flagged rather than fixed:** the same `0.14605` literal also appears,
+  independently, four times in `crates/` (`sim-backend`, `control-ffi` ×2, `canary-ridden`,
+  `board-app-ridden`) as FFI-boundary defaults — real hardware/ridden-mode code, not sim
+  scenarios, and touching it needs its own increment and a decision on which crate should own a
+  shared constant (this PR does not invent one). Not part of issue #24's AC3, which is scoped to
+  the sim scenarios; reported separately in the PR as an out-of-scope finding.
+  **Could not verify:** what the BoardIo ICD §10.5 entry for `r_eff_m` actually specifies — that
+  document lives in Notion, which this session has no access to. This fix only pins internal
+  consistency against the sim model; it does not claim to have confirmed or superseded whatever
+  Stage-0's eventual bench measurement will produce.
+  AC5 (measured-vs-assumed audit of every scenario-doc acceptance number) remains open, its own
+  increment.
 
 - **Issue #24 AC4, scenario determinism audit (PR TBD).** Checked the claim rather than assuming
   it: `impulse_response` and `closed_loop` already pinned full-trajectory bit-identical repeat
@@ -49,6 +76,7 @@
   **Deliberately left for other increments (issue #24's own convention):** AC3 (`r_eff`
   tyre-ground justification) and AC5 (measured-vs-assumed audit of every scenario-doc acceptance
   number) are untouched here — each is its own well-scoped piece, not bundled into this one.
+
 - **Issue #24, AC2 — disturbance-rejection envelope (PR TBD).** Added
   `sim/scenarios/disturbance_envelope.py` (`sweep_closed_loop`, `EnvelopeResult`),
   `tests/test_disturbance_envelope.py`, and `scripts/disturbance_envelope.py`. A grid sweep

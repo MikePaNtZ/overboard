@@ -58,7 +58,7 @@ from sim.scenarios.impulse_response import (  # noqa: E402
     nose_strike_angle_deg,
 )
 from sim.scenarios.plant import KT_NM_PER_A, build_model, imu_readings  # noqa: E402
-from sim.scenarios.rust_controller import RustController  # noqa: E402
+from sim.scenarios.rust_controller import DEFAULT_R_EFF_M, RustController  # noqa: E402
 from sim.scenarios.shuttle_run import ShuttleParams, VelocityProfile  # noqa: E402
 
 INK, AMBER, MINT, MUTED, RED = "#16232E", "#F2A24A", "#2AAE97", "#96A8B0", "#C2513B"
@@ -157,7 +157,7 @@ def simulate(
     disturb_fn=None,
     lag_tau_s: float = 0.0,
     bias_rad: float = 0.0,
-    r_eff_m: float = 0.14605,
+    r_eff_m: float = DEFAULT_R_EFF_M,
     est_tau_s: float = 1.0,
     aiding: str = "wheel",
 ) -> Run:
@@ -268,7 +268,7 @@ def validate_replica() -> dict:
     imp = ImperfectionState(profile=STAGE0_PLACEHOLDER, dt_s=dt)
     est = PyComplementary(1.0)
     wheel_accel = PyWheelAccel(0.05)
-    r_eff = 0.14605
+    r_eff = DEFAULT_R_EFF_M
     rust, mine = [], []
 
     prof = VelocityProfile(ShuttleParams())
