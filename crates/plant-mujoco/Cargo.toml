@@ -6,9 +6,17 @@ license.workspace = true
 build = "build.rs"
 
 # No `[dependencies]` on purpose. This crate's entire job (issue #91 / I1a) is
-# proving Rust can call `mj_step` at all through the ~60-line C shim in
+# proving Rust can call `mj_step` at all through the small C shim in
 # src/shim.c -- pulling in more here would blur that.
 [dependencies]
 
 [build-dependencies]
 cc = "1"
+
+# I1b (issue #106): the open-loop `ctrl` replay `tests/test_rust_python_plant_replay_equivalence.py`
+# shells out to, named explicitly rather than left at the file-derived default
+# ("replay") so the CLI name in that test and in the README stays stable if
+# src/bin/replay.rs is ever renamed.
+[[bin]]
+name = "plant-replay"
+path = "src/bin/replay.rs"

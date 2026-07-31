@@ -149,6 +149,12 @@ jobs:
       - name: Build the control library
         run: cargo build --release -p control-ffi
 
+      # I1b (issue #106): tests/test_rust_python_plant_replay_equivalence.py shells out to this
+      # binary to compare the Rust-hosted plant against the Python-hosted one
+      # it runs in-process. Same "fail rather than skip" rule as above.
+      - name: Build the plant-mujoco replay binary
+        run: cargo build --release -p plant-mujoco --bin plant-replay
+
       - name: Scenario acceptance gate
         run: pytest tests/ -v
 
