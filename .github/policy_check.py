@@ -525,8 +525,73 @@ def who(path: str) -> int:
     return 0
 
 
+def drift_report() -> int:
+    """How stale is each doc's `reconciled:` stamp? Reports, never enforces.
+
+    Closes #85, which found five of eight stamps older than the doc's own last
+    edit -- a field that reads as a verified assertion and had become furniture.
+
+    WHY NOT AUTO-ADVANCE IT (the option that issue recommended)
+    ----------------------------------------------------------
+    `reconciled: <sha>` claims "a human checked this doc against that commit."
+    Stamping it automatically whenever the doc is touched would assert that
+    check happened when it did not -- a doc edited to fix a typo, while its
+    covered code changed substantially, would come out stamped as reconciled.
+
+    **A stale stamp is visibly stale. An auto-advanced stamp is invisibly
+    false**, and the second is worse: it manufactures exactly the confidence the
+    field was supposed to earn. The disease here is a field that looks checkable
+    and is not, and auto-advancing cures the symptom by deepening the cause.
+
+    So the stamp keeps meaning one thing only -- somebody ran `--reconcile` at
+    that sha -- and this report makes its age visible instead. Nothing in CI may
+    ever write it.
+    """
+    manifests = doc_manifests()
+    if not manifests:
+        print("drift-report: no docs carry a covers manifest")
+        return 0
+    print("Doc reconciliation -- when did a human last confirm each doc?\n")
+    stale = 0
+    for doc, globs in manifests:
+        rel = str(doc.relative_to(REPO))
+        text = doc.read_text(encoding="utf-8")
+        # Search INSIDE the covers comment, not the whole document. Searching
+        # the full text made a doc that merely discusses the `reconciled:` field
+        # in prose report a stamp of "`" -- which this report found on its first
+        # run, in the claims-manifest doc written earlier today.
+        cm = COVERS.search(text)
+        m = re.search(r"reconciled:\s*(\S+)", cm.group(1)) if cm else None
+        sha = m.group(1) if m else None
+        doc_edit = git("log", "-1", "--format=%cs", "--", rel) or "?"
+        if not sha:
+            print(f"  {rel}\n      NEVER RECONCILED -- no stamp. Doc last edited {doc_edit}")
+            stale += 1
+            continue
+        stamp_date = git("log", "-1", "--format=%cs", sha) or "unknown sha"
+        # How far has the covered code moved since the stamp?
+        moved = git("log", "--oneline", f"{sha}..HEAD", "--", *globs).splitlines() if globs else []
+        flag = ""
+        if stamp_date != "unknown sha" and doc_edit != "?" and stamp_date < doc_edit:
+            flag = "  <-- STAMP OLDER THAN THE DOC'S OWN LAST EDIT"
+            stale += 1
+        print(f"  {rel}")
+        print(f"      reconciled {sha} ({stamp_date}) · doc edited {doc_edit}{flag}")
+        print(f"      covered code has moved {len(moved)} commit(s) since the stamp")
+    print(f"\n  {stale} of {len(manifests)} doc(s) carry a stamp that is behind the doc itself.")
+    print("  This is a REPORT, not a gate. `doc-drift` already forces the doc to be")
+    print("  touched when covered code moves; this says whether anyone then confirmed it.")
+    print("  Advance a stamp only by running --reconcile, and only after actually looking.")
+    return 0
+
+
 def reconcile(doc: str) -> int:
-    """Stamp the current HEAD into a doc's manifest, marking it reconciled."""
+    """Stamp the current HEAD into a doc's manifest, marking it reconciled.
+
+    The ONLY thing that may write this field, and it is invoked by a human on
+    purpose. CI must never call it -- see drift_report() for why an
+    auto-advanced stamp is worse than a stale one.
+    """
     p = REPO / doc
     if not p.is_file():
         print(f"{doc}: not found")
@@ -549,6 +614,8 @@ def main(argv: list[str]) -> int:
     if "--reconcile" in argv:
         i = argv.index("--reconcile")
         return reconcile(argv[i + 1]) if i + 1 < len(argv) else 2
+    if "--drift-report" in argv:
+        return drift_report()
     if "--who" in argv:
         i = argv.index("--who")
         if i + 1 >= len(argv):
