@@ -478,9 +478,12 @@ pub unsafe extern "C" fn ob_controller_update(
     // torque itself, which is fixed by `pitch_in`/`rate_in` alone.
     let proposed_torque_nm = ctl.regulator.update(pitch_in, rate_in, pitch_ref);
     let proposed_amps = proposed_torque_nm / ctl.kt_nm_per_a;
-    let (bounded, sat) = ctl
-        .envelope
-        .apply(Command::MotorCurrent { amps: proposed_amps }, Faults::NONE);
+    let (bounded, sat) = ctl.envelope.apply(
+        Command::MotorCurrent {
+            amps: proposed_amps,
+        },
+        Faults::NONE,
+    );
 
     cmd.amps = match bounded {
         Command::MotorCurrent { amps } => amps,
@@ -718,7 +721,10 @@ mod tests {
         assert_eq!(unsafe { ob_controller_update(hi.0, &o, &mut c_hi) }, OB_OK);
 
         assert_eq!(c_lo.saturated, 1, "kt=0.5: 28 N*m exceeds a 20 N*m ceiling");
-        assert_eq!(c_hi.saturated, 0, "kt=0.9: 28 N*m is within a 36 N*m ceiling");
+        assert_eq!(
+            c_hi.saturated, 0,
+            "kt=0.9: 28 N*m is within a 36 N*m ceiling"
+        );
         assert_eq!(c_lo.amps, 40.0);
         assert!(c_hi.amps < 40.0, "got {}", c_hi.amps);
     }
