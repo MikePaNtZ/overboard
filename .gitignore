@@ -11,3 +11,7 @@ __pycache__/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Local plan-meter observations. Machine- and plan-specific, and a fabricated
+# value here would be silently trusted as a real reading. Never commit one.
+ops/usage-calibration.json
