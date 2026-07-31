@@ -44,8 +44,15 @@ G = 9.81
 
 
 def ctl(**kw):
-    base = dict(kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0,
-                com_above_axle=True)
+    # This script's own kwargs stay amps/rad for backward compatibility with
+    # every dataset already archived against it; the conversion to the
+    # torque-denominated ABI (issue #137) happens right here.
+    if "kp_a_per_rad" in kw:
+        kw["kp_nm_per_rad"] = kw.pop("kp_a_per_rad") * KT_NM_PER_A
+    if "kd_a_per_rad_s" in kw:
+        kw["kd_nm_per_rad_s"] = kw.pop("kd_a_per_rad_s") * KT_NM_PER_A
+    base = dict(kp_nm_per_rad=200.0 * KT_NM_PER_A, kd_nm_per_rad_s=30.0 * KT_NM_PER_A,
+                kt_nm_per_a=KT_NM_PER_A, max_current_a=40.0, com_above_axle=True)
     base.update(kw)
     return RustController(**base)
 

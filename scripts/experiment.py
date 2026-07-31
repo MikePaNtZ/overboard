@@ -74,7 +74,12 @@ def one_run(model, kp, kd, clamp_a, impulse, seconds,
     """
     if com_above_axle is None:
         com_above_axle = plant_summary(model)["inverted_pendulum"]
-    with RustController(kp_a_per_rad=kp, kd_a_per_rad_s=kd, max_current_a=clamp_a,
+    # This script's own CLI/function surface stays amps/rad for backward
+    # compatibility (`--kp 80 --kd 11` keeps meaning what it always meant);
+    # the conversion to the torque-denominated ABI (issue #137) happens right
+    # here, the one place `KT_NM_PER_A` enters this function.
+    with RustController(kp_nm_per_rad=kp * KT_NM_PER_A, kd_nm_per_rad_s=kd * KT_NM_PER_A,
+                        kt_nm_per_a=KT_NM_PER_A, max_current_a=clamp_a,
                         kp_v_rad_per_m_s=kp_v, ki_v_rad_per_m=ki_v, v_ref_m_s=v_ref,
                         com_above_axle=com_above_axle) as ctl:
         r = run(ImpulseParams(magnitude_ns=impulse, sim_seconds=seconds),

@@ -62,9 +62,9 @@ analytic pole.
 
 **Why this doesn't route through `kt`.** `KT_NM_PER_A = 0.7` (`sim/scenarios/plant.py`) is
 explicitly flagged in-repo as an **unfitted guess**. A crossover-frequency derivation from the
-current gains (`kp_a_per_rad × kt`) would inherit that fragility directly. `p` above needs no
-`kt` at all — it is pure mass/geometry/gravity — which is why it is trustworthy where a
-gain-based crossover estimate would not be.
+torque-denominated gains (`kp_nm_per_rad / kt`, issue #137) would inherit that fragility
+directly. `p` above needs no `kt` at all — it is pure mass/geometry/gravity — which is why it
+is trustworthy where a gain-based crossover estimate would not be.
 
 ## 2. The delay budget, line items (AC2)
 

@@ -165,7 +165,9 @@ def test_closed_loop_runs_are_deterministic(model):
 # --------------------------------------------------------------------------
 
 BALLAST_KG, BALLAST_M = 70.0, 0.75
-INNER = dict(kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0)
+# 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A -- the same gains this file
+# gated on before issue #137, re-denominated (200*0.7, 30*0.7).
+INNER = dict(kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0, max_current_a=40.0)
 OUTER = dict(kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True)
 
 
@@ -267,7 +269,7 @@ def test_the_outer_loop_does_not_suit_the_driverless_plant(model):
     """
     import math
 
-    r, c = _run(model, kp_a_per_rad=80.0, kd_a_per_rad_s=11.0, max_current_a=40.0,
+    r, c = _run(model, kp_nm_per_rad=56.0, kd_nm_per_rad_s=7.7, max_current_a=40.0,
                 kp_v_rad_per_m_s=0.20, ki_v_rad_per_m=0.10, com_above_axle=False)
     assert math.degrees(c.peak_abs_pitch_ref_rad) > 4.9, (
         "expected the reference pegged at its clamp; if this now passes "

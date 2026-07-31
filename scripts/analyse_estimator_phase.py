@@ -64,10 +64,12 @@ from sim.scenarios.shuttle_run import ShuttleParams, VelocityProfile  # noqa: E4
 INK, AMBER, MINT, MUTED, RED = "#16232E", "#F2A24A", "#2AAE97", "#96A8B0", "#C2513B"
 
 #: Where the inner loop crosses over, rad/s. From the gain derivation in
-#: `rust_controller.DEFAULT_KP_A_PER_RAD`'s docstring, at the ridden inertia.
+#: `rust_controller.DEFAULT_KP_NM_PER_RAD`'s docstring, at the ridden inertia.
 OMEGA_C = 12.0
 
-GAINS = dict(kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0,
+# 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A, re-denominated in torque (#137).
+GAINS = dict(kp_nm_per_rad=200.0 * KT_NM_PER_A, kd_nm_per_rad_s=30.0 * KT_NM_PER_A,
+             max_current_a=40.0,
              kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True)
 
 #: Beyond this the nose is on the ground. Taken from the MODEL rather than

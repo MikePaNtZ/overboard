@@ -72,8 +72,14 @@ const FORCE_N: [f64; 3] = [-(NOMINAL_IMPULSE_NS / DURATION_S), 0.0, 0.0];
 // wheel_accel_tau_s match control-ffi::ob_controller_new's own defaults /
 // RustController()'s own defaults (issue #121: mode 1, wheel odometry, is
 // now the mode both hosts run -- see the module doc comment).
-const KP_A_PER_RAD: f32 = 80.0;
-const KD_A_PER_RAD_S: f32 = 11.0;
+//
+// Torque-denominated (issue #137): 80 A/rad, 11 A/(rad/s) at kt = 0.7 N*m/A
+// -- the same numbers this binary shipped before #137, re-denominated. `KT`
+// is the one place that conversion happens, applied once below right before
+// `Command::MotorCurrent` is built, mirroring `control-ffi`'s boundary.
+const KP_NM_PER_RAD: f32 = 56.0;
+const KD_NM_PER_RAD_S: f32 = 7.7;
+const KT_NM_PER_A: f32 = 0.7;
 const MAX_CURRENT_A: f32 = 40.0;
 const ESTIMATOR_TAU_S: f32 = 1.0;
 /// `RustController()`'s own default (`sim/scenarios/rust_controller.py`,
@@ -90,8 +96,9 @@ fn main() -> ExitCode {
     };
 
     let params = Params {
-        kp: KP_A_PER_RAD,
-        kd: KD_A_PER_RAD_S,
+        kp_nm_per_rad: KP_NM_PER_RAD,
+        kd_nm_per_rad_s: KD_NM_PER_RAD_S,
+        kt_nm_per_a: KT_NM_PER_A,
         max_current_a: MAX_CURRENT_A,
         ..Params::default()
     };
@@ -112,7 +119,7 @@ fn main() -> ExitCode {
     let mut envelope = Envelope::new(params);
     envelope.arm();
 
-    let regulator = PitchRegulator::new(KP_A_PER_RAD, KD_A_PER_RAD_S);
+    let regulator = PitchRegulator::new(KP_NM_PER_RAD, KD_NM_PER_RAD_S);
     let mut estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
     let mut wheel_accel = WheelAccelEstimator::new(WHEEL_ACCEL_TAU_S);
 
@@ -172,9 +179,12 @@ fn main() -> ExitCode {
         let wheel_rate_rad_s = obs.erpm * RAD_S_PER_ERPM;
         let aiding = wheel_accel.update(wheel_rate_rad_s * DEFAULT_R_EFF_M, dt_s as f32);
         let attitude = estimator.update(std::slice::from_ref(&sample), aiding);
-        let proposed = regulator.update(attitude.pitch_rad, attitude.pitch_rate_rad_s, 0.0);
+        let proposed_torque_nm =
+            regulator.update(attitude.pitch_rad, attitude.pitch_rate_rad_s, 0.0);
+        // The single kt division -- the actuation boundary (issue #137).
+        let proposed_amps = proposed_torque_nm / KT_NM_PER_A;
         let (bounded_cmd, _envelope_sat) =
-            envelope.apply(Command::MotorCurrent { amps: proposed }, Faults::NONE);
+            envelope.apply(Command::MotorCurrent { amps: proposed_amps }, Faults::NONE);
 
         if let Err(e) = backend.apply(&bounded_cmd) {
             eprintln!("impulse-response-rust: apply failed: {e:?}");
