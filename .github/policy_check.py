@@ -259,8 +259,23 @@ def check_turf(roles: dict, rules: list) -> None:
     branch = os.environ.get("POLICY_BRANCH") or git("rev-parse", "--abbrev-ref", "HEAD")
     base = os.environ.get("POLICY_BASE_REF", "origin/master")
 
+    # Match on the LANE, not the literal registry prefix. The registry records
+    # `feat/ops/`, but real branches are also `fix/ops/...`, `docs/ops/...`,
+    # `fix/controls/...`. Matching the whole prefix meant the turf check
+    # SILENTLY SKIPPED every one of those -- seven live branches on origin at
+    # the time this was found, three of them the COO's from the same day, plus
+    # every `fix/`-prefixed branch already merged.
+    #
+    # That is the same failure this check was repaired for in #83: a gate that
+    # reports nothing to enforce is indistinguishable from a gate that passed.
+    # The literal-prefix match is kept as a fallback so a role whose prefix has
+    # no lane segment still resolves.
     prefixes = {m["prefix"]: r for r, m in roles.items() if m["prefix"]}
-    role = next((r for p, r in prefixes.items() if branch.startswith(p)), None)
+    lanes = {p.strip("/").split("/")[-1]: r for p, r in prefixes.items()}
+    seg = branch.split("/")
+    role = lanes.get(seg[1]) if len(seg) >= 2 else None
+    if role is None:
+        role = next((r for p, r in prefixes.items() if branch.startswith(p)), None)
     if role is None:
         # "HEAD" means the workflow did not pass POLICY_BRANCH and we are on a
         # detached checkout -- that is the wiring bug, not an unregistered role.
