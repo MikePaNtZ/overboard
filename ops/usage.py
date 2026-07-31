@@ -74,7 +74,14 @@ ROLE_MAP = Path(__file__).parent / "session-roles.json"
 # would be invisible to dispatch running in ~/projects/overboard-coo, and the
 # gate would silently report "NO CALIBRATION" in the very place that gates.
 # Caught while writing the instructions for taking the first reading.
-CALIBRATION = Path.home() / ".claude" / "overboard-usage-calibration.json"
+# OPS_CALIBRATION_PATH overrides this, for tests only. Added because verifying
+# the gate end to end otherwise means mutating the operator's real calibration --
+# and a check you can only exercise by damaging live state is a check nobody
+# exercises. Never set it in normal use.
+CALIBRATION = Path(os.environ.get(
+    "OPS_CALIBRATION_PATH",
+    Path.home() / ".claude" / "overboard-usage-calibration.json",
+))
 
 # Minimum SEPARATION between two readings before a scale is derived from them.
 # NOT a floor on the reading itself -- under the delta method any first reading
@@ -232,13 +239,41 @@ def rolling_week_m(by_day: dict) -> float:
     return sum(weighted(b) for d, b in by_day.items() if d >= cutoff) / 1e6
 
 
-def calibration() -> list[dict]:
+def _state() -> dict:
     if CALIBRATION.is_file():
         try:
-            return json.loads(CALIBRATION.read_text()).get("observations", [])
-        except (json.JSONDecodeError, AttributeError):
+            d = json.loads(CALIBRATION.read_text())
+            if isinstance(d, dict):
+                return d
+        except json.JSONDecodeError:
             pass
-    return []
+    return {}
+
+
+def _write_state(d: dict) -> None:
+    CALIBRATION.write_text(json.dumps(d, indent=2) + "\n")
+
+
+def calibration() -> list[dict]:
+    return _state().get("observations", [])
+
+
+def stored_threshold() -> float | None:
+    """The dispatch threshold, PERSISTED rather than left in a shell.
+
+    It used to live only in OPS_USAGE_THRESHOLD_PCT. An environment variable is
+    set in one shell and absent in the next, so opening a new terminal silently
+    reverted the gate to reporting -- and a gate that quietly stops gating is
+    the failure this whole file exists to avoid. Same defect the calibration
+    itself had before it moved out of the repo.
+
+    Stored next to the calibration because it describes the same thing: this
+    machine's plan, not any checkout. The env var still WINS when set, so a
+    one-off `OPS_USAGE_THRESHOLD_PCT=10 ... --check` can still be used to prove
+    the gate refuses, without disturbing the stored value.
+    """
+    v = _state().get("threshold_pct")
+    return float(v) if isinstance(v, (int, float)) else None
 
 
 def estimate_pct(week_m: float) -> tuple[float, int] | None:
@@ -310,9 +345,14 @@ def main() -> int:
     env = os.environ.get("OPS_USAGE_CEILING_M")
     ap.add_argument("--ceiling", type=float, default=float(env) if env else None,
                     help="daily ceiling, millions of weighted tokens")
+    # Precedence: --threshold-pct > env var > persisted. The env var stays on top
+    # so a one-off override can prove the gate refuses without editing state.
     tenv = os.environ.get("OPS_USAGE_THRESHOLD_PCT")
-    ap.add_argument("--threshold-pct", type=float, default=float(tenv) if tenv else None,
+    ap.add_argument("--threshold-pct", type=float,
+                    default=float(tenv) if tenv else stored_threshold(),
                     help="refuse to dispatch above this %% of the weekly meter")
+    ap.add_argument("--set-threshold", type=float, metavar="PCT",
+                    help="persist the dispatch threshold so it survives a new shell")
     ap.add_argument("--calibrate", type=float, metavar="PCT",
                     help="record the %% shown in Settings -> Usage right now")
     args = ap.parse_args()
@@ -322,14 +362,32 @@ def main() -> int:
     today_w = weighted(by_day.get(today, {})) / 1e6
     week_m = rolling_week_m(by_day)
 
+    if args.set_threshold is not None:
+        if not (0 < args.set_threshold <= 100):
+            print(f"REFUSED: {args.set_threshold:.0f}% is not a usable threshold.")
+            return 1
+        st = _state()
+        st["threshold_pct"] = args.set_threshold
+        _write_state(st)
+        print(f"threshold persisted: refuse to dispatch above "
+              f"{args.set_threshold:.0f}% of the weekly meter")
+        print(f"  stored in {CALIBRATION}")
+        print("  survives a new shell, and is shared by every worktree")
+        if estimate_pct(week_m) is None:
+            print(f"  NOTE: no usable calibration yet, so this gates NOTHING until two")
+            print(f"  readings at least {MIN_DELTA_PCT:.0f} points apart are on file.")
+        return 0
+
     if args.calibrate is not None:
         if args.calibrate < 0 or args.calibrate > 100:
             print(f"REFUSED: {args.calibrate:.0f}% is not a percentage of a meter.")
             return 1
-        obs = calibration()
+        st = _state()
+        obs = st.get("observations", [])
         obs.append({"observed_at": datetime.now().isoformat(timespec="seconds"),
                     "percent": args.calibrate, "week_m": round(week_m, 2)})
-        CALIBRATION.write_text(json.dumps({"observations": obs}, indent=2) + "\n")
+        st["observations"] = obs
+        _write_state(st)   # preserves threshold_pct rather than clobbering it
         print(f"recorded: bar at {args.calibrate:.0f}%, trailing-7d {week_m:.1f}M weighted")
         est = estimate_pct(week_m)
         if est is None:
