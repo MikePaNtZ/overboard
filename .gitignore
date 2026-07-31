@@ -3,11 +3,6 @@
 /sim/out/*
 !/sim/out/.gitkeep
 
-# Intermediate per-test claims file scripts/emit_claims.py writes during a
-# pytest run, before it is folded into sim/out/claims.json. Regenerated every
-# run, never a source of truth itself.
-/.claims_raw.json
-
 # Python
 __pycache__/
 *.py[cod]

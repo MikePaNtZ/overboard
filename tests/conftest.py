@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,12 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 #
 # Only tests that PASS contribute a claim. `scripts/emit_claims.py` runs the
 # suite in a subprocess and reads the file this module writes at session end
-# (`CLAIMS_RAW_PATH`, default `.claims_raw.json` at the repo root) to build
-# the published `claims.json` -- see that script for the manifest schema.
+# (`CLAIMS_RAW_PATH`, default a system temp path -- deliberately outside the
+# repo tree, so this plumbing needs no .gitignore entry) to build the
+# published `claims.json` -- see that script for the manifest schema.
 # --------------------------------------------------------------------------
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-CLAIMS_RAW_PATH = Path(os.environ.get("CLAIMS_RAW_PATH", _REPO_ROOT / ".claims_raw.json"))
+CLAIMS_RAW_PATH = Path(
+    os.environ.get("CLAIMS_RAW_PATH", Path(tempfile.gettempdir()) / "overboard-claims-raw.json")
+)
 
 #: nodeid -> recorded claim data, populated by `record_claim`.
 _recorded_claims: dict[str, dict] = {}

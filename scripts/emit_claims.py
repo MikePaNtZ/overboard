@@ -29,12 +29,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = REPO_ROOT / "sim" / "out" / "claims.json"
-DEFAULT_RAW_PATH = REPO_ROOT / ".claims_raw.json"
+# Outside the repo tree on purpose -- an intermediate handoff file, never a
+# source of truth, needs no .gitignore entry to avoid polluting `git status`.
+DEFAULT_RAW_PATH = Path(tempfile.gettempdir()) / "overboard-claims-raw.json"
 SCHEMA_VERSION = 1
 
 
@@ -102,7 +105,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--raw-path", type=Path, default=DEFAULT_RAW_PATH,
-        help="intermediate per-test claims file the pytest run writes (default: repo-root .claims_raw.json)",
+        help=f"intermediate per-test claims file the pytest run writes (default: {DEFAULT_RAW_PATH})",
     )
     parser.add_argument(
         "pytest_args", nargs=argparse.REMAINDER,
