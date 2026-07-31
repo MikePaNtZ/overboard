@@ -258,6 +258,14 @@ jobs:
       - name: Build the control library
         run: cargo build --release -p control-ffi
 
+      # I1b (issue #106): tests/test_rust_python_plant_replay_equivalence.py shells out to this
+      # binary, same as the `sim` job above. `Emit claims manifest` below also
+      # runs `pytest tests/`, so without this the equivalence gate's own
+      # "fail rather than pass vacuously" check (added by #117) correctly
+      # fails the suite here too.
+      - name: Build the plant-mujoco replay binary
+        run: cargo build --release -p plant-mujoco --bin plant-replay
+
       # Only tests that PASS contribute a claim (docs/design-claims-manifest.md,
       # issue #61). A red run here still writes a manifest of whatever passed,
       # but the step itself fails loudly -- this job already needs `sim` green,
