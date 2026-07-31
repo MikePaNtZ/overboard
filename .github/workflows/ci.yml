@@ -227,6 +227,14 @@ jobs:
       - name: Build the control library
         run: cargo build --release -p control-ffi
 
+      # Only tests that PASS contribute a claim (docs/design-claims-manifest.md,
+      # issue #61). A red run here still writes a manifest of whatever passed,
+      # but the step itself fails loudly -- this job already needs `sim` green,
+      # so a failure here means the suite is non-deterministic, not that a
+      # single claim quietly went missing.
+      - name: Emit claims manifest
+        run: python scripts/emit_claims.py
+
       - name: Render impulse scenario
         env:
           MUJOCO_GL: osmesa
@@ -381,7 +389,8 @@ jobs:
             sim/out/terrain_truth_metrics.json \
             sim/out/terrain_estimate_metrics.json \
             sim/out/terrain_render_manifest.json \
-            sim/out/sim-run.json
+            sim/out/sim-run.json \
+            sim/out/claims.json
 
       # Per-commit preview. Filenames are sha-stamped and the release is never
       # clobbered wholesale, so every commit on a long-lived feature branch
