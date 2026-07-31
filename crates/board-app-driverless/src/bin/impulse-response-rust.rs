@@ -22,19 +22,19 @@
 //! Nothing here is a new control law -- it is the existing one, driven
 //! through the other seam.
 //!
-//! # Why `estimator_accel_aiding` mode 2 (command feedforward), not mode 1
-//! (wheel odometry)
+//! # Why `estimator_accel_aiding` mode 1 (wheel odometry), matching
+//! `RustController()`'s own default
 //!
-//! `hal::Observation` carries raw IMU and `motor_current_a` (DR-OBS-1) but no
-//! wheel-rate/ERPM channel yet -- `control_core::Controller`'s real wiring
-//! (a separate, later increment) is where that plumbing belongs, not a
-//! throwaway harness. Mode 2 needs only the current already on the
-//! observation, so it is the config this harness can host faithfully today.
+//! An earlier revision of this module's doc claimed `hal::Observation`
+//! "carries raw IMU and `motor_current_a` (DR-OBS-1) but no wheel-rate/ERPM
+//! channel yet" and used mode 2 (command feedforward) instead. **That claim
+//! was wrong** (issue #121): `Observation` has carried `erpm` since DR-OBS-1;
+//! `sim-backend` simply left it at its default. Issue #121 populates `erpm`
+//! from the plant's `wheel_hinge` joint velocity, so this harness now hosts
+//! the SAME mode `RustController()` defaults to and `test_closed_loop.py`
+//! gates on, rather than a mode chosen only because a field was empty.
 //! `tests/test_rust_hosted_impulse_response.py` configures its Python-hosted
-//! comparator identically (same mode, same gain, same gate), rather than
-//! reusing `test_closed_loop.py`'s wheel-odometry default -- the two are not
-//! interchangeable and comparing across the difference would not test this
-//! seam.
+//! comparator identically (same mode, same gain, same gate).
 //!
 //! # Output
 //!
@@ -42,8 +42,8 @@
 //! `peak_abs_pitch_deg`, `t_peak_s`, `settle_time_s` (`-1.0` means "never
 //! settled", mirroring the Python side's `None`), `final_pitch_deg`.
 
-use board_types::{Command, Faults, ImuSample, Params};
-use control_core::{CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator};
+use board_types::{Command, Faults, ImuSample, Params, DEFAULT_R_EFF_M, RAD_S_PER_ERPM};
+use control_core::{ComplementaryFilter, Estimator, PitchRegulator, WheelAccelEstimator};
 use hal::BoardObserve;
 use hal_actuate::BoardActuate;
 use safety::Envelope;
@@ -69,18 +69,18 @@ const FORCE_N: [f64; 3] = [-(NOMINAL_IMPULSE_NS / DURATION_S), 0.0, 0.0];
 // --- Controller config (issue #107 AC6). Kp/Kd/max_current_a/r_eff_m match
 // sim/scenarios/rust_controller.py's DEFAULT_* constants; com_above_axle
 // matches the driverless plant (mass below the axle); estimator_tau_s and
-// the feedforward gain fallback match control-ffi::ob_controller_new's own
-// defaults for these modes. See the module doc comment for why aiding mode 2
-// (command feedforward) is used instead of `RustController()`'s own default
-// (mode 1, wheel odometry).
+// wheel_accel_tau_s match control-ffi::ob_controller_new's own defaults /
+// RustController()'s own defaults (issue #121: mode 1, wheel odometry, is
+// now the mode both hosts run -- see the module doc comment).
 const KP_A_PER_RAD: f32 = 80.0;
 const KD_A_PER_RAD_S: f32 = 11.0;
 const MAX_CURRENT_A: f32 = 40.0;
 const ESTIMATOR_TAU_S: f32 = 1.0;
-/// `control-ffi::ob_controller_new`'s own fallback when
-/// `accel_ff_gain_m_s2_per_a <= 0.0` -- kept identical here so both hosts run
-/// the exact same numeric gain, not two independently-chosen ones.
-const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
+/// `RustController()`'s own default (`sim/scenarios/rust_controller.py`,
+/// `wheel_accel_tau_s`) -- kept identical here so both hosts filter the wheel
+/// speed derivative with the same time constant, not two independently
+/// chosen ones.
+const WHEEL_ACCEL_TAU_S: f32 = 0.05;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -114,8 +114,7 @@ fn main() -> ExitCode {
 
     let regulator = PitchRegulator::new(KP_A_PER_RAD, KD_A_PER_RAD_S);
     let mut estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
-    let feedforward = CommandFeedforward::new(ACCEL_FF_GAIN_M_S2_PER_A);
-    let mut last_amps: f32 = 0.0;
+    let mut wheel_accel = WheelAccelEstimator::new(WHEEL_ACCEL_TAU_S);
 
     // dt used only to size the run and to mirror
     // sim/scenarios/impulse_response.py's `n_steps = round(sim_seconds/dt)`.
@@ -163,17 +162,19 @@ fn main() -> ExitCode {
 
         // Controller: raw IMU -> estimate -> regulate -> envelope, the same
         // chain control-ffi::ob_controller_update runs, reached here through
-        // hal instead of the C ABI.
+        // hal instead of the C ABI. Aiding (mode 1, wheel odometry, issue
+        // #121): `obs.erpm` round-tripped back through the same ICD-sourced
+        // ratio `sim-backend` used to produce it, into ground speed via
+        // `r_eff_m`, then differentiated -- the same
+        // `control-ffi::ob_controller_update` chain, `(None,
+        // wheel_accel.as_mut())` branch, just reached natively.
         let sample = obs.newest_imu().copied().unwrap_or(ImuSample::ZERO);
-        let aiding = feedforward.predict(last_amps);
+        let wheel_rate_rad_s = obs.erpm * RAD_S_PER_ERPM;
+        let aiding = wheel_accel.update(wheel_rate_rad_s * DEFAULT_R_EFF_M, dt_s as f32);
         let attitude = estimator.update(std::slice::from_ref(&sample), aiding);
         let proposed = regulator.update(attitude.pitch_rad, attitude.pitch_rate_rad_s, 0.0);
         let (bounded_cmd, _envelope_sat) =
             envelope.apply(Command::MotorCurrent { amps: proposed }, Faults::NONE);
-        last_amps = match bounded_cmd {
-            Command::MotorCurrent { amps } => amps,
-            Command::RemoteSpeed { .. } => 0.0,
-        };
 
         if let Err(e) = backend.apply(&bounded_cmd) {
             eprintln!("impulse-response-rust: apply failed: {e:?}");
