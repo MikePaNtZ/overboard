@@ -186,9 +186,11 @@ jobs:
   # ONE job renders for both destinations, deliberately. Only the publish step
   # differs by ref:
   #   master  -> rolling `sim-latest` release, stable URLs, feeds the web page.
-  #   PR      -> accumulating `sim-preview` prerelease, sha-stamped filenames,
-  #              giving one immutable URL per commit to paste into the Notion
-  #              implementation log as a feature develops.
+  #   PR      -> accumulating $SIM_PREVIEW_RELEASE prerelease, sha-stamped
+  #              filenames, giving one immutable URL per commit to paste into
+  #              the Notion implementation log as a feature develops. Pruned
+  #              on every publish (issue #116) to stay under GitHub's
+  #              1000-asset-per-release cap; see the job's env block.
   # A second job would have been simpler to read and would have drifted from
   # this one within a release or two; then the clip Mike reviews on a PR would
   # no longer be from the same pipeline as the clip that ships.
@@ -219,6 +221,16 @@ jobs:
         ${{ github.event_name == 'pull_request'
             && github.event.pull_request.head.sha
             || github.sha }}
+      # Issue #116: the original `sim-preview` release hit GitHub's hard
+      # 1000-asset-per-release cap (nothing had ever pruned it) and started
+      # failing every PR. Rolling to a fresh tag resets the cap without
+      # deleting anything from the old release -- every existing sha-stamped
+      # URL under `sim-preview` keeps working, it just stops receiving new
+      # uploads. scripts/prune_sim_preview.py then keeps this from
+      # recurring: ~21 assets land per PR run against the 1000 cap, so
+      # keeping the last 30 runs (~630 assets) leaves real headroom.
+      SIM_PREVIEW_RELEASE: sim-preview-v2
+      SIM_PREVIEW_KEEP_RUNS: "30"
     steps:
       - uses: actions/checkout@v4
 
@@ -252,6 +264,14 @@ jobs:
       # be a lie in the most visible artifact the project produces.
       - name: Build the control library
         run: cargo build --release -p control-ffi
+
+      # I1b (issue #106): tests/test_rust_python_plant_replay_equivalence.py shells out to this
+      # binary, same as the `sim` job above. `Emit claims manifest` below also
+      # runs `pytest tests/`, so without this the equivalence gate's own
+      # "fail rather than pass vacuously" check (added by #117) correctly
+      # fails the suite here too.
+      - name: Build the plant-mujoco replay binary
+        run: cargo build --release -p plant-mujoco --bin plant-replay
 
       # Only tests that PASS contribute a claim (docs/design-claims-manifest.md,
       # issue #61). A red run here still writes a manifest of whatever passed,
@@ -444,23 +464,40 @@ jobs:
           done
           ls -la preview/
 
-          gh release view sim-preview >/dev/null 2>&1 || \
-            gh release create sim-preview \
+          gh release view "$SIM_PREVIEW_RELEASE" >/dev/null 2>&1 || \
+            gh release create "$SIM_PREVIEW_RELEASE" \
               --prerelease \
               --title "Sim previews (feature branches)" \
-              --notes "Per-commit renders from open PRs. Sha-stamped and accumulating; mainline artifacts live in the sim-latest release instead."
+              --notes "Per-commit renders from open PRs. Sha-stamped and accumulating; mainline artifacts live in the sim-latest release instead. Rolled over from the sim-preview release (issue #116), which hit GitHub's 1000-asset cap; its previews are untouched and still resolve, they just stopped receiving new uploads."
           # --clobber so re-running a job for the same sha replaces rather than
           # errors; distinct shas never collide because the name carries one.
-          gh release upload sim-preview --clobber preview/*
+          gh release upload "$SIM_PREVIEW_RELEASE" --clobber preview/*
 
           {
             echo "### Preview artifacts — \`$short\` (\`$BRANCH\`)"
             echo
             for f in preview/*; do
               n="$(basename "$f")"
-              echo "- [\`$n\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/sim-preview/$n)"
+              echo "- [\`$n\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/$SIM_PREVIEW_RELEASE/$n)"
             done
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Issue #116: sim-preview hit GitHub's 1000-asset-per-release cap with
+      # nothing ever removing old previews. This keeps the newest
+      # SIM_PREVIEW_KEEP_RUNS runs' assets in SIM_PREVIEW_RELEASE and deletes
+      # the rest. Scoped to that one release by construction -- the script
+      # only ever lists and deletes assets it fetched from that release's own
+      # asset endpoint, so it has no path to sim-latest or sim-experiments
+      # regardless of what runs here. A prune failure fails this step rather
+      # than reporting green having pruned nothing.
+      - name: Prune old sim-preview assets
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/prune_sim_preview.py \
+            --release "$SIM_PREVIEW_RELEASE" \
+            --keep-runs "$SIM_PREVIEW_KEEP_RUNS"
 
       # Phase C (deferred): notify overboard-web so it redeploys with the new
       # clip. Needs a fine-grained PAT with contents:write on that repo, stored
