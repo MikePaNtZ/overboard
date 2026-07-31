@@ -11,19 +11,25 @@
 set -uo pipefail
 
 # --- The estate ------------------------------------------------------------
-# ALL THREE REPOS, not just the one this script happens to sit in (#103).
+# THE WHOLE ESTATE, not just the one repo this script happens to sit in (#103).
 #
 # This used to run a bare `gh issue list` after cd-ing to the repo root, so it
-# polled exactly one repo of three. Work filed in overboard-web or
+# polled exactly one repo of the estate. Work filed in overboard-web or
 # overboard-viz was labelled, routable in principle, and in no queue anything
 # could see. Worse, --audit asserted "every open issue carries exactly one
 # role: label" and reported green while auditing a third of the estate -- the
 # same reports-green-while-enforcing-nothing failure this script's own comments
 # were written to disown, committed by the script itself.
 #
-# ROLES.md already declares its registry covers all three. The actuator now
-# matches the registry.
-REPOS=(${OPS_REPOS:-MikePaNtZ/overboard MikePaNtZ/overboard-web MikePaNtZ/overboard-viz})
+# ROLES.md already declares its registry covers the estate. The actuator now
+# matches it.
+#
+# overboard-metrics added 2026-07-31 (#114). It is PRIVATE -- `gh` reads it fine
+# when authenticated, and a repo the router cannot read is a HARD ERROR below
+# rather than a silent skip, so a lost token surfaces as a refusal instead of an
+# empty queue. Four repos now, and the count is in the audit output so a fifth
+# appearing unnoticed is visible rather than inferred.
+REPOS=(${OPS_REPOS:-MikePaNtZ/overboard MikePaNtZ/overboard-web MikePaNtZ/overboard-viz MikePaNtZ/overboard-metrics})
 
 # --- 0. Routing integrity -------------------------------------------------
 # Every open issue must carry EXACTLY ONE role: label. Zero labels means the
