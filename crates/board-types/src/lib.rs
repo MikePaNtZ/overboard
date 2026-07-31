@@ -18,6 +18,23 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Loaded rolling radius, metres — the FFI-boundary / ridden-mode default for
+/// [`RunMetadata::r_eff_m`].
+///
+/// Must equal the sim model's compiled `wheel_geom` radius
+/// (`sim/models/overboard_onewheel.xml`) and the Python-side
+/// `sim.scenarios.rust_controller.DEFAULT_R_EFF_M`, which is checked directly
+/// against the compiled model by `tests/test_r_eff_matches_model.py`. This
+/// constant is the single Rust-side source — every `crates/` site that needs
+/// a default `r_eff_m` imports it rather than hand-copying the literal
+/// (issue #89; a stale `0.14605` m hand-copy, physically impossible as a
+/// *loaded* radius larger than the tyre's own unloaded geometry, is what
+/// #76/#89 replaced it for).
+///
+/// This is a sim-consistency placeholder, not a bench measurement — Stage-0's
+/// eventual bench-measured loaded rolling radius (ICD §10.5) supersedes it.
+pub const DEFAULT_R_EFF_M: f32 = 0.1454;
+
 // ---------------------------------------------------------------------------
 // Commands — ICD §7.5
 // ---------------------------------------------------------------------------
@@ -356,6 +373,15 @@ pub struct RunMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_r_eff_m_is_the_documented_145_4mm() {
+        // Regression pin mirroring
+        // tests/test_r_eff_matches_model.py::test_model_wheel_radius_is_the_documented_145_4mm
+        // on the Python side. This crate has no MuJoCo binding to check
+        // against the compiled model directly; that check lives in Python.
+        assert_eq!(DEFAULT_R_EFF_M, 0.1454);
+    }
 
     #[test]
     fn command_zero_is_zero_amps() {

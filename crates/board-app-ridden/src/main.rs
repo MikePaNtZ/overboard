@@ -15,7 +15,9 @@
 //! clamp stage runs and its result is printed, then discarded — there is
 //! nowhere in this binary to send it.
 
-use board_types::{IoError, Observation, Params, Profile, RunMetadata, ValidityFlags};
+use board_types::{
+    IoError, Observation, Params, Profile, RunMetadata, ValidityFlags, DEFAULT_R_EFF_M,
+};
 use control_core::Controller;
 use hal::BoardObserve;
 use safety::Envelope;
@@ -66,7 +68,7 @@ impl BoardObserve for ShadowBackend {
             control_rate_hz: 1e9 / CYCLE_NS as f32,
             params: Params::default(),
             imu_mounting_rotation: [1.0, 0.0, 0.0, 0.0],
-            r_eff_m: 0.14605,
+            r_eff_m: DEFAULT_R_EFF_M,
             imperfection_profile_id: None,
             schema_hash: [0; 32],
             binary_hash: [0; 32],

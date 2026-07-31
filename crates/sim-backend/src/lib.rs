@@ -29,7 +29,7 @@
 
 use board_types::{
     Applied, Command, DisarmReason, ImuSample, IoError, Observation, Params, Profile, RunMetadata,
-    Saturation, ValidityFlags,
+    Saturation, ValidityFlags, DEFAULT_R_EFF_M,
 };
 use hal::{BoardObserve, CallSequence};
 use hal_actuate::{BoardActuate, Disarm};
@@ -139,7 +139,7 @@ impl BoardObserve for SimBackend {
             control_rate_hz: 1e9 / CYCLE_NS as f32,
             params: self.params,
             imu_mounting_rotation: [1.0, 0.0, 0.0, 0.0],
-            r_eff_m: 0.14605,
+            r_eff_m: DEFAULT_R_EFF_M,
             imperfection_profile_id: None,
             schema_hash: [0; 32],
             binary_hash: [0; 32],
