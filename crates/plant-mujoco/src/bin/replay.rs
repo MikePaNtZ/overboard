@@ -1,6 +1,6 @@
 //! Open-loop `ctrl` replay binary for I1b (issue #106).
 //!
-//! `tests/test_plant_equivalence.py` builds this once (`cargo build --release
+//! `tests/test_rust_python_plant_replay_equivalence.py` builds this once (`cargo build --release
 //! -p plant-mujoco --bin plant-replay`) and then shells out to it for every
 //! scenario model, exactly the way `sim/scenarios/rust_controller.py` shells
 //! out to `control-ffi` for the closed-loop gate. It exists to make the

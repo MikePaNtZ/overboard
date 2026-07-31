@@ -14,7 +14,7 @@ default) replays a recorded `ctrl` sequence open-loop and writes `[time, qpos, q
 raw little-endian `f64`s to a file — the Rust-hosted half of the comparison, reachable from
 `pytest` the same way `sim/scenarios/rust_controller.py` shells out to `control-ffi`.
 
-**`tests/test_plant_equivalence.py`**: the actual gate. Generates a deterministic pseudo-random
+**`tests/test_rust_python_plant_replay_equivalence.py`**: the actual gate. Generates a deterministic pseudo-random
 `ctrl` sequence ONCE in Python (fixed seed, scaled to each model's own `actuator_ctrlrange`),
 writes it as raw bytes, replays those identical bytes through both hosts — Python in-process
 (`mujoco.MjData`/`mujoco.mj_step`, mirroring `sim/scenarios/impulse_response.py`'s per-step
@@ -59,7 +59,7 @@ warnings` clean; `cargo build --workspace --all-targets` clean; `cargo test --wo
 green including 7 `plant-mujoco` unit tests (3 new: dimensions, `set_ctrl` changes the
 trajectory, `set_ctrl` panics on wrong length); `cargo run -p xtask -- gate` — `plant-mujoco`
 still unreachable from `board-app-ridden`; `cargo build --release -p control-ffi` then `pytest
-tests/ -q` → 261 passed, 2 xfailed (258 + the 3 new `test_plant_equivalence.py` tests). All run
+tests/ -q` → 261 passed, 2 xfailed (258 + the 3 new `test_rust_python_plant_replay_equivalence.py` tests). All run
 with `MUJOCO_DIR` pointed at a local venv's pip-installed `mujoco==3.10.0` package directory
 (macOS; see #112 note above for why that env var was needed locally when CI's wheel-probe
 fallback alone would suffice on Linux).

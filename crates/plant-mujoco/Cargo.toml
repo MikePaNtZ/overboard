@@ -13,7 +13,7 @@ build = "build.rs"
 [build-dependencies]
 cc = "1"
 
-# I1b (issue #106): the open-loop `ctrl` replay `tests/test_plant_equivalence.py`
+# I1b (issue #106): the open-loop `ctrl` replay `tests/test_rust_python_plant_replay_equivalence.py`
 # shells out to, named explicitly rather than left at the file-derived default
 # ("replay") so the CLI name in that test and in the README stays stable if
 # src/bin/replay.rs is ever renamed.

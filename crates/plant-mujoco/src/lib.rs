@@ -2,7 +2,7 @@
 //! (issue #106) with the `ctrl`-in / `qpos`+`qvel`-out surface a bit-for-bit
 //! open-loop replay against the Python-hosted plant needs (see
 //! `crates/plant-mujoco/README.md`'s "Ordering contract" section, and
-//! `tests/test_plant_equivalence.py`).
+//! `tests/test_rust_python_plant_replay_equivalence.py`).
 //!
 //! [`Plant`] is a thin owning wrapper around one `mjModel` + one `mjData`,
 //! reached only through `src/shim.c`'s small, opaque-handle C surface

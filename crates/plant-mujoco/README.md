@@ -34,7 +34,7 @@ package. CI (`ubuntu-latest`) is unaffected. Locally, invoking through
 `cargo run`/`cargo test` (not the raw built artifact) works around it: Cargo
 adds the linked library's `OUT_DIR` to `DYLD_LIBRARY_PATH` for every `cargo
 test`/`cargo run` in the same invocation (see the comment in `build.rs`),
-which `tests/test_plant_equivalence.py` relies on for exactly this reason.
+which `tests/test_rust_python_plant_replay_equivalence.py` relies on for exactly this reason.
 
 ## Ordering contract (I1b, issue #106)
 
@@ -42,7 +42,7 @@ This is the canonical repo-local record of the seams a Rust-hosted vs
 Python-hosted MuJoCo comparison is sensitive to. **The canonical ICD entry
 lives in Notion** and needs this same list mirrored into it by the COO --
 this crate cannot reach Notion, so it is not attempted here. Both hosts
-(`src/bin/replay.rs` here; `tests/test_plant_equivalence.py`'s
+(`src/bin/replay.rs` here; `tests/test_rust_python_plant_replay_equivalence.py`'s
 `_python_hosted_replay`, mirroring `sim/scenarios/impulse_response.py` and
 its siblings) make the SAME choice on every one of these:
 
@@ -55,7 +55,7 @@ its siblings) make the SAME choice on every one of these:
 | `qacc_warmstart` carry-over | Neither host calls `mj_forward` (or anything else) before the first `mj_step`, so both start it from an identical, freshly-zeroed warmstart. The CONTROLLED scenarios (`impulse_response.py` etc.) call `mj_forward` once before their loop to prime `sensordata` for a controller's first cycle -- this open-loop replay has no controller and deliberately skips that call rather than adding an extra state-perturbing step neither host's "real" usage agrees on. |
 | Python-side substepping / frame-skip | None. One recorded `ctrl` sample maps to exactly one `mj_step` call, on both hosts. |
 
-`tests/test_plant_equivalence.py` is the test that holds all six of these to
+`tests/test_rust_python_plant_replay_equivalence.py` is the test that holds all six of these to
 account: it replays a recorded `ctrl` sequence (2000 steps, generated once in
 Python with a fixed seed, handed to the Rust binary as raw bytes so no
 transcendental function is ever computed twice by two languages) through
