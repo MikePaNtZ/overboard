@@ -1,14 +1,17 @@
 # Digital Content Production — working context
 
-- **Worktree:** `~/projects/overboard-viz` (ADR-0006: one worktree per role, never share a working directory)
+- **Worktrees:** `~/projects/overboard-viz` is where this role's work lives; `~/projects/overboard-web-dcp`
+  for deliveries into `overboard-web/assets/`; `~/projects/overboard-dcp` for this repo. Never
+  `~/projects/overboard-web` — another role's. (ADR-0006: one worktree per role.)
 - **Registry:** [`docs/decisions/ROLES.md`](../../docs/decisions/ROLES.md)
 - **Read first:** [`docs/decisions/INDEX.md`](../../docs/decisions/INDEX.md)
 
-## Current sub-goals
-- **Blocking the first public announcement:** produce a clip showing the *weighted* board. The
-  whole argument is that mass is the variable; a clip of an empty board does not show it.
-  Must be a **Sim Replay** (generated from a real run), not **Concept**.
-- Building the sim-run → video pipeline.
+## In flight
+
+- **Waiting on Sr. Digital Marketer:** `index.html:15` points `og:image` at a placeholder domain,
+  not the delivered `assets/og.png`, so the card still does not render and overboard-viz#11 is not
+  closed. Needs an absolute URL — land it with `feat/web/custom-domain`.
+- **Next:** overboard-viz#6, also the only route to a post-fix board-riding track. Then #4.
 
 ## ⚠️ Standing risk for this role
 Work was reported uncommitted, unbacked-up, and **on another role's branch**. That is the exact
@@ -21,9 +24,9 @@ session with a commit.
 
 ## Decisions made (edit in place — completed work goes in log/, not here)
 
-- **The ride the weighted-board sub-goal needs already exists: `sim/scenarios/terrain.py`.**
-  It runs a 70 kg ballast with a rider figure by default, so a terrain clip *is* a clip of the
-  weighted board, and it is a Sim Replay. Filming it does not need a new scenario.
+- **The weighted board IS the terrain ride, and it has shipped.** `sim/scenarios/terrain.py` runs a
+  70 kg ballast with a rider figure by default, so a terrain clip *is* a clip of the weighted board,
+  and it is a Sim Replay. It never needed a new scenario.
 - **The source tag is a renderer parameter (`--source`), never a literal.** Real telemetry runs
   the same code path with no change to it. Categories stay defined only in the shared vocabulary
   and are not restated in code or in `docs/web-artifact-pipeline.md`.
@@ -44,6 +47,14 @@ session with a commit.
 
 ## Known dead ends
 
+- **Nothing board-riding can be rendered from `overboard-viz`'s committed tracks.** `closed_loop`,
+  `shuttle_run`, `impulse` and `cruise` **all predate the IMU frame-map fix** — 2026-07-26 before
+  15:08 −0700; the fix is `5c1d11c` at 15:08:24. Only `bench_identify_*` is post-fix and that is
+  the bench rig. Until overboard-viz#6 lands, the `sim-latest` terrain artifacts are the **only**
+  post-fix board-riding imagery in existence.
+- **Do not frame a share card "around the HUD".** The HUD sits to the board's left, so cropping
+  past it puts the board where a centre square crop discards it — invisibly, since the 1200×630
+  still looks correct. Centre the subject, keep the HUD; a test pins it.
 - **Drawing the grade as a wedge at the true slope angle is unreadable.** 8% is 4.6°, which at
   HUD-panel scale is indistinguishable from flat. Do not exaggerate it to compensate — show the
   number, the direction as a word, a bar against the profile's peak, and a ground-profile strip
@@ -61,7 +72,8 @@ session with a commit.
   drift backwards off the start crest during the 2 s settle; truth pitch recovers and rides on,
   the estimate does not and puts the nose in at 3.29 s, 0.8 m *behind* the start. The scenario's
   own `struck_phase` reports "descent" because its classifier buckets negative travel there.
-  Caption it as what it is.
+  Caption it as what it is — and note this now ships as a `caption_warning` in the clip's
+  provenance sidecar, because whoever writes the copy reads that, not this file.
 
 ## Vocabulary
 
