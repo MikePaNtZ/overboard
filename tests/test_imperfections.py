@@ -10,10 +10,13 @@ import numpy as np
 import pytest
 
 from sim.scenarios.imperfections import (
+    CONFORMANCE_SCHEMA,
     IDEAL,
+    STAGE0_CUTBACK,
     STAGE0_PLACEHOLDER,
     ImperfectionProfile,
     ImperfectionState,
+    conformance_vectors,
 )
 from sim.scenarios.impulse_response import NOMINAL_IMPULSE_NS, ImpulseParams, run
 from sim.scenarios.plant import build_model
@@ -144,6 +147,126 @@ def test_wheel_rate_is_held_between_updates_not_interpolated():
     assert st.wheel_rate(1.0, 0.000) == pytest.approx(1.0)
     assert st.wheel_rate(5.0, 0.005) == pytest.approx(1.0), "should still hold the old sample"
     assert st.wheel_rate(5.0, 0.011) == pytest.approx(5.0), "and refresh after 10 ms"
+
+
+# --------------------------------------------------------------------------
+# The cross-language conformance contract
+#
+# `crates/sim-backend` hosts the real plant through the `hal` seam and carries
+# no profile at all -- it stamps `imperfection_profile_id: None`. Closing that
+# is Senior Controls' to wire (`crates/` is their turf) and mine to specify.
+# These tests pin what the vectors must keep proving; the vectors carry it
+# across the language boundary so nobody re-derives the semantics from Python.
+# --------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def vectors():
+    return conformance_vectors()
+
+
+def test_the_vectors_cover_every_non_ideal_profile_at_every_timestep(vectors):
+    """Both models, both profiles. The delay row is expressed in SECONDS, so a
+    host can be conforming at one timestep and wrong at the other -- covering
+    only the onewheel would leave the bench rig's 0.5 ms unchecked, which is
+    where every identification number comes from."""
+    assert vectors["schema"] == CONFORMANCE_SCHEMA
+    got = {(c["profile_id"], c["model"]) for c in vectors["cases"]}
+    assert got == {
+        (p.profile_id, m)
+        for p in (STAGE0_PLACEHOLDER, STAGE0_CUTBACK)
+        for m in ("overboard_onewheel", "bench_rig")
+    }
+
+
+def test_the_vectors_refuse_the_ideal_profile(vectors):
+    """Conforming to a profile that models nothing proves nothing, and would
+    let a host claim conformance while reproducing pass-through."""
+    assert IDEAL.profile_id not in {c["profile_id"] for c in vectors["cases"]}
+
+
+def test_the_vectors_carry_the_half_cycle_delay_case(vectors):
+    """At the onewheel's 2 ms the ICD's 1 ms delay is exactly half a cycle --
+    the case that once rounded away to zero and deleted the imperfection while
+    appearing to model it. If the vectors ever stop straddling a sample, they
+    stop testing the thing most likely to be got wrong twice."""
+    for case in vectors["cases"]:
+        if case["model"] != "overboard_onewheel":
+            continue
+        cycles = case["profile"]["actuation_delay_s"] / case["dt_s"]
+        assert cycles % 1.0 != 0.0, "delay no longer straddles two samples"
+
+
+def test_the_quantiser_rounds_half_to_even_and_the_vectors_say_so(vectors):
+    """THE TRAP THIS SET EXISTS FOR. `np.round` is round-half-to-EVEN; Rust's
+    `f64::round` is round-half-away-from-zero. They disagree at exactly the
+    half-quantum values a quantiser lands on constantly -- 0.5 -> 0 not 1,
+    2.5 -> 2 not 3 -- by one whole ERPM, in a direction that flips with the
+    value. Four of these nine differ. A Rust implementation that reaches for
+    `f64::round` fails here and nowhere else, which is why the halves are in
+    the vectors and why the rule is declared in the blob rather than left for
+    someone to infer from the numbers.
+    """
+    assert vectors["rounding"] == "half-to-even"
+    expected = {0.5: 0.0, 1.5: 2.0, 2.5: 2.0, 3.5: 4.0, 4.5: 4.0,
+                -0.5: -0.0, -1.5: -2.0, -2.5: -2.0, -3.5: -4.0}
+    for case in vectors["cases"]:
+        qz = case["wheel_rate_quantisation"]
+        q = case["profile"]["wheel_rate_quantum_rad_s"]
+        seen = dict(zip(qz["quantum_multiple"], qz["reported_rad_s"]))
+        for k, want in expected.items():
+            assert seen[k] / q == pytest.approx(want, abs=1e-9), (
+                f"{k} quanta reported as {seen[k] / q:.3f}, expected {want} "
+                "(half-to-even)"
+            )
+
+
+def test_the_chain_saturates_before_it_delays(vectors):
+    """Order is part of the contract: cutback, then clamp, then delay, then
+    lag. A host that clamps AFTER the lag passes a step test and still lets a
+    999 A command through as a transient; a host that delays before clamping
+    saturates a cycle late. Both are invisible until a scenario saturates,
+    which is exactly when the anti-windup path is being exercised."""
+    assert vectors["chain_order"] == [
+        "cutback", "saturate", "transport_delay", "current_loop_lag"]
+    for case in vectors["cases"]:
+        act = case["apply_current"]
+        cap = case["profile"]["max_current_a"]
+        assert max(abs(a) for a in act["applied_a"]) <= cap + 1e-12, (
+            "a 999 A command reached the output, so the clamp is downstream "
+            "of the lag")
+        first = act["commanded_a"].index(999.0)
+        assert abs(act["applied_a"][first]) < 0.9 * cap, (
+            "the cap arrived instantly, so delay and lag are upstream of the "
+            "clamp rather than downstream")
+
+
+def test_the_actuation_vectors_actually_move_the_cutback_cap(vectors):
+    """A cutback case swept at one wheel speed would let a host treat the cap
+    as a constant and still pass. The wheel-rate sweep has to make the cap
+    move DURING the run, or the row is decorative."""
+    for case in vectors["cases"]:
+        if case["profile_id"] != STAGE0_CUTBACK.profile_id:
+            continue
+        caps = set(case["apply_current"]["available_a"])
+        assert len(caps) > 3, f"cap barely moves across the sweep: {sorted(caps)}"
+
+
+def test_the_vectors_are_reproducible(vectors):
+    """The deterministic rows must not touch the profile's RNG. If a noise
+    draw ever leaks into the actuation or wheel-rate path, this is what
+    catches it -- and it would otherwise present to Controls as an
+    unreproducible Rust conformance failure, which is the most expensive
+    possible way to find out."""
+    assert conformance_vectors() == vectors
+
+
+def test_the_vectors_survive_a_strict_json_round_trip(vectors):
+    """`allow_nan=False` is deliberate: NaN and Infinity are not JSON, and a
+    Rust `serde_json` reader would reject the file rather than the value. Fail
+    here, in the generator's own test, not in another role's build."""
+    import json
+
+    assert json.loads(json.dumps(vectors, allow_nan=False)) == vectors
 
 
 # --------------------------------------------------------------------------
