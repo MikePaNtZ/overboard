@@ -74,7 +74,9 @@ def test_the_control_library_is_actually_built():
 
 
 def test_abi_version_is_the_one_this_glue_was_written_against(controller):
-    assert controller.abi_version == 1
+    # Bumped 1 -> 2 by issue #137: ObParamsV1 renamed two fields and gained
+    # kt_nm_per_a, which the `size` guard alone cannot certify as compatible.
+    assert controller.abi_version == 2
 
 
 @pytest.mark.claim(

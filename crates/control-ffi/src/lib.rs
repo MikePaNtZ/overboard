@@ -39,9 +39,20 @@ use control_core::{
 };
 use safety::Envelope;
 
-/// Bumped only for an incompatible change to the *function* signatures.
-/// Growing a struct is handled by its `size` field, not by this.
-pub const ABI_VERSION: u32 = 1;
+/// Bumped for an incompatible change to the *function* signatures, OR to a
+/// struct's field layout (renamed/reordered/retyped fields) -- anything the
+/// `size` guard cannot catch on its own. `size` only proves the byte count
+/// matches; it says nothing about what those bytes mean. Growing a struct
+/// with a purely additive new field at the end, with existing fields
+/// untouched, is still handled by `size` alone and does not need a bump.
+///
+/// Bumped to 2 by issue #137: `ObParamsV1` renamed two fields
+/// (`kp_a_per_rad`/`kd_a_per_rad_s` -> `kp_nm_per_rad`/`kd_nm_per_rad_s`) and
+/// is now `ObParamsV2`. A caller still holding the old ctypes struct has the
+/// same `size` in the lucky case and a different one otherwise, but even a
+/// same-`size` collision must not be told "compatible" -- that is silent
+/// misreading of memory, exactly what the version field exists to prevent.
+pub const ABI_VERSION: u32 = 2;
 
 /// Motor torque constant fallback, N·m per amp — mirrors
 /// `sim/scenarios/plant.py::KT_NM_PER_A`. **Unfitted placeholder**, same
@@ -63,7 +74,7 @@ pub const OB_ERR_NOT_FINITE: i32 = -3;
 /// Controller gains and envelope limits.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct ObParamsV1 {
+pub struct ObParamsV2 {
     pub size: u32,
     /// Proportional gain, **N·m per radian** of nose-up-positive pitch
     /// (issue #137 — a property of the plant, not the motor).
@@ -259,14 +270,14 @@ pub extern "C" fn ob_abi_version() -> u32 {
 /// Construct a controller. Returns null on a null or mis-sized `params`.
 ///
 /// # Safety
-/// `params` must point to a valid `ObParamsV1`.
+/// `params` must point to a valid `ObParamsV2`.
 #[no_mangle]
-pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut ObController {
+pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV2) -> *mut ObController {
     if params.is_null() {
         return core::ptr::null_mut();
     }
     let p = unsafe { &*params };
-    if p.size as usize != core::mem::size_of::<ObParamsV1>() {
+    if p.size as usize != core::mem::size_of::<ObParamsV2>() {
         return core::ptr::null_mut();
     }
 
@@ -507,9 +518,9 @@ pub unsafe extern "C" fn ob_controller_update(
 mod tests {
     use super::*;
 
-    fn params() -> ObParamsV1 {
-        ObParamsV1 {
-            size: core::mem::size_of::<ObParamsV1>() as u32,
+    fn params() -> ObParamsV2 {
+        ObParamsV2 {
+            size: core::mem::size_of::<ObParamsV2>() as u32,
             // 80 A/rad, 11 A/(rad/s) at kt = 0.7 N*m/A -- the same numbers
             // this crate shipped before issue #137, re-denominated.
             kp_nm_per_rad: 56.0,

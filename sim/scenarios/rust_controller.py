@@ -78,9 +78,13 @@ _ERR = {
 }
 
 
-class ObParams(ctypes.Structure):
-    # Field order and types MUST match `control_ffi::ObParamsV1` exactly --
-    # this is a raw C ABI struct, not a name-matched binding.
+class ObParamsV2(ctypes.Structure):
+    # Field order and types MUST match `control_ffi::ObParamsV2` exactly --
+    # this is a raw C ABI struct, not a name-matched binding. Named V2, not
+    # ObParams, because it IS versioned: issue #137 renamed two fields and
+    # bumped `ob_abi_version()` from 1 to 2 for exactly that reason -- an
+    # unversioned name is how the NEXT field rename gets made against a
+    # struct that looks unversioned and isn't.
     _fields_ = [
         ("size", ctypes.c_uint32),
         ("kp_nm_per_rad", ctypes.c_float),
@@ -206,7 +210,7 @@ class RustController:
         self.lib_path = path
 
         lib.ob_abi_version.restype = ctypes.c_uint32
-        lib.ob_controller_new.argtypes = [ctypes.POINTER(ObParams)]
+        lib.ob_controller_new.argtypes = [ctypes.POINTER(ObParamsV2)]
         lib.ob_controller_new.restype = ctypes.c_void_p
         lib.ob_controller_arm.argtypes = [ctypes.c_void_p]
         lib.ob_controller_arm.restype = ctypes.c_int32
@@ -221,8 +225,8 @@ class RustController:
 
         self.abi_version = int(lib.ob_abi_version())
 
-        params = ObParams(
-            size=ctypes.sizeof(ObParams),
+        params = ObParamsV2(
+            size=ctypes.sizeof(ObParamsV2),
             kp_nm_per_rad=kp_nm_per_rad,
             kd_nm_per_rad_s=kd_nm_per_rad_s,
             kt_nm_per_a=kt_nm_per_a,

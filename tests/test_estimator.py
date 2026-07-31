@@ -499,7 +499,7 @@ def test_the_default_current_source_survives_a_backend_that_reports_nothing():
     )
     assert r.metrics.nose_strike, (
         "trusting an unpopulated motor_current_a should fail LOUDLY. If this "
-        "now survives, the default in ObParamsV1 can safely become MEASURED"
+        "now survives, the default in ObParamsV2 can safely become MEASURED"
     )
 
 
