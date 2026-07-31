@@ -25,16 +25,31 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .plant import KT_NM_PER_A
+
 REPO = Path(__file__).resolve().parents[2]
 
-#: Default gains, AMPS PER RADIAN of nose-up-positive pitch (ICD 10.1).
+#: Default gains, N*m PER RADIAN of nose-up-positive pitch (ICD 10.1).
 #:
-#: Chosen analytically, not tuned: with effective pitch inertia ~0.403 kg*m^2,
-#: restoring stiffness m*g*l = 2.354 N*m/rad and kt = 0.7 N*m/A, these place the
-#: closed-loop pole pair at omega ~= 12 rad/s with zeta ~= 0.8 -- about 5x the
-#: plant's own 2.42 rad/s. They are a starting point for a sweep, not a result.
-DEFAULT_KP_A_PER_RAD = 80.0
-DEFAULT_KD_A_PER_RAD_S = 11.0
+#: Issue #137: re-denominated from amps to torque. `kt` no longer appears in
+#: these numbers at all -- they are 80 A/rad and 11 A/(rad/s) (this module's
+#: pre-#137 defaults) multiplied through by the SAME `KT_NM_PER_A` the plant
+#: uses, so a run at `DEFAULT_KT_NM_PER_A` reproduces the pre-#137 amps
+#: exactly. Chosen analytically, not tuned: with effective pitch inertia
+#: ~0.403 kg*m^2, restoring stiffness m*g*l = 2.354 N*m/rad and kt = 0.7
+#: N*m/A, these place the closed-loop pole pair at omega ~= 12 rad/s with
+#: zeta ~= 0.8 -- about 5x the plant's own 2.42 rad/s. They are a starting
+#: point for a sweep, not a result.
+DEFAULT_KP_NM_PER_RAD = 56.0
+DEFAULT_KD_NM_PER_RAD_S = 7.7
+
+#: Motor torque constant, N*m per amp -- the controller's OWN belief about
+#: kt, used only to convert its torque law into the amps the drive accepts
+#: (issue #137). Mirrors `plant.KT_NM_PER_A` so that, by default, the
+#: controller's assumption matches the plant it is actually driving; passing
+#: a different value here is exactly how a `kt` error is modelled as a
+#: headroom error instead of a gain error.
+DEFAULT_KT_NM_PER_A = KT_NM_PER_A
 
 #: Envelope clamp, amps. Matches the model's derived ctrlrange (40 A * kt).
 DEFAULT_MAX_CURRENT_A = 40.0
@@ -63,11 +78,18 @@ _ERR = {
 }
 
 
-class ObParams(ctypes.Structure):
+class ObParamsV2(ctypes.Structure):
+    # Field order and types MUST match `control_ffi::ObParamsV2` exactly --
+    # this is a raw C ABI struct, not a name-matched binding. Named V2, not
+    # ObParams, because it IS versioned: issue #137 renamed two fields and
+    # bumped `ob_abi_version()` from 1 to 2 for exactly that reason -- an
+    # unversioned name is how the NEXT field rename gets made against a
+    # struct that looks unversioned and isn't.
     _fields_ = [
         ("size", ctypes.c_uint32),
-        ("kp_a_per_rad", ctypes.c_float),
-        ("kd_a_per_rad_s", ctypes.c_float),
+        ("kp_nm_per_rad", ctypes.c_float),
+        ("kd_nm_per_rad_s", ctypes.c_float),
+        ("kt_nm_per_a", ctypes.c_float),
         ("max_current_a", ctypes.c_float),
         ("kp_v_rad_per_m_s", ctypes.c_float),
         ("ki_v_rad_per_m", ctypes.c_float),
@@ -153,8 +175,9 @@ class RustController:
 
     def __init__(
         self,
-        kp_a_per_rad: float = DEFAULT_KP_A_PER_RAD,
-        kd_a_per_rad_s: float = DEFAULT_KD_A_PER_RAD_S,
+        kp_nm_per_rad: float = DEFAULT_KP_NM_PER_RAD,
+        kd_nm_per_rad_s: float = DEFAULT_KD_NM_PER_RAD_S,
+        kt_nm_per_a: float = DEFAULT_KT_NM_PER_A,
         max_current_a: float = DEFAULT_MAX_CURRENT_A,
         kp_v_rad_per_m_s: float = 0.0,
         ki_v_rad_per_m: float = 0.0,
@@ -187,7 +210,7 @@ class RustController:
         self.lib_path = path
 
         lib.ob_abi_version.restype = ctypes.c_uint32
-        lib.ob_controller_new.argtypes = [ctypes.POINTER(ObParams)]
+        lib.ob_controller_new.argtypes = [ctypes.POINTER(ObParamsV2)]
         lib.ob_controller_new.restype = ctypes.c_void_p
         lib.ob_controller_arm.argtypes = [ctypes.c_void_p]
         lib.ob_controller_arm.restype = ctypes.c_int32
@@ -202,10 +225,11 @@ class RustController:
 
         self.abi_version = int(lib.ob_abi_version())
 
-        params = ObParams(
-            size=ctypes.sizeof(ObParams),
-            kp_a_per_rad=kp_a_per_rad,
-            kd_a_per_rad_s=kd_a_per_rad_s,
+        params = ObParamsV2(
+            size=ctypes.sizeof(ObParamsV2),
+            kp_nm_per_rad=kp_nm_per_rad,
+            kd_nm_per_rad_s=kd_nm_per_rad_s,
+            kt_nm_per_a=kt_nm_per_a,
             max_current_a=max_current_a,
             kp_v_rad_per_m_s=kp_v_rad_per_m_s,
             ki_v_rad_per_m=ki_v_rad_per_m,

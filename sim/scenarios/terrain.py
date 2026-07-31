@@ -382,7 +382,8 @@ def run(
 
         def controller_factory():
             return RustController(
-                kp_a_per_rad=200.0, kd_a_per_rad_s=30.0,
+                # 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A, re-denominated (#137).
+                kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0,
                 max_current_a=params.max_current_a,
                 kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02,
                 com_above_axle=True, v_ref_fn=v_ref_at,
