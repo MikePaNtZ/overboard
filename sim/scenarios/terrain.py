@@ -208,6 +208,15 @@ class TerrainResult:
     pitch_est_deg: np.ndarray = field(default_factory=lambda: np.empty(0))
     motor_current_a: np.ndarray = field(default_factory=lambda: np.empty(0))
 
+    qpos: np.ndarray = field(default_factory=lambda: np.empty(0))
+    """Full state history, one row per step, when run(capture_state=True).
+
+    The renderer REPLAYS this rather than re-stepping the physics, so the film
+    is guaranteed to be of the same trajectory the metrics describe. It also
+    keeps GL out of the physics path entirely: the CI gate needs no graphics
+    stack, and a broken one can never change a pass/fail.
+    """
+
     def to_json_dict(self) -> dict:
         return {"params": asdict(self.params), "plant": self.plant,
                 "metrics": asdict(self.metrics)}
@@ -337,6 +346,7 @@ def run(
     params: TerrainParams | None = None,
     profile: ImperfectionProfile = STAGE0_CUTBACK,
     controller_factory=None,
+    capture_state: bool = False,
 ) -> TerrainResult:
     """Ride crest → dip → crest and measure whether control holds throughout."""
     params = params or TerrainParams()
@@ -387,6 +397,7 @@ def run(
     length = params.crest_to_crest_m
 
     ts, travels, vs, grades, pitches, ests, currents = [], [], [], [], [], [], []
+    states: list[np.ndarray] = []
     x0 = float(data.xpos[frame][0])
     flowing_a = 0.0
     m = TerrainMetrics()
@@ -427,6 +438,8 @@ def run(
             pitches.append(pitch_deg)
             ests.append(math.degrees(float(ctl.pitch_used_rad)))
             currents.append(current)
+            if capture_state:
+                states.append(data.qpos.copy())
 
             m.peak_abs_pitch_deg = max(m.peak_abs_pitch_deg, abs(pitch_deg))
             m.max_grade_seen_pct = max(m.max_grade_seen_pct, abs(grade))
@@ -501,6 +514,7 @@ def run(
         params=params, metrics=m, plant=summary, t=t_arr, travel_m=trav,
         v_m_s=v_arr, grade_pct=np.asarray(grades), pitch_deg=np.asarray(pitches),
         pitch_est_deg=np.asarray(ests), motor_current_a=np.asarray(currents),
+        qpos=np.asarray(states) if states else np.empty(0),
     )
 
 
