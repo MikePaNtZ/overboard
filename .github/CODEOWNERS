@@ -179,6 +179,8 @@
 /roles/senior-controls/         @MikePaNtZ
 # role: Archivist
 /roles/archivist/               @MikePaNtZ
+# role: Content Designer
+/roles/content-designer/        @MikePaNtZ
 
 # --------------------------------------------------------------------------
 # The canonical term list, in git so a machine can read it.

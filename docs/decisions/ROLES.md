@@ -39,7 +39,8 @@ All-three-or-none is the definition of `Ratified`. It is **not** a precondition 
 | `CEO` | Ratified | — | — | Direction, public claims, licence, money. Final arbiter |
 | `COO` | Ratified | `CEO` | `feat/ops/` | Cross-role operations, the decision record, the escalation queue for the engineering line |
 | `CMO` | Ratified | `CEO` | — | The marketing line. Peer of COO — neither escalates to the other. Owns nothing in this repo by design; brand lives in `overboard-web` |
-| `Senior Digital Marketer` | Provisional | `CMO` | `feat/web/` | Landing page, brand and visual identity, page copy, analytics — in `overboard-web` |
+| `Senior Digital Marketer` | Ratified | `CMO` | `feat/web/` | Landing page, brand and visual identity, page copy, analytics — in `overboard-web` |
+| `Content Designer` | Provisional | `Senior Digital Marketer` | `feat/copy/` | Public copy craft to the Style Guide, and UX fit-and-finish. **No exclusive path by design** — works in files the SDM owns, gated by SDM review |
 | `Digital Content Production` | Ratified | `Senior Digital Marketer` | `feat/content/` | Renders and published media. Explicitly **not** page markup or CSS |
 | `Sr. Mechanical & Systems` | Ratified | `COO` | `feat/mech/` | BoM, platform selection, the bench rig, the sim-to-hardware fidelity contract |
 | `Senior Controls` | Ratified | `COO` | `feat/controls/` | The control law and its harness |
@@ -52,9 +53,13 @@ skipped** every branch those two roles pushed: it fails open for roles with no d
 so the two most active engineering roles had no turf enforcement at all. Caught by a dispatched
 agent, not by me.
 
+✅ **`Senior Digital Marketer` is RATIFIED as of 2026-07-31**, and its `feat/web/` prefix is
+observed rather than inferred. It could not be ratified before now for a concrete reason:
+`overboard-web` had **no CODEOWNERS at all**, so the second of the three legs did not exist to
+point at. Ported in overboard-web#35; the flag follows the artefact, not the other way round.
+
 ⚠️ **Still unverified.** Escalation targets for `Sr. Mechanical & Systems` and
-`Senior Controls`, the branch prefixes for `Digital Content Production` and
-and the branch prefix for `Senior Digital Marketer` are **inferred** — from the
+`Senior Controls`, and the branch prefix for `Digital Content Production`, are **inferred** — from the
 COO's own charter ("receives from Sr. Mechanical and Systems Engineering"), from branch
 conventions observed in sibling repos. The `Archivist` is no longer among them — the CEO
 declared its surface on 2026-07-27 and it was ratified the same day. Inferring turf from a branch prefix is guessing, which is the thing this registry
