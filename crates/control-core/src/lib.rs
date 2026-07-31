@@ -210,10 +210,22 @@ impl Estimator for ComplementaryFilter {
 
 /// Inner-loop pitch regulator — the balance law itself.
 ///
-/// `amps = −(kp·θ + kd·θ̇)` with θ **nose-up-positive in radians** (ICD §10.1).
-/// The minus sign is the ICD's own `current ≈ −K·pitch`, K > 0, and it is the
-/// stabilising sense: a nose-down excursion is negative pitch, correcting it
-/// means driving the contact patch forward, which is positive current.
+/// `torque_nm = −(kp·θ + kd·θ̇)` with θ **nose-up-positive in radians** (ICD
+/// §10.1). The minus sign is the ICD's own `current ≈ −K·pitch`, K > 0,
+/// re-expressed in torque, and it is the stabilising sense: a nose-down
+/// excursion is negative pitch, correcting it means driving the contact patch
+/// forward, which is positive torque.
+///
+/// # Torque, not current (issue #137)
+///
+/// Gains are **N·m per radian**, not amps per radian. The plant's stability
+/// depends on `kt` (the motor's torque constant) — an amps-denominated law
+/// hides that dependency entirely, since nothing in `amps = −(kp·θ + kd·θ̇)`
+/// ever mentions it, and a `kt` error silently becomes a loop-gain error on an
+/// inverted pendulum. `kt` belongs at the actuation boundary, converting this
+/// torque command into the current command the drive actually wants —
+/// **never here**. See `control_ffi::ob_controller_update` for that boundary;
+/// this regulator does not know `kt` exists.
 ///
 /// Deliberately takes an already-estimated pitch rather than an [`Observation`].
 /// Fusing raw IMU into an attitude is a separate concern with its own interface
@@ -227,19 +239,19 @@ impl Estimator for ComplementaryFilter {
 /// requires the anti-windup path (ICD §7.6) to be wired to `Saturation` first.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PitchRegulator {
-    kp_a_per_rad: f32,
-    kd_a_per_rad_s: f32,
+    kp_nm_per_rad: f32,
+    kd_nm_per_rad_s: f32,
 }
 
 impl PitchRegulator {
-    pub const fn new(kp_a_per_rad: f32, kd_a_per_rad_s: f32) -> Self {
+    pub const fn new(kp_nm_per_rad: f32, kd_nm_per_rad_s: f32) -> Self {
         PitchRegulator {
-            kp_a_per_rad,
-            kd_a_per_rad_s,
+            kp_nm_per_rad,
+            kd_nm_per_rad_s,
         }
     }
 
-    /// Requested current in amps, before any clamping.
+    /// Requested torque in N·m, before any clamping.
     ///
     /// `pitch_ref_rad` is the attitude to hold — zero for pure disturbance
     /// rejection, or the outer loop's output when a [`VelocityLoop`] is
@@ -247,9 +259,13 @@ impl PitchRegulator {
     ///
     /// Unclamped on purpose: bounding the command is the safety envelope's job
     /// (stage 2, ICD §7.6), and a controller that silently clamps its own
-    /// output hides saturation from the anti-windup that needs to see it.
+    /// output hides saturation from the anti-windup that needs to see it. The
+    /// clamp itself is a current limit (`I_max`, what the drive is rated for),
+    /// so converting this output to amps and applying `τ_max = kt·I_max` is
+    /// the caller's job, done once, at the boundary.
     pub fn update(&self, pitch_rad: f32, pitch_rate_rad_s: f32, pitch_ref_rad: f32) -> f32 {
-        -(self.kp_a_per_rad * (pitch_rad - pitch_ref_rad) + self.kd_a_per_rad_s * pitch_rate_rad_s)
+        -(self.kp_nm_per_rad * (pitch_rad - pitch_ref_rad)
+            + self.kd_nm_per_rad_s * pitch_rate_rad_s)
     }
 }
 
@@ -635,21 +651,27 @@ mod tests {
     // These assert the SIGN and the shape, not tuned values. The gains that
     // matter are validated against the plant in the sim scenario; what must be
     // true here, independent of any plant, is that the law opposes the error.
+    //
+    // N*m/rad, N*m/(rad/s) -- the amps-space tuning (80 A/rad, 11 A/(rad/s))
+    // re-expressed at the kt = 0.7 N*m/A design point (issue #137). The
+    // regulator itself never sees kt; these are just the numbers that made
+    // the old amps-denominated tests' shape assertions true, carried through.
 
-    const KP: f32 = 80.0;
-    const KD: f32 = 11.0;
+    const KP: f32 = 56.0;
+    const KD: f32 = 7.7;
 
     #[test]
-    fn nose_down_commands_positive_current() {
+    fn nose_down_commands_positive_torque() {
         // Nose-down is NEGATIVE pitch (ICD 10.1). Correcting it means driving
-        // the contact patch forward, i.e. POSITIVE current. If this ever
-        // inverts, the board accelerates into its own nosedive.
+        // the contact patch forward, i.e. POSITIVE torque (and, via kt > 0 at
+        // the actuation boundary, positive current). If this ever inverts,
+        // the board accelerates into its own nosedive.
         let r = PitchRegulator::new(KP, KD);
         assert!(r.update(-0.1, 0.0, 0.0) > 0.0);
     }
 
     #[test]
-    fn nose_up_commands_negative_current() {
+    fn nose_up_commands_negative_torque() {
         let r = PitchRegulator::new(KP, KD);
         assert!(r.update(0.1, 0.0, 0.0) < 0.0);
     }
@@ -978,8 +1000,10 @@ mod tests {
     #[test]
     fn output_is_unclamped_so_the_envelope_can_see_saturation() {
         // A controller that clamps itself hides saturation from the anti-windup
-        // that needs to observe it (ICD 7.6).
+        // that needs to observe it (ICD 7.6). 28.0 N*m is tau_max = kt * I_max
+        // at the kt = 0.7, I_max = 40 A design point -- the output here must
+        // exceed the torque the envelope will actually allow through.
         let r = PitchRegulator::new(KP, KD);
-        assert!(r.update(-1.0, 0.0, 0.0) > 40.0);
+        assert!(r.update(-1.0, 0.0, 0.0) > 28.0);
     }
 }

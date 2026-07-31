@@ -32,7 +32,7 @@
 //! state that produced it.
 
 use board_types::ImuSample;
-use board_types::{Command, Faults, Params, Saturation, DEFAULT_R_EFF_M};
+use board_types::{Command, Faults, Params, Saturation, DEFAULT_KT_NM_PER_A, DEFAULT_R_EFF_M};
 use control_core::{
     Attitude, CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator, PlantCoupling,
     VelocityLoop, WheelAccelEstimator,
@@ -58,12 +58,24 @@ pub const OB_ERR_NOT_FINITE: i32 = -3;
 #[derive(Debug, Clone, Copy)]
 pub struct ObParamsV1 {
     pub size: u32,
-    /// Proportional gain, **amps per radian** of nose-up-positive pitch.
-    pub kp_a_per_rad: f32,
-    /// Derivative gain, amps per rad/s.
-    pub kd_a_per_rad_s: f32,
+    /// Proportional gain, **N·m per radian** of nose-up-positive pitch (issue
+    /// #137 — was amps per radian; `kt_nm_per_a` below converts this law's
+    /// torque output to the current the drive wants, once, at the boundary,
+    /// never inside the law itself).
+    pub kp_nm_per_rad: f32,
+    /// Derivative gain, N·m per rad/s.
+    pub kd_nm_per_rad_s: f32,
     /// Envelope clamp on commanded current, amps (ICD §7.6 stage 2).
+    /// Physically a torque ceiling: `τ_max = kt_nm_per_a · max_current_a`. A
+    /// wrong `kt_nm_per_a` moves this headroom; it cannot move the loop gain
+    /// above, which never sees `kt` at all.
     pub max_current_a: f32,
+    /// Motor torque constant, N·m per amp, used **only** to convert the
+    /// regulator's torque command into the current command sent to the
+    /// drive. Zero falls back to [`DEFAULT_KT_NM_PER_A`] — an unfitted
+    /// placeholder pending a Stage-0 bench fit (ICD §10.5), same status as
+    /// `r_eff_m` below.
+    pub kt_nm_per_a: f32,
 
     // --- outer velocity loop --------------------------------------------
     /// Radians of pitch reference per m/s of speed error. Zero disables the
@@ -217,6 +229,11 @@ pub struct ObController {
     last_amps: f32,
     outer: Option<VelocityLoop>,
     envelope: Envelope,
+    /// The single point `kt` enters this controller: converts the
+    /// regulator's N·m output into the amps command the drive wants (issue
+    /// #137). Never read by anything upstream of [`ob_controller_update`]'s
+    /// final conversion step.
+    kt_nm_per_a: f32,
     r_eff_m: f32,
     last_t_ns: Option<u64>,
     /// Carried between cycles so the outer loop can hold off integrating while
@@ -268,7 +285,7 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
     };
 
     let boxed = Box::new(ObController {
-        regulator: PitchRegulator::new(p.kp_a_per_rad, p.kd_a_per_rad_s),
+        regulator: PitchRegulator::new(p.kp_nm_per_rad, p.kd_nm_per_rad_s),
         estimate_active: p.use_estimator == 1,
         wheel_accel: if p.estimator_accel_aiding == 1 {
             Some(WheelAccelEstimator::new(if p.wheel_accel_tau_s > 0.0 {
@@ -309,6 +326,11 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
             None
         },
         outer,
+        kt_nm_per_a: if p.kt_nm_per_a > 0.0 {
+            p.kt_nm_per_a
+        } else {
+            DEFAULT_KT_NM_PER_A
+        },
         r_eff_m: if p.r_eff_m > 0.0 {
             p.r_eff_m
         } else {
@@ -317,8 +339,8 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV1) -> *mut Ob
         last_t_ns: None,
         last_saturated: false,
         envelope: Envelope::new(Params {
-            kp: p.kp_a_per_rad,
-            kd: p.kd_a_per_rad_s,
+            kp_nm_per_rad: p.kp_nm_per_rad,
+            kd_nm_per_rad_s: p.kd_nm_per_rad_s,
             max_current_a: p.max_current_a,
             ..Params::default()
         }),
@@ -446,10 +468,17 @@ pub unsafe extern "C" fn ob_controller_update(
     } else {
         (o.pitch_rad, o.pitch_rate_rad_s)
     };
-    let proposed = ctl.regulator.update(pitch_in, rate_in, pitch_ref);
+    // The ONLY place kt is used (issue #137 AC1): the regulator's torque
+    // command becomes the amps command the drive wants. Everything upstream
+    // of this line -- the law, the estimator, the outer loop -- never sees
+    // kt at all, so a wrong kt cannot silently rescale the loop gain those
+    // compute with. It can only rescale this division, i.e. the torque that
+    // the unchanged `max_current_a` clamp downstream actually represents.
+    let proposed_torque_nm = ctl.regulator.update(pitch_in, rate_in, pitch_ref);
+    let proposed_amps = proposed_torque_nm / ctl.kt_nm_per_a;
     let (bounded, sat) = ctl
         .envelope
-        .apply(Command::MotorCurrent { amps: proposed }, Faults::NONE);
+        .apply(Command::MotorCurrent { amps: proposed_amps }, Faults::NONE);
 
     cmd.amps = match bounded {
         Command::MotorCurrent { amps } => amps,
@@ -476,9 +505,13 @@ mod tests {
     fn params() -> ObParamsV1 {
         ObParamsV1 {
             size: core::mem::size_of::<ObParamsV1>() as u32,
-            kp_a_per_rad: 80.0,
-            kd_a_per_rad_s: 11.0,
+            // 56.0 / 7.7 N*m/(rad[/s]) are 80.0 / 11.0 A/rad re-expressed at
+            // the kt = 0.7 design point (issue #137) -- numerically identical
+            // amps once kt_nm_per_a below divides back through.
+            kp_nm_per_rad: 56.0,
+            kd_nm_per_rad_s: 7.7,
             max_current_a: 40.0,
+            kt_nm_per_a: 0.7,
             kp_v_rad_per_m_s: 0.0,
             ki_v_rad_per_m: 0.0,
             max_pitch_ref_rad: 0.087,
@@ -612,5 +645,83 @@ mod tests {
     #[test]
     fn abi_version_is_reported() {
         assert_eq!(ob_abi_version(), ABI_VERSION);
+    }
+
+    // ---- issue #137: torque denomination ---------------------------------
+
+    fn armed_with_kt(kt_nm_per_a: f32) -> Handle {
+        let mut p = params();
+        p.kt_nm_per_a = kt_nm_per_a;
+        let h = unsafe { ob_controller_new(&p) };
+        assert!(!h.is_null());
+        assert_eq!(unsafe { ob_controller_arm(h) }, OB_OK);
+        Handle(h)
+    }
+
+    #[test]
+    fn a_wrong_kt_moves_headroom_not_loop_gain() {
+        // AC4: the regulator's gains are N*m/rad and never reference kt, so
+        // in the UNSATURATED regime the delivered torque (amps * kt) for a
+        // given pitch error is the same law output regardless of what kt the
+        // boundary conversion used to reach that current -- kt only decides
+        // how many amps it took to get there.
+        let (o, mut c_low) = (obs(-0.02, 0.0), out());
+        let (mut c_high, low, high) = (out(), armed_with_kt(0.5), armed_with_kt(0.9));
+        assert_eq!(unsafe { ob_controller_update(low.0, &o, &mut c_low) }, OB_OK);
+        assert_eq!(
+            unsafe { ob_controller_update(high.0, &o, &mut c_high) },
+            OB_OK
+        );
+        assert_eq!(c_low.saturated, 0, "low-kt case must be unsaturated");
+        assert_eq!(c_high.saturated, 0, "high-kt case must be unsaturated");
+
+        let torque_low = c_low.amps * 0.5;
+        let torque_high = c_high.amps * 0.9;
+        assert!(
+            (torque_low - torque_high).abs() < 1e-4,
+            "loop gain moved with kt: {torque_low} N*m at kt=0.5 vs {torque_high} N*m at kt=0.9"
+        );
+
+        // Headroom DOES move: the same 40 A current ceiling represents less
+        // deliverable torque at the lower kt.
+        let (tau_max_low, tau_max_high) = (0.5 * 40.0, 0.9 * 40.0);
+        assert!(tau_max_low < tau_max_high);
+    }
+
+    #[test]
+    fn saturation_is_still_the_same_40_a_current_ceiling_whatever_kt_is() {
+        // The envelope clamp is unmoved by this change (AC3): it is still
+        // max_current_a in amps. What changed is only what torque that
+        // ceiling is understood to represent (tau_max = kt * max_current_a).
+        let (o, mut c_low) = (obs(-1.0, 0.0), out());
+        let (mut c_high, low, high) = (out(), armed_with_kt(0.5), armed_with_kt(0.9));
+        assert_eq!(unsafe { ob_controller_update(low.0, &o, &mut c_low) }, OB_OK);
+        assert_eq!(
+            unsafe { ob_controller_update(high.0, &o, &mut c_high) },
+            OB_OK
+        );
+        assert_eq!(c_low.amps, 40.0);
+        assert_eq!(c_high.amps, 40.0);
+        assert_eq!(c_low.saturated, 1);
+        assert_eq!(c_high.saturated, 1);
+    }
+
+    #[test]
+    fn kt_nm_per_a_zero_falls_back_to_the_default() {
+        let mut p = params();
+        p.kt_nm_per_a = 0.0;
+        let h = Handle(unsafe { ob_controller_new(&p) });
+        assert!(!h.0.is_null());
+        let (o, mut c_default) = (obs(-0.02, 0.0), out());
+        unsafe { ob_controller_arm(h.0) };
+        assert_eq!(unsafe { ob_controller_update(h.0, &o, &mut c_default) }, OB_OK);
+
+        let reference = armed_with_kt(DEFAULT_KT_NM_PER_A);
+        let mut c_ref = out();
+        assert_eq!(
+            unsafe { ob_controller_update(reference.0, &o, &mut c_ref) },
+            OB_OK
+        );
+        assert_eq!(c_default.amps, c_ref.amps);
     }
 }

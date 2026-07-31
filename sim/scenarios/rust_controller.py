@@ -33,11 +33,21 @@ REPO = Path(__file__).resolve().parents[2]
 #: restoring stiffness m*g*l = 2.354 N*m/rad and kt = 0.7 N*m/A, these place the
 #: closed-loop pole pair at omega ~= 12 rad/s with zeta ~= 0.8 -- about 5x the
 #: plant's own 2.42 rad/s. They are a starting point for a sweep, not a result.
+#:
+#: Kept in amps-per-radian here, unchanged, even though the Rust ABI beneath
+#: this wrapper is now torque-denominated (issue #137) -- `RustController`
+#: converts to N*m at `kt_nm_per_a` before crossing the FFI seam, below, so
+#: every existing caller (tests/, scripts/) keeps its number and its meaning.
 DEFAULT_KP_A_PER_RAD = 80.0
 DEFAULT_KD_A_PER_RAD_S = 11.0
 
 #: Envelope clamp, amps. Matches the model's derived ctrlrange (40 A * kt).
 DEFAULT_MAX_CURRENT_A = 40.0
+
+#: Motor torque constant, N*m per amp -- the boundary conversion issue #137
+#: added. Mirrors `board_types::DEFAULT_KT_NM_PER_A`: an unfitted placeholder,
+#: not a bench measurement, superseded the same way `DEFAULT_R_EFF_M` is.
+DEFAULT_KT_NM_PER_A = 0.7
 
 #: Loaded rolling radius, m (ICD 10.5). Stage-0 will measure the real, loaded
 #: figure; until then this is pinned to the sim model's actual tire geometry
@@ -66,9 +76,10 @@ _ERR = {
 class ObParams(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_uint32),
-        ("kp_a_per_rad", ctypes.c_float),
-        ("kd_a_per_rad_s", ctypes.c_float),
+        ("kp_nm_per_rad", ctypes.c_float),
+        ("kd_nm_per_rad_s", ctypes.c_float),
         ("max_current_a", ctypes.c_float),
+        ("kt_nm_per_a", ctypes.c_float),
         ("kp_v_rad_per_m_s", ctypes.c_float),
         ("ki_v_rad_per_m", ctypes.c_float),
         ("max_pitch_ref_rad", ctypes.c_float),
@@ -149,6 +160,12 @@ class RustController:
 
     Call signature is the scenario's: ``(t_s, pitch_rad, pitch_rate_rad_s,
     wheel_rate_rad_s) -> amps``. Radians, nose-up-positive, amps out.
+
+    ``kp_a_per_rad``/``kd_a_per_rad_s`` stay amps-denominated here and keep
+    their existing meaning for every caller (issue #137 re-denominated the
+    Rust ABI beneath this wrapper to torque, N*m/rad -- this constructor
+    converts via ``kt_nm_per_a`` before crossing the FFI seam, so no caller
+    in tests/ or scripts/ needed to change).
     """
 
     def __init__(
@@ -156,6 +173,7 @@ class RustController:
         kp_a_per_rad: float = DEFAULT_KP_A_PER_RAD,
         kd_a_per_rad_s: float = DEFAULT_KD_A_PER_RAD_S,
         max_current_a: float = DEFAULT_MAX_CURRENT_A,
+        kt_nm_per_a: float = DEFAULT_KT_NM_PER_A,
         kp_v_rad_per_m_s: float = 0.0,
         ki_v_rad_per_m: float = 0.0,
         max_pitch_ref_rad: float = DEFAULT_MAX_PITCH_REF_RAD,
@@ -204,9 +222,15 @@ class RustController:
 
         params = ObParams(
             size=ctypes.sizeof(ObParams),
-            kp_a_per_rad=kp_a_per_rad,
-            kd_a_per_rad_s=kd_a_per_rad_s,
+            # The one place kt is used on this side of the seam: converts the
+            # amps-space gain callers still pass into the N*m/rad the Rust
+            # ABI now wants. kt_nm_per_a crosses too, so Rust's own boundary
+            # conversion (proposed_torque_nm / kt_nm_per_a) exactly undoes
+            # this multiply and callers see the same amps as before.
+            kp_nm_per_rad=kp_a_per_rad * kt_nm_per_a,
+            kd_nm_per_rad_s=kd_a_per_rad_s * kt_nm_per_a,
             max_current_a=max_current_a,
+            kt_nm_per_a=kt_nm_per_a,
             kp_v_rad_per_m_s=kp_v_rad_per_m_s,
             ki_v_rad_per_m=ki_v_rad_per_m,
             max_pitch_ref_rad=max_pitch_ref_rad,

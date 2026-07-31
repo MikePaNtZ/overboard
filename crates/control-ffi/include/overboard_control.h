@@ -7,6 +7,9 @@
  * compiled against an older copy of this header.
  *
  * Angles are RADIANS, nose-up-positive (BoardIo ICD 10.1). Current is AMPS.
+ * Kp/Kd are TORQUE gains, N*m (issue #137) -- kt_nm_per_a below is the only
+ * place this header's kt enters, converting the law's torque to the current
+ * command the drive wants.
  */
 #ifndef OVERBOARD_CONTROL_H
 #define OVERBOARD_CONTROL_H
@@ -20,9 +23,16 @@
 
 typedef struct {
     uint32_t size;
-    float    kp_a_per_rad;
-    float    kd_a_per_rad_s;
+    float    kp_nm_per_rad;
+    float    kd_nm_per_rad_s;
+    /* Envelope clamp on commanded current, amps. Physically a torque
+     * ceiling: tau_max = kt_nm_per_a * max_current_a. */
     float    max_current_a;
+    /* Motor torque constant, N*m per amp -- converts the regulator's torque
+     * command to the current command, once, here. Zero falls back to the
+     * board_types::DEFAULT_KT_NM_PER_A placeholder (unfitted, pending a
+     * Stage-0 bench measurement, ICD 10.5 -- same status as r_eff_m below). */
+    float    kt_nm_per_a;
 
     /* Outer velocity loop. Zero both gains to disable it. */
     float    kp_v_rad_per_m_s;

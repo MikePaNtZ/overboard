@@ -35,6 +35,22 @@ use serde::{Deserialize, Serialize};
 /// eventual bench-measured loaded rolling radius (ICD §10.5) supersedes it.
 pub const DEFAULT_R_EFF_M: f32 = 0.1454;
 
+/// Motor torque constant, N·m per amp — the single conversion point between
+/// [`control_core::PitchRegulator`]'s torque-denominated law and the amps a
+/// current-controlled drive actually wants (issue #137). **Not the plant's
+/// own `kt`** (`sim/scenarios/plant.py::KT_NM_PER_A`, Mechanical's territory,
+/// mirrored privately in `crates/sim-backend`) — that is what the motor
+/// physically does; this is what the controller *assumes* when converting a
+/// torque command to a current command, and the two only agree because they
+/// happen to share the same unfitted placeholder today.
+///
+/// **An unfitted placeholder, not a bench measurement** — same status as
+/// [`DEFAULT_R_EFF_M`], and superseded the same way once Stage-0 fits `kt` on
+/// the bench (ICD §10.5). Until then, getting it wrong changes how much
+/// torque headroom the 40 A current clamp represents, not the control law's
+/// loop gain — see `crates/control-ffi`'s boundary conversion.
+pub const DEFAULT_KT_NM_PER_A: f32 = 0.7;
+
 /// Mechanical wheel rate, rad/s, per 1 ERPM. ICD §10.5: "1 ERPM = 6.98e-3
 /// rad/s" — the same ratio `sim/scenarios/imperfections.py` names
 /// `wheel_rate_quantum_rad_s` (the size of one ERPM step in the wheel-rate
@@ -330,10 +346,15 @@ pub enum IoError {
 /// margin instrument" bet.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Params {
-    pub kp: f32,
+    /// Inner-loop proportional gain, N·m per radian (issue #137 — was amps
+    /// per radian; `kt` converts this seam's torque to the current the drive
+    /// wants, once, at the actuation boundary, never here).
+    pub kp_nm_per_rad: f32,
     pub ki: f32,
-    pub kd: f32,
-    /// Envelope clamp on commanded current, amps.
+    /// Inner-loop derivative gain, N·m per rad/s.
+    pub kd_nm_per_rad_s: f32,
+    /// Envelope clamp on commanded current, amps. Physically a torque
+    /// ceiling: `τ_max = kt_nm_per_a · max_current_a`.
     pub max_current_a: f32,
     /// Envelope trip on absolute pitch, radians.
     pub max_abs_pitch_rad: f32,
@@ -342,9 +363,9 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Params {
-            kp: 0.0,
+            kp_nm_per_rad: 0.0,
             ki: 0.0,
-            kd: 0.0,
+            kd_nm_per_rad_s: 0.0,
             max_current_a: 0.0,
             max_abs_pitch_rad: 0.0,
         }
