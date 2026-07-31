@@ -10,6 +10,21 @@
 # Exits non-zero and explains itself if dispatching now would be unsafe.
 set -uo pipefail
 
+# --- The estate ------------------------------------------------------------
+# ALL THREE REPOS, not just the one this script happens to sit in (#103).
+#
+# This used to run a bare `gh issue list` after cd-ing to the repo root, so it
+# polled exactly one repo of three. Work filed in overboard-web or
+# overboard-viz was labelled, routable in principle, and in no queue anything
+# could see. Worse, --audit asserted "every open issue carries exactly one
+# role: label" and reported green while auditing a third of the estate -- the
+# same reports-green-while-enforcing-nothing failure this script's own comments
+# were written to disown, committed by the script itself.
+#
+# ROLES.md already declares its registry covers all three. The actuator now
+# matches the registry.
+REPOS=(${OPS_REPOS:-MikePaNtZ/overboard MikePaNtZ/overboard-web MikePaNtZ/overboard-viz})
+
 # --- 0. Routing integrity -------------------------------------------------
 # Every open issue must carry EXACTLY ONE role: label. Zero labels means the
 # issue is invisible to every cron -- nobody polls it and it is not "backlog",
@@ -20,24 +35,35 @@ set -uo pipefail
 # A hard error, never a silent skip. This week produced two checks that
 # reported green while enforcing nothing; this is not going to be the third.
 audit_routing() {
-  local bad=0 line num labels count
-  while IFS=$'\t' read -r num labels; do
-    [ -n "$num" ] || continue
-    if [ -z "$labels" ]; then count=0; else count="$(tr ',' '\n' <<<"$labels" | grep -c '^role:')"; fi
-    if [ "$count" -ne 1 ]; then
-      echo "  ROUTING ERROR: issue #${num} has ${count} role: labels (need exactly 1) [${labels}]"
+  local bad=0 seen=0 repo num labels count out
+  for repo in "${REPOS[@]}"; do
+    # A repo we cannot read is a repo whose issues are invisible. That is the
+    # exact condition this audit exists to detect, so it is a hard error rather
+    # than a skipped line -- otherwise a typo'd repo name reads as "all clear".
+    if ! out="$(gh issue list --repo "$repo" --state open --limit 200 \
+                  --json number,labels \
+                  --jq '.[] | "\(.number)\t\([.labels[].name] | join(","))"' 2>&1)"; then
+      echo "  ROUTING ERROR: cannot read issues in ${repo} -- ${out%%$'\n'*}"
       bad=$((bad + 1))
+      continue
     fi
-  done < <(gh issue list --state open --limit 200 \
-             --json number,labels \
-             --jq '.[] | "\(.number)\t\([.labels[].name] | join(","))"')
+    while IFS=$'\t' read -r num labels; do
+      [ -n "$num" ] || continue
+      seen=$((seen + 1))
+      if [ -z "$labels" ]; then count=0; else count="$(tr ',' '\n' <<<"$labels" | grep -c '^role:')"; fi
+      if [ "$count" -ne 1 ]; then
+        echo "  ROUTING ERROR: ${repo}#${num} has ${count} role: labels (need exactly 1) [${labels}]"
+        bad=$((bad + 1))
+      fi
+    done <<<"$out"
+  done
   if [ "$bad" -gt 0 ]; then
-    echo "REFUSED: ${bad} open issue(s) are unroutable."
+    echo "REFUSED: ${bad} routing problem(s)."
     echo "         An unlabelled issue is invisible to every poll. Label it, or"
     echo "         close it -- but do not leave it looking like backlog."
     return 1
   fi
-  echo "routing: every open issue carries exactly one role: label"
+  echo "routing: ${seen} open issue(s) across ${#REPOS[@]} repo(s), each with exactly one role: label"
   return 0
 }
 
@@ -169,20 +195,44 @@ ROLE_SLUG="$(printf '%s' "$ROLE" \
   | sed -E -e 's/[^a-z0-9]+/-/g' -e 's/^-+//' -e 's/-+$//')"
 LABEL="role:${ROLE_SLUG}"
 
-if ! gh label list --limit 100 --json name --jq '.[].name' | grep -qx "$LABEL"; then
-  fail "no '${LABEL}' label exists. The router cannot address ${ROLE}.
-         Labels are the routing field -- see #38. Create it before dispatching."
+# The label has to exist in EVERY repo, not just this one. A role addressable
+# in overboard and not in overboard-web is a role whose marketing work can
+# never be routed -- which is the state #103 found: neither marketing repo had
+# role: labels at all until the CMO mirrored them.
+MISSING=()
+for repo in "${REPOS[@]}"; do
+  gh label list --repo "$repo" --limit 100 --json name --jq '.[].name' 2>/dev/null \
+    | grep -qx "$LABEL" || MISSING+=("$repo")
+done
+if [ "${#MISSING[@]}" -gt 0 ]; then
+  fail "no '${LABEL}' label in: ${MISSING[*]}
+         The router cannot address ${ROLE} there, so any issue filed in those
+         repos is unroutable no matter how it is labelled. Labels are the
+         routing field -- see #38, #103. Create it before dispatching."
 fi
 
 echo
-echo "  QUEUE for ${ROLE}  (poll: gh issue list --label \"${LABEL}\" --state open)"
-QUEUE="$(gh issue list --state open --label "$LABEL" --limit 50 \
-           --json number,title --jq '.[] | "    #\(.number)  \(.title)"')"
-if [ -z "$QUEUE" ]; then
-  echo "    (empty -- nothing routed to this role)"
-else
-  echo "$QUEUE"
-fi
+echo "  QUEUE for ${ROLE}  (poll: gh issue list -R <repo> --label \"${LABEL}\" --state open)"
+# No `2>/dev/null` here, deliberately. The first version had one, plus a
+# `gh ... --jq --arg` that gh does not support -- gh has no --arg flag. The
+# error went to the suppressed stderr and every marketing queue printed
+# "(empty)" while two labelled issues sat in overboard-web. A silenced error
+# reported as an empty queue is indistinguishable from no work, which is the
+# whole failure #103 is about. The repo name is prefixed in bash instead.
+FOUND=0
+for repo in "${REPOS[@]}"; do
+  if ! Q="$(gh issue list --repo "$repo" --state open --label "$LABEL" --limit 50 \
+              --json number,title --jq '.[] | "#\(.number)  \(.title)"')"; then
+    fail "cannot read ${repo}'s queue. Refusing to report an empty queue for a
+         repo that failed to answer -- that is indistinguishable from no work."
+  fi
+  while IFS= read -r ln; do
+    [ -n "$ln" ] || continue
+    echo "    ${repo#*/}${ln}"
+    FOUND=$((FOUND + 1))
+  done <<<"$Q"
+done
+[ "$FOUND" -eq 0 ] && echo "    (empty -- nothing routed to this role in any of the ${#REPOS[@]} repos)"
 
 echo
 echo "OK to dispatch as ${ROLE}. Give each agent its own worktree (isolation: worktree)."
