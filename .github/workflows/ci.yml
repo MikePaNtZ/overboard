@@ -155,6 +155,13 @@ jobs:
       - name: Build the plant-mujoco replay binary
         run: cargo build --release -p plant-mujoco --bin plant-replay
 
+      # I1c (issue #107, AC6): tests/test_rust_hosted_impulse_response.py
+      # shells out to this binary to compare the Rust-hosted closed loop
+      # (hal + sim-backend's real plant) against the Python-hosted one. Same
+      # "fail rather than skip" rule as above.
+      - name: Build the Rust-hosted impulse-response binary
+        run: cargo build --release -p board-app-driverless --bin impulse-response-rust
+
       - name: Scenario acceptance gate
         run: pytest tests/ -v
 

@@ -45,6 +45,15 @@ extern "C" {
     fn plant_mujoco_set_ctrl(data: *mut c_void, ctrl: *const f64, n: c_int);
     fn plant_mujoco_get_qpos(data: *mut c_void, out: *mut f64, n: c_int);
     fn plant_mujoco_get_qvel(data: *mut c_void, out: *mut f64, n: c_int);
+    fn plant_mujoco_timestep(model: *mut c_void) -> f64;
+    fn plant_mujoco_forward(model: *mut c_void, data: *mut c_void);
+    fn plant_mujoco_sensor_id(model: *mut c_void, name: *const c_char) -> c_int;
+    fn plant_mujoco_sensor_adr(model: *mut c_void, sensor_id: c_int) -> c_int;
+    fn plant_mujoco_sensor_dim(model: *mut c_void, sensor_id: c_int) -> c_int;
+    fn plant_mujoco_get_sensordata(data: *mut c_void, adr: c_int, out: *mut f64, n: c_int);
+    fn plant_mujoco_body_id(model: *mut c_void, name: *const c_char) -> c_int;
+    fn plant_mujoco_set_xfrc_applied(data: *mut c_void, body_id: c_int, frc6: *const f64);
+    fn plant_mujoco_get_body_xmat(data: *mut c_void, body_id: c_int, out: *mut f64);
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -227,6 +236,126 @@ impl Plant {
         unsafe { plant_mujoco_get_qvel(self.data, out.as_mut_ptr(), out.len() as c_int) };
         out
     }
+
+    /// `mjModel::opt.timestep`, seconds -- issue #107 (I1c) AC2: `hal`'s
+    /// `wait_observe()` must step this plant `control_period / mj_timestep`
+    /// times, and that ratio must be an exact integer. Read from the model
+    /// rather than assumed, so a model whose timestep changes trips the
+    /// caller's assertion instead of silently mis-stepping.
+    pub fn timestep(&self) -> f64 {
+        // SAFETY: `self.model` is non-null and owned for the life of `self`.
+        unsafe { plant_mujoco_timestep(self.model) }
+    }
+
+    /// `mj_forward` -- issue #107 (I1c) AC8, carried forward from I1b. Every
+    /// CONTROLLED Python scenario calls this exactly once, right after
+    /// building its `mjData` and before its first `mj_step`, to populate
+    /// `sensordata` (and `qacc_warmstart`) for the controller's first cycle.
+    /// I1b's open-loop replay deliberately skips this call -- it has no
+    /// controller to prime -- but any Rust host driving a real controller
+    /// must make it, in the same position, or the two hosts' first `mj_step`
+    /// starts from different warmstart state (see the crate README's
+    /// "Ordering contract").
+    ///
+    /// # Panics
+    /// If called after any [`Plant::step`] -- the position relative to the
+    /// first step is exactly what this call exists to pin down, so calling
+    /// it "eventually" rather than "first" would defeat the point.
+    pub fn forward(&mut self) {
+        assert!(
+            self.time() == 0.0,
+            "Plant::forward must be called before the first Plant::step (mjData::time is \
+             {:.6}, not 0) -- see AC8, issue #107",
+            self.time()
+        );
+        // SAFETY: see `step`.
+        unsafe { plant_mujoco_forward(self.model, self.data) };
+    }
+
+    /// `mjData::sensordata`'s address and length for the sensor named `name`,
+    /// or `None` if the model has no such sensor. Looked up by NAME rather
+    /// than a hardcoded offset -- an index quietly pointing at the wrong
+    /// sensor is exactly the defect class `sim/scenarios/plant.py::imu_readings`
+    /// documents having shipped once already.
+    pub fn sensor_adr_dim(&self, name: &str) -> Option<(usize, usize)> {
+        let name_c = CString::new(name).expect("sensor name must not contain a NUL byte");
+        // SAFETY: `self.model` is non-null and owned for the life of `self`;
+        // `name_c` is a valid NUL-terminated string kept alive for the call.
+        let id = unsafe { plant_mujoco_sensor_id(self.model, name_c.as_ptr()) };
+        if id < 0 {
+            return None;
+        }
+        // SAFETY: `id` was just resolved against this same model.
+        let (adr, dim) = unsafe {
+            (
+                plant_mujoco_sensor_adr(self.model, id),
+                plant_mujoco_sensor_dim(self.model, id),
+            )
+        };
+        Some((adr as usize, dim as usize))
+    }
+
+    /// Reads `dim` `f64`s of `mjData::sensordata` starting at `adr` (from
+    /// [`Plant::sensor_adr_dim`]). Callers must call this after
+    /// [`Plant::step`] or [`Plant::forward`] -- sensordata is computed by
+    /// both, never populated eagerly.
+    pub fn read_sensor(&self, adr: usize, dim: usize) -> Vec<f64> {
+        let mut out = vec![0.0f64; dim];
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `adr`/`dim` come from `sensor_adr_dim` against this same model, so
+        // `adr + dim` is within `sensordata`'s bounds.
+        unsafe {
+            plant_mujoco_get_sensordata(
+                self.data,
+                adr as c_int,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        out
+    }
+
+    /// `mjModel`'s body id for `name`, or `None` if there is no such body.
+    /// Exists for the I1c Rust-hosted impulse-response harness's disturbance
+    /// injection (AC6) -- `hal`'s own implementation never calls this.
+    pub fn body_id(&self, name: &str) -> Option<usize> {
+        let name_c = CString::new(name).expect("body name must not contain a NUL byte");
+        // SAFETY: see `sensor_adr_dim`.
+        let id = unsafe { plant_mujoco_body_id(self.model, name_c.as_ptr()) };
+        if id < 0 {
+            None
+        } else {
+            Some(id as usize)
+        }
+    }
+
+    /// `mjData::xmat[body_id]`, row-major, exactly `data.xmat[body].reshape(3,
+    /// 3)` on the Python side. Exists so the I1c Rust-hosted impulse harness
+    /// (AC6) can compute ground-truth pitch with
+    /// `sim/scenarios/impulse_response.py::frame_pitch_rad`'s own formula
+    /// against the same underlying array. Not part of `hal`.
+    pub fn body_xmat(&self, body_id: usize) -> [f64; 9] {
+        let mut out = [0.0f64; 9];
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `out` has exactly the 9 elements `xmat`'s per-body stride expects.
+        unsafe { plant_mujoco_get_body_xmat(self.data, body_id as c_int, out.as_mut_ptr()) };
+        out
+    }
+
+    /// Sets `mjData::xfrc_applied` for `body_id` to `force` (N) then `torque`
+    /// (N*m), mirroring the Python scenarios' `data.xfrc_applied[body][:3] =
+    /// force; data.xfrc_applied[body][3:] = torque`. Exists for the I1c
+    /// Rust-hosted impulse-response harness (AC6); not part of `hal`.
+    pub fn set_xfrc_applied(&mut self, body_id: usize, force: [f64; 3], torque: [f64; 3]) {
+        let frc6 = [
+            force[0], force[1], force[2], torque[0], torque[1], torque[2],
+        ];
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `body_id` is caller-provided (from `body_id()` against this same
+        // model) and `frc6` has exactly the 6 values `xfrc_applied`'s
+        // per-body stride expects.
+        unsafe { plant_mujoco_set_xfrc_applied(self.data, body_id as c_int, frc6.as_ptr()) };
+    }
 }
 
 impl Drop for Plant {
@@ -336,5 +465,120 @@ mod tests {
     fn set_ctrl_panics_on_the_wrong_length() {
         let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
         plant.set_ctrl(&[1.0, 2.0]);
+    }
+
+    /// Issue #107 (I1c) AC2 reads this to compute `wait_observe()`'s stepping
+    /// ratio -- pinned against the model's documented `option timestep`.
+    #[test]
+    fn timestep_matches_the_onewheel_models_documented_option() {
+        let plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        assert_eq!(plant.timestep(), 0.002);
+    }
+
+    #[test]
+    fn forward_populates_sensordata_before_any_step() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        let (adr, dim) = plant
+            .sensor_adr_dim("frame_accel")
+            .expect("model has a frame_accel sensor");
+        // Freshly made mjData has zeroed sensordata; forward() must compute
+        // it without advancing time or requiring a step.
+        assert_eq!(plant.read_sensor(adr, dim), vec![0.0; dim]);
+        plant.forward();
+        assert_eq!(
+            plant.time(),
+            0.0,
+            "forward() must not advance simulation time"
+        );
+        // A single-point wheel contact has no roll restoring moment (only
+        // pitch does, per the model header), so at qpos's default the frame
+        // is NOT in static equilibrium and qacc -- hence specific force at an
+        // offset site -- is genuinely nonzero. Assert it moved off the
+        // freshly-zeroed baseline rather than an analytic "at rest" value,
+        // which would assume an equilibrium this model does not have.
+        let accel = plant.read_sensor(adr, dim);
+        assert_ne!(
+            accel,
+            vec![0.0; dim],
+            "forward() should have computed sensordata"
+        );
+        assert!(accel.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    #[should_panic(expected = "must be called before the first Plant::step")]
+    fn forward_after_a_step_panics() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        plant.step();
+        plant.forward();
+    }
+
+    #[test]
+    fn unknown_sensor_name_resolves_to_none() {
+        let plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        assert_eq!(plant.sensor_adr_dim("no_such_sensor"), None);
+    }
+
+    #[test]
+    fn sensor_adr_dim_resolves_every_declared_sensor() {
+        let plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        for (name, dim) in [
+            ("frame_quat", 4),
+            ("frame_gyro", 3),
+            ("frame_accel", 3),
+            ("wheel_pos", 1),
+            ("wheel_vel", 1),
+            ("motor_torque", 1),
+        ] {
+            let (_, got_dim) = plant
+                .sensor_adr_dim(name)
+                .unwrap_or_else(|| panic!("expected a sensor named {name}"));
+            assert_eq!(got_dim, dim, "sensor {name} has an unexpected dimension");
+        }
+    }
+
+    #[test]
+    fn body_id_resolves_the_frame_body_and_rejects_an_unknown_name() {
+        let plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        assert!(plant.body_id("frame").is_some());
+        assert_eq!(plant.body_id("no_such_body"), None);
+    }
+
+    #[test]
+    fn body_xmat_is_the_identity_for_an_unrotated_frame_at_rest() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        let frame = plant.body_id("frame").expect("model has a frame body");
+        // xmat is a computed (kinematic) quantity, zeroed until forward() or
+        // step() runs it -- same rule as sensordata.
+        plant.forward();
+        // The frame body has no <body ... euler=".."/quat=".."> offset, so at
+        // the model's default qpos (identity free-joint orientation) its
+        // world rotation is the identity matrix.
+        assert_eq!(
+            plant.body_xmat(frame),
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    /// `set_xfrc_applied` actually reaches `mjData::xfrc_applied` -- proven
+    /// the same way `set_ctrl_changes_the_trajectory` proves `set_ctrl`
+    /// reaches `mjData::ctrl`: a pushed body diverges from an unpushed one.
+    #[test]
+    fn set_xfrc_applied_changes_the_trajectory() {
+        let mut pushed = Plant::open(&model_path()).expect("the onewheel model should load");
+        let mut coasting = Plant::open(&model_path()).expect("the onewheel model should load");
+        let frame = pushed.body_id("frame").expect("model has a frame body");
+
+        for _ in 0..20 {
+            pushed.set_xfrc_applied(frame, [500.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+            pushed.step();
+            coasting.step();
+        }
+
+        assert_ne!(
+            pushed.qvel(),
+            coasting.qvel(),
+            "20 steps of a held external force must diverge from an unpushed coast"
+        );
     }
 }

@@ -11,5 +11,6 @@ This is the binary with motion authority — it links `hal-actuate` and
 only and cannot actuate; `crates/xtask` gates that at the dependency-graph
 level.
 
-`--backend sim` and `--backend null` both currently resolve to the
-`sim-backend` stub. Run `board-app-driverless --help` for usage.
+`--backend sim` and `--backend null` both currently resolve to `sim-backend`,
+which steps the real MuJoCo onewheel plant through `hal` (issue #107, I1c).
+Run `board-app-driverless --help` for usage.

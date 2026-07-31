@@ -7,11 +7,13 @@
 //! graph, not at review time.
 //!
 //! Today both `--backend sim` and `--backend null` map to the same
-//! `sim-backend` stub, which advances a synthetic clock rather than stepping
-//! MuJoCo — the FFI backend and a real hardware backend are later increments.
-//! This binary exists to prove the seam and the wiring end to end:
-//! observe → compute → clamp → apply, with `wait_observe()` the only call that
-//! advances time.
+//! `sim-backend`, which steps the real MuJoCo onewheel plant through `hal`
+//! (issue #107, I1c) — a real hardware backend is a later increment. This
+//! binary exists to prove the seam and the wiring end to end: observe →
+//! compute → clamp → apply, with `wait_observe()` the only call that
+//! advances time. Its controller is still `control_core::Controller`'s
+//! stub (always `Command::ZERO`), so this loop does not yet balance
+//! anything — see `crates/control-core` for when the real law lands.
 
 use board_types::Params;
 use control_core::Controller;
@@ -36,8 +38,8 @@ fn print_help() {
     println!();
     println!("OPTIONS:");
     println!("    --backend <sim|null>   Board I/O backend to use (default: sim).");
-    println!("                           Both currently map to the sim-backend stub;");
-    println!("                           MuJoCo FFI is a future milestone.");
+    println!("                           Both currently map to sim-backend, which steps");
+    println!("                           the real MuJoCo onewheel plant through hal.");
     println!("    --cycles <N>           Number of fixed-step cycles to run (default: {DEFAULT_CYCLES}).");
     println!("    -h, --help             Print this help and exit.");
 }

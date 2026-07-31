@@ -65,9 +65,13 @@ bit-identical (`numpy.array_equal`, not a tolerance) at every step.
 
 ## What this crate does NOT do
 
-No `hal` implementation, no controller, no control-law change.
-`sim-backend` stays a stub until I1c (#107). See issues #91 and #106 for the
-full scope split.
+No `hal` implementation, no controller, no control-law change -- `sim-backend`
+implements `hal` against this crate's `Plant` (I1c, #107); see that crate's
+own header for the seams that carry over from here (AC8 in particular: the
+`qacc_warmstart` row above applies unmodified to an open-loop replay, but a
+Rust host driving a real controller must make the pre-loop `mj_forward` call
+the CONTROLLED scenarios make, which this crate does not do on its own). See
+issues #91, #106 and #107 for the full scope split.
 
 ## Version check
 
