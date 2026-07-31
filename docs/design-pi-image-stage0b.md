@@ -236,9 +236,12 @@ CAN is de-risked and is not re-litigated here: Pi 5 / RP1 + `mcp251xfd`, config 
 `dtoverlay=mcp251xfd,spi0-0,interrupt=25`, **not sharing an SPI bus with the IMU** (ICD §4.3;
 the Pi 5 has three SPI controllers, so this is a wiring choice).
 
-**But there is a live, unresolved risk against that path, and at 500 Hz it is severe.** A
-community-reported Pi 5 SPI-tail-latency spike under PREEMPT_RT is the largest open risk here —
-the report itself, and why it's suggestive but not dispositive, are in the reference doc §5.
+**But there is a live, unresolved risk against that path.** A community-reported Pi 5
+SPI-tail-latency spike under PREEMPT_RT is the largest open risk here — the report itself, and
+why it's suggestive but not dispositive, are in the reference doc §5. **Severity, not at 500 Hz
+but against the plant's actual delay budget:** [`design-delay-budget-stage0b.md`](./design-delay-budget-stage0b.md)
+measures the ridden closed loop's real ceiling at 38–39 ms against this spike's reported 1.5–2 ms
+— comfortable, not disqualifying (issue #113).
 
 **Our control period is 2 ms.** A 2 ms SPI stall is an entire missed cycle — and it attacks the
 measurement itself, because a transport with unbounded tail latency does not merely degrade the
@@ -327,3 +330,6 @@ previously stated.
   credentials, the data path, and the open-question ledger.
 - [`design-pi-image-stage0b-verification.md`](./design-pi-image-stage0b-verification.md) — how
   §4's kernel claims were checked against the archive, method and evidence.
+- [`design-delay-budget-stage0b.md`](./design-delay-budget-stage0b.md) — the plant-derived delay
+  budget behind the amended AC-6 (issue #113): the ridden closed loop's measured 38–39 ms
+  ceiling, and what the SPI tail and the estimator each cost against it.
