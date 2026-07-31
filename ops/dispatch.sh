@@ -45,6 +45,16 @@ if [ "${1:-}" = "--audit" ]; then
   audit_routing; exit $?
 fi
 
+ISOLATED=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --isolated) ISOLATED=1 ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 ROLE="${1:-}"
 shift || true
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "not a git repo"; exit 2; }
@@ -70,11 +80,40 @@ fi
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 PREFIX="$(awk -F'|' -v r="\`${ROLE}\`" '$2 ~ r {gsub(/[` ]/,"",$5); print $5}' docs/decisions/ROLES.md | head -1)"
+
+# CROSS-ROLE dispatch is the normal case, not the exception -- the COO
+# dispatching Senior Controls is literally what #38 asks for. This check used to
+# compare the DISPATCHER's branch against the DISPATCHED role's prefix and
+# refuse, which blocked the primary use case while allowing the genuinely
+# dangerous one.
+#
+# What actually matters is whether the worker can reach this branch. Under
+# `isolation: worktree` it gets its own worktree and its own branch and cannot
+# touch this one, so the dispatcher's branch is irrelevant. Without isolation
+# the worker commits HERE, onto a branch belonging to another role -- which is
+# the real "work gets lost" failure ADR-0006 describes.
+#
+# So: gate on isolation, not on the dispatcher's branch.
 if [ -n "$PREFIX" ] && [ "$PREFIX" != "—" ]; then
   case "$BRANCH" in
-    "$PREFIX"*) : ;;
-    *) fail "branch '${BRANCH}' does not carry ${ROLE}'s prefix '${PREFIX}'.
-         Dispatching from another role's branch is how work gets lost (ADR-0006)." ;;
+    "$PREFIX"*)
+      echo "branch '${BRANCH}' carries ${ROLE}'s prefix -- same-role dispatch" ;;
+    *)
+      if [ "$ISOLATED" -eq 1 ]; then
+        echo "cross-role dispatch: ${ROLE} (prefix '${PREFIX}') from '${BRANCH}'"
+        echo "  --isolated given: worker gets its OWN worktree and branch, so it"
+        echo "  cannot commit onto this one."
+      else
+        fail "cross-role dispatch: you are on '${BRANCH}' and dispatching ${ROLE},
+         whose prefix is '${PREFIX}'.
+
+         That is fine -- it is the normal case -- but ONLY if the worker runs in
+         its own git worktree (ADR-0006). Without isolation it commits onto THIS
+         branch, which belongs to another role, and the work is lost.
+
+         Re-run with --isolated once you are spawning the agent with
+         isolation: worktree, and a branch starting '${PREFIX}'."
+      fi ;;
   esac
 fi
 
