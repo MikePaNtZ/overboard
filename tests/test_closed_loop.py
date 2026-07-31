@@ -77,14 +77,27 @@ def test_abi_version_is_the_one_this_glue_was_written_against(controller):
     assert controller.abi_version == 1
 
 
-def test_closed_loop_prevents_the_nose_strike(model, controller):
-    """The headline. Open-loop this exact impulse noses into the ground."""
+@pytest.mark.claim(
+    "recovery.peak-pitch",
+    requirement="SR-SIM-5",
+    unit="deg",
+    gate="peak_abs_pitch_deg < 3.0",
+)
+def test_closed_loop_prevents_the_nose_strike(model, controller, record_claim):
+    """The headline. Open-loop this exact impulse noses into the ground.
+
+    This is issue #61's one real claims-manifest entry end-to-end
+    (`recovery.peak-pitch`, docs/design-claims-manifest.md) -- the public
+    site's "closed-loop peak pitch" figure, backed by this gate rather than
+    hand-copied from a run and left to drift.
+    """
     r = run(ImpulseParams(magnitude_ns=NOMINAL_IMPULSE_NS), model=model, controller=controller)
     assert not r.metrics.nose_strike
     assert r.metrics.peak_abs_pitch_deg < 3.0, (
         f"peak |pitch| {r.metrics.peak_abs_pitch_deg:.2f} deg -- the strike angle is "
         "18.6 deg, so anything near it means the controller is barely helping"
     )
+    record_claim(r.metrics.peak_abs_pitch_deg)
 
 
 def test_closed_loop_beats_open_loop_on_the_same_disturbance(model, controller):
