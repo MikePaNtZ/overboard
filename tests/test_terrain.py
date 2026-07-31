@@ -236,3 +236,20 @@ def test_repeat_runs_are_bit_identical():
     assert np.array_equal(a.v_m_s, b.v_m_s)
     assert np.array_equal(a.travel_m, b.travel_m)
     assert a.to_json_dict() == b.to_json_dict()
+
+
+def test_capture_state_records_one_pose_per_sample():
+    """Mirrors `impulse_response.run(capture_state=...)`: same parameter name,
+    same shape, so the renderer treats both scenarios identically. Off by
+    default, so nothing that gates on this scenario pays for the pose history,
+    and `to_json_dict()` -- checked above -- never carries it into metrics.json.
+    """
+    p = TerrainParams(duration_s=6.0)
+    off = run(p, capture_state=False)
+    assert off.qpos.size == 0
+
+    on = run(p, capture_state=True)
+    assert on.qpos.shape[0] == len(on.t), (
+        "one qpos row per recorded sample -- a mismatch would let the renderer "
+        "silently film a trajectory that is not the one the metrics describe"
+    )
