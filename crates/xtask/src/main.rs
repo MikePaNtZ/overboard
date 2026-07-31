@@ -1,6 +1,6 @@
-//! Dependency-graph gate for issue #1: proves `hal-actuate` (motion
-//! authority) is unreachable from `board-app-ridden` at build time, rather
-//! than trusting a reviewer to notice a stray import.
+//! Dependency-graph gate for issue #1 (and, since #91, issue #91 too):
+//! proves each crate in [`FORBIDDEN`] is unreachable from `board-app-ridden`
+//! at build time, rather than trusting a reviewer to notice a stray import.
 //!
 //! `cargo metadata`'s resolve graph already tells us, per edge, whether a
 //! dependency is `Normal`, `Development` (dev-dependency) or `Build`
@@ -19,8 +19,18 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::ExitCode;
 
 const RIDDEN: &str = "board-app-ridden";
-const MARKER: &str = "hal-actuate";
 const CANARY: &str = "canary-ridden";
+
+/// Crates that must never be reachable from `board-app-ridden` over a normal
+/// dependency edge, checked one at a time against the same resolve graph.
+///
+/// `hal-actuate` is motion authority (issue #1, DR-MODE-1). `plant-mujoco`
+/// is a native physics dependency wrapping a non-`no_std` C library
+/// (issue #91) — `hal` itself is `#![no_std]` precisely so nothing shaped
+/// like it can ever link into the ridden binary. `canary-ridden` depends on
+/// every entry here on purpose, so it is the positive control for all of
+/// them, not just the first one added.
+const FORBIDDEN: &[&str] = &["hal-actuate", "plant-mujoco"];
 
 /// True if at least one target (lib, bin, test, ...) links `dep` normally.
 /// The same package can appear with several `dep_kinds` when different
@@ -95,34 +105,42 @@ fn find_package_id(meta: &Metadata, name: &str) -> Result<PackageId, String> {
         })
 }
 
-/// Runs both halves of the gate against one resolve graph (one feature
-/// configuration): the real check, and its positive control.
+/// Runs both halves of the gate, for every crate in [`FORBIDDEN`], against
+/// one resolve graph (one feature configuration): the real check, and its
+/// positive control.
 fn check_boundary(meta: &Metadata, config_label: &str) -> Result<(), String> {
     let graph = Graph::from_metadata(meta)?;
 
     let ridden = find_package_id(meta, RIDDEN)?;
-    let marker = find_package_id(meta, MARKER)?;
     let canary = find_package_id(meta, CANARY)?;
 
     let from_ridden = graph.reachable_from(&ridden.repr);
-    if from_ridden.contains(&marker.repr) {
-        return Err(format!(
-            "[{config_label}] {RIDDEN} can reach {MARKER} over a normal dependency edge. \
-             The ridden binary must have zero motion authority (BoardIo ICD S6.3, DR-MODE-1)."
-        ));
-    }
-
-    // Positive control (issue #1): if `canary-ridden`, which depends on
-    // `hal-actuate` on purpose, is NOT flagged as reaching it, the checker
-    // itself is broken -- e.g. the marker name changed and this file was not
-    // updated -- and that is a worse failure than the boundary itself
-    // breaking, because it fails silently.
     let from_canary = graph.reachable_from(&canary.repr);
-    if !from_canary.contains(&marker.repr) {
-        return Err(format!(
-            "[{config_label}] positive control failed: {CANARY} does not reach {MARKER}, \
-             but it is supposed to depend on it directly. The gate is not working."
-        ));
+
+    for &marker_name in FORBIDDEN {
+        let marker = find_package_id(meta, marker_name)?;
+
+        if from_ridden.contains(&marker.repr) {
+            return Err(format!(
+                "[{config_label}] {RIDDEN} can reach {marker_name} over a normal dependency \
+                 edge. The ridden binary must have zero motion authority and no native \
+                 physics dependency (BoardIo ICD S6.3, DR-MODE-1; issue #91)."
+            ));
+        }
+
+        // Positive control (issue #1): if `canary-ridden`, which depends on
+        // every entry in FORBIDDEN on purpose, is NOT flagged as reaching
+        // this one, the checker itself is broken -- e.g. the marker name
+        // changed and this file was not updated -- and that is a worse
+        // failure than the boundary itself breaking, because it fails
+        // silently.
+        if !from_canary.contains(&marker.repr) {
+            return Err(format!(
+                "[{config_label}] positive control failed: {CANARY} does not reach \
+                 {marker_name}, but it is supposed to depend on it directly. \
+                 The gate is not working."
+            ));
+        }
     }
 
     Ok(())
@@ -162,9 +180,10 @@ fn main() -> ExitCode {
     match run_gate() {
         Ok(()) => {
             println!(
-                "xtask gate: {MARKER} is unreachable from {RIDDEN} \
+                "xtask gate: {} are unreachable from {RIDDEN} \
                  (checked under default features and --all-features); \
-                 {CANARY} was correctly flagged as reaching it."
+                 {CANARY} was correctly flagged as reaching all of them.",
+                FORBIDDEN.join(", ")
             );
             ExitCode::SUCCESS
         }

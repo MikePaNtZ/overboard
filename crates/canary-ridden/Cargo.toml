@@ -8,10 +8,12 @@ license.workspace = true
 name = "canary-ridden"
 path = "src/main.rs"
 
-# NOT a template to copy. This crate exists to be a mistake --
-# `hal-actuate` should never be a dependency of a ridden-shaped binary --
-# and `crates/xtask`'s gate has to have something real to catch it on.
+# NOT a template to copy. This crate exists to be a mistake -- neither
+# `hal-actuate` NOR `plant-mujoco` should ever be a dependency of a
+# ridden-shaped binary -- and `crates/xtask`'s gate has to have something
+# real to catch each of them on.
 [dependencies]
 board-types = { workspace = true }
 hal = { workspace = true }
 hal-actuate = { workspace = true }
+plant-mujoco = { workspace = true }
