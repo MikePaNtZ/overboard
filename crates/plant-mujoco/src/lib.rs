@@ -1,11 +1,15 @@
-//! I1a (issue #91): proves Rust can call `mj_step` at all.
+//! I1a (issue #91): proves Rust can call `mj_step` at all. Extended for I1b
+//! (issue #106) with the `ctrl`-in / `qpos`+`qvel`-out surface a bit-for-bit
+//! open-loop replay against the Python-hosted plant needs (see
+//! `crates/plant-mujoco/README.md`'s "Ordering contract" section, and
+//! `tests/test_plant_equivalence.py`).
 //!
 //! [`Plant`] is a thin owning wrapper around one `mjModel` + one `mjData`,
-//! reached only through `src/shim.c`'s ~60-line, 8-function C surface
+//! reached only through `src/shim.c`'s small, opaque-handle C surface
 //! (`build.rs` compiles it against MuJoCo's own headers, so field offsets are
 //! resolved by the C compiler rather than hand-mirrored in Rust). Nothing
-//! here implements the `hal` seam, is compared against the Python-hosted
-//! plant, or changes the control law -- that is I1b (#106) and I1c (#107).
+//! here implements the `hal` seam, runs a controller, or changes the control
+//! law -- that is I1c (#107).
 //!
 //! `build.rs` links `libmujoco.so.3.10.0` (or the macOS `.dylib` of the same
 //! version) straight out of the pip-installed `mujoco` wheel, so
@@ -35,6 +39,12 @@ extern "C" {
     fn plant_mujoco_step(model: *mut c_void, data: *mut c_void);
     fn plant_mujoco_reset_data(model: *mut c_void, data: *mut c_void);
     fn plant_mujoco_data_time(data: *mut c_void) -> f64;
+    fn plant_mujoco_nq(model: *mut c_void) -> c_int;
+    fn plant_mujoco_nv(model: *mut c_void) -> c_int;
+    fn plant_mujoco_nu(model: *mut c_void) -> c_int;
+    fn plant_mujoco_set_ctrl(data: *mut c_void, ctrl: *const f64, n: c_int);
+    fn plant_mujoco_get_qpos(data: *mut c_void, out: *mut f64, n: c_int);
+    fn plant_mujoco_get_qvel(data: *mut c_void, out: *mut f64, n: c_int);
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -151,6 +161,72 @@ impl Plant {
         // SAFETY: `self.data` is non-null and owned for the life of `self`.
         unsafe { plant_mujoco_data_time(self.data) }
     }
+
+    /// `mjModel::nq` -- the number of generalized position coordinates.
+    pub fn nq(&self) -> usize {
+        // SAFETY: `self.model` is non-null and owned for the life of `self`.
+        unsafe { plant_mujoco_nq(self.model) as usize }
+    }
+
+    /// `mjModel::nv` -- the number of generalized velocity coordinates
+    /// (degrees of freedom; not always equal to `nq`, e.g. a free joint's
+    /// quaternion orientation is 4 `qpos` values but 3 `qvel` values).
+    pub fn nv(&self) -> usize {
+        // SAFETY: see `nq`.
+        unsafe { plant_mujoco_nv(self.model) as usize }
+    }
+
+    /// `mjModel::nu` -- the number of actuators, i.e. the length `set_ctrl`
+    /// expects.
+    pub fn nu(&self) -> usize {
+        // SAFETY: see `nq`.
+        unsafe { plant_mujoco_nu(self.model) as usize }
+    }
+
+    /// Writes `ctrl` into `mjData::ctrl` (issue #106 / I1b). Callers must call
+    /// this **before** [`Plant::step`], never after -- this is the "ctrl
+    /// written before vs within the step" seam I1b exists to pin down, and it
+    /// mirrors the Python scenarios' `data.ctrl[...] = ...` line immediately
+    /// preceding `mujoco.mj_step(model, data)` (see the crate README's
+    /// "Ordering contract" section).
+    ///
+    /// # Panics
+    /// If `ctrl.len() != self.nu()`.
+    pub fn set_ctrl(&mut self, ctrl: &[f64]) {
+        assert_eq!(
+            ctrl.len(),
+            self.nu(),
+            "set_ctrl: expected {} values (mjModel::nu), got {}",
+            self.nu(),
+            ctrl.len()
+        );
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `ctrl` is a valid slice of exactly `nu` `f64`s, matching the `n`
+        // passed and what `mjData::ctrl` is sized for.
+        unsafe { plant_mujoco_set_ctrl(self.data, ctrl.as_ptr(), ctrl.len() as c_int) };
+    }
+
+    /// Reads `mjData::qpos` (issue #106 / I1b). Callers must call this
+    /// **after** [`Plant::step`], mirroring the Python scenarios reading
+    /// state only once `mj_step` has returned -- never before, which is the
+    /// "sensor/state read before vs after the step" seam I1b exists to pin
+    /// down.
+    pub fn qpos(&self) -> Vec<f64> {
+        let mut out = vec![0.0f64; self.nq()];
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `out` has exactly `nq` elements, matching the `n` passed.
+        unsafe { plant_mujoco_get_qpos(self.data, out.as_mut_ptr(), out.len() as c_int) };
+        out
+    }
+
+    /// Reads `mjData::qvel` (issue #106 / I1b). Same call-after-`step` rule as
+    /// [`Plant::qpos`].
+    pub fn qvel(&self) -> Vec<f64> {
+        let mut out = vec![0.0f64; self.nv()];
+        // SAFETY: see `qpos`.
+        unsafe { plant_mujoco_get_qvel(self.data, out.as_mut_ptr(), out.len() as c_int) };
+        out
+    }
 }
 
 impl Drop for Plant {
@@ -220,5 +296,45 @@ mod tests {
             Err(other) => panic!("expected OpenError::LoadFailed, got {other:?}"),
             Ok(_) => panic!("expected OpenError::LoadFailed, but the nonexistent model opened"),
         }
+    }
+
+    /// The onewheel model's own dimensions, checked against known values so a
+    /// silent mismatch (e.g. `nq`/`nv` swapped) fails here rather than only
+    /// showing up as a confusing panic in the I1b replay binary.
+    #[test]
+    fn dimensions_match_the_onewheel_model() {
+        let plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        assert_eq!(plant.nu(), 1, "one motor actuator (wheel_motor)");
+        assert_eq!(plant.qpos().len(), plant.nq());
+        assert_eq!(plant.qvel().len(), plant.nv());
+    }
+
+    /// `set_ctrl` actually reaches `mjData::ctrl` -- proven the same way I1a
+    /// proved `mj_step` ran: by observing something a no-op shim could not
+    /// fake. A held nonzero torque on an otherwise-resting board changes
+    /// `qvel` measurably more than leaving `ctrl` at its default zero.
+    #[test]
+    fn set_ctrl_changes_the_trajectory() {
+        let mut driven = Plant::open(&model_path()).expect("the onewheel model should load");
+        let mut coasting = Plant::open(&model_path()).expect("the onewheel model should load");
+
+        for _ in 0..20 {
+            driven.set_ctrl(&[10.0]);
+            driven.step();
+            coasting.step();
+        }
+
+        assert_ne!(
+            driven.qvel(),
+            coasting.qvel(),
+            "20 steps of nonzero wheel torque must diverge from ctrl=0 coasting"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "set_ctrl: expected 1 values")]
+    fn set_ctrl_panics_on_the_wrong_length() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        plant.set_ctrl(&[1.0, 2.0]);
     }
 }
