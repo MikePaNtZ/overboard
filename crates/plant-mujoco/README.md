@@ -16,25 +16,51 @@ a build error.
 ## Linking
 
 `build.rs` discovers libmujoco via a single `MUJOCO_DIR` env var, with a
-wheel-probe fallback (`python3 -c 'import mujoco'`) if it is unset. Either
-way it links the **same** `libmujoco.so.3.10.0` the pip-installed `mujoco`
-wheel ships and the `sim` CI job already installs from
-`requirements-sim.txt` -- not a system package, not a vendored copy. That is
-what makes the Rust-vs-Python plant equivalence check below meaningful: both
-sides load the identical shared object.
+wheel-probe fallback if it is unset. The probe asks each of these, in order,
+and takes the first that can `import mujoco`:
 
-The build fails loudly, not silently, if no MuJoCo install is found.
+1. `python3`, then `python`, as found on `PATH` — this is what CI hits, since
+   it `pip install`s the wheel into the runner's system Python.
+2. `<repo>/.venv/bin/python3`, then `<repo>/.venv/bin/python` — **this is what
+   a developer machine hits**, because the wheel goes into the repo `.venv`
+   that every other tool here uses, while `python3` on `PATH` is a Homebrew or
+   system interpreter that has never heard of MuJoCo.
 
-**Known local-dev friction (issue #112, macOS only, not fixed here on
-purpose):** the pip wheel's `.dylib` install name does not always match its
-filename, so `cargo test -p plant-mujoco` (and running `target/*/plant-replay`
-directly) can fail to resolve libmujoco at runtime even though the build
-succeeds, depending on which wheel build produced the local venv's `mujoco`
-package. CI (`ubuntu-latest`) is unaffected. Locally, invoking through
-`cargo run`/`cargo test` (not the raw built artifact) works around it: Cargo
-adds the linked library's `OUT_DIR` to `DYLD_LIBRARY_PATH` for every `cargo
-test`/`cargo run` in the same invocation (see the comment in `build.rs`),
-which `tests/test_rust_python_plant_replay_equivalence.py` relies on for exactly this reason.
+`PATH` is probed first, so the `.venv` entries are strictly additive and
+cannot change which libmujoco CI links against.
+
+Either way it links the **same** `libmujoco.so.3.10.0` (or, on macOS,
+`libmujoco.3.10.0.dylib`) the pip-installed `mujoco` wheel ships and the `sim`
+CI job already installs from `requirements-sim.txt` -- not a system package,
+not a vendored copy. That is what makes the Rust-vs-Python plant equivalence
+check below meaningful: both sides load the identical shared object.
+
+The build fails loudly, not silently, if no MuJoCo install is found, and the
+panic lists every interpreter it probed.
+
+### macOS: what issue #112 actually was
+
+**Resolved. `cargo test -p plant-mujoco` passes on macOS from a clean checkout
+with only `pip install -r requirements-sim.txt` -- no `MUJOCO_DIR`, no
+`DYLD_*`, no hand-created symlinks.**
+
+#112 filed this as a *runtime* defect: the wheel's `.dylib` carries a
+framework-style install name that does not match its own filename, so the
+loader could not resolve it. The install name mismatch is real -- `otool -D`
+reports `@rpath/mujoco.framework/Versions/A/libmujoco.3.10.0.dylib` for a file
+actually named `libmujoco.3.10.0.dylib` -- but it is **already handled**, and
+was before #112 was written. `build.rs` symlinks the library into `OUT_DIR`
+under **both** its unversioned and its real versioned name; the versioned one
+is what `DYLD_FALLBACK_LIBRARY_PATH` matches on, by leaf filename, when the
+`@rpath` lookup comes up short. That is why the versioned symlink exists and
+why removing it would look like an unrelated cleanup.
+
+What actually failed on macOS was one step earlier and had nothing to do with
+dylibs: **the build never got far enough to link.** The wheel-probe only asked
+the `PATH` interpreters, so on any machine using the repo `.venv` it panicked
+with "no MuJoCo install found" *despite* `requirements-sim.txt` having been
+installed exactly as documented -- which reads as a broken crate rather than
+an unactivated virtualenv. The `.venv` probe entries above are the fix.
 
 ## Ordering contract (I1b, issue #106)
 

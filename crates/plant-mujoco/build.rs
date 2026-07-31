@@ -13,7 +13,9 @@
 //! `libmujoco.so.*` / `libmujoco*.dylib`. The pip-installed `mujoco` wheel's
 //! own package directory satisfies this shape exactly -- which is also why
 //! the wheel-probe fallback works: `import mujoco` and read
-//! `os.path.dirname(mujoco.__file__)`.
+//! `os.path.dirname(mujoco.__file__)`. The probe asks the `PATH`
+//! interpreters first and then the repo's own `.venv` -- see
+//! [`python_candidates`], which is what makes this build on a Mac (#112).
 //!
 //! The wheel ships no unversioned `libmujoco.so` / `libmujoco.dylib` symlink
 //! for a plain `-lmujoco` to find, so this links the exact same
@@ -134,8 +136,8 @@ fn locate_mujoco() -> PathBuf {
         return PathBuf::from(dir);
     }
 
-    for python in ["python3", "python"] {
-        let output = Command::new(python)
+    for python in python_candidates() {
+        let output = Command::new(&python)
             .args([
                 "-c",
                 "import mujoco, os; print(os.path.dirname(mujoco.__file__))",
@@ -155,11 +157,45 @@ fn locate_mujoco() -> PathBuf {
         "plant-mujoco: no MuJoCo install found. Set MUJOCO_DIR to the 'mujoco' \
          pip package directory (contains 'include/mujoco/*.h' and \
          'libmujoco.*'), or `pip install -r requirements-sim.txt` so the \
-         wheel-probe fallback (`python3 -c 'import mujoco'`) can find it. This \
-         crate refuses to build headless rather than silently degrading to \
-         'no plant' -- that silent degrade is the failure mode this \
-         programme keeps hitting."
+         wheel-probe fallback can find it. Probed, in order: {:?}. This crate \
+         refuses to build headless rather than silently degrading to 'no \
+         plant' -- that silent degrade is the failure mode this programme \
+         keeps hitting.",
+        python_candidates()
     );
+}
+
+/// Interpreters to ask, in order: whatever is on `PATH` first, then the
+/// repo's own `.venv`.
+///
+/// **The `.venv` entries are why `cargo test -p plant-mujoco` works on a Mac
+/// (issue #112).** CI installs the wheel into the runner's system Python, so
+/// `python3` on `PATH` finds it and the first candidate wins. A developer
+/// machine almost never does: the wheel goes into the repo `.venv` that every
+/// other tool here uses (`.venv/bin/python -m pytest`, `scripts/*.py`), and
+/// the `python3` on `PATH` is a Homebrew or system interpreter that has never
+/// heard of MuJoCo. The build then failed with "no MuJoCo install found"
+/// *despite* `requirements-sim.txt` having been installed exactly as
+/// documented -- which reads as a broken crate rather than an unactivated
+/// virtualenv.
+///
+/// Ordering is deliberate: `PATH` is probed FIRST so this is strictly
+/// additive and cannot change which libmujoco CI links against.
+fn python_candidates() -> Vec<String> {
+    let mut out = vec!["python3".to_string(), "python".to_string()];
+
+    // CARGO_MANIFEST_DIR is <repo>/crates/plant-mujoco.
+    if let Ok(manifest) = env::var("CARGO_MANIFEST_DIR") {
+        if let Some(repo) = Path::new(&manifest).ancestors().nth(2) {
+            for exe in ["python3", "python"] {
+                let venv = repo.join(".venv/bin").join(exe);
+                if venv.is_file() {
+                    out.push(venv.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The versioned shared library in `dir`, if any.
