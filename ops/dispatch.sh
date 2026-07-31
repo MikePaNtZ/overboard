@@ -128,8 +128,9 @@ if [ "$#" -gt "$MAX_CONCURRENT" ]; then
 fi
 
 # --- 4. Usage check -------------------------------------------------------
-python3 ops/usage.py --check || fail "daily usage ceiling reached -- do not dispatch.
-         Raise OPS_USAGE_CEILING_M deliberately, or wait."
+python3 ops/usage.py --check || fail "usage threshold reached -- do not dispatch.
+         Raise OPS_USAGE_THRESHOLD_PCT deliberately, or wait."
+echo "  (spend above is a FLOOR: cloud/scheduled agents are absent from it -- #79)"
 
 # --- 5. Agent-type fit ----------------------------------------------------
 # Learned the hard way: sonnet-executor has Read/Write/Edit/Bash/Grep/Glob and
