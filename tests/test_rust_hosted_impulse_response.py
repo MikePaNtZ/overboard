@@ -20,17 +20,16 @@ bit-exact open-loop equivalence (`test_rust_python_plant_replay_equivalence.py`)
 is what rules that out, and it must be green for this test's result to mean
 anything.
 
-WHY THE CONTROLLER CONFIG DIFFERS FROM `test_closed_loop.py`'s DEFAULT
+WHY THE CONTROLLER CONFIG STILL DIFFERS FROM `test_closed_loop.py`'s DEFAULT
 --------------------------------------------------------------------------
-`hal::Observation` carries raw IMU and `motor_current_a` (DR-OBS-1) but no
-wheel-rate/ERPM channel yet -- that plumbing belongs to
-`control_core::Controller`'s real wiring, a separate, later increment, not a
-throwaway comparison harness. So both hosts here use
-`estimator_accel_aiding=2` (command feedforward, needs only the current
-already on the observation) rather than `RustController()`'s own default
-(mode 1, wheeled odometry). This is a DIFFERENT configuration from
-`test_closed_loop_prevents_the_nose_strike`'s 0.879 deg baseline and the two
-numbers are not comparable to each other.
+Both hosts here now run `estimator_accel_aiding=1` (wheel odometry) --
+`RustController()`'s own default, the same mode `test_closed_loop.py` gates
+on (issue #121; `sim-backend` now populates `erpm` from the plant, so this is
+no longer forced to mode 2 by a hal field nobody filled in). The two runs are
+still not directly comparable to `test_closed_loop_prevents_the_nose_strike`'s
+0.879 deg baseline: this scenario is the driverless plant / impulse response,
+that one is the ridden/cascade plant -- different mass, different disturbance,
+different everything except the mode number.
 
 WHY `profile=IDEAL`
 --------------------
@@ -48,11 +47,16 @@ THE TOLERANCE, STATED BEFORE THE COMPARISON RAN
 -------------------------------------------------
 Both hosts run the literal same compiled `control-core`/`safety` objects
 (one reached via `control-ffi`'s C ABI, one called natively) against the
-literal same `libmujoco.so` I1b already proved bit-identical open-loop. The
-only mechanism left that could make them diverge over a 4000-step, chaotic,
-contact-rich trajectory is floating-point summation-order noise -- utterly
-negligible relative to the control loop's own excursions. So the bound below
-is generous on purpose, not fitted to what was observed:
+literal same `libmujoco.so` I1b already proved bit-identical open-loop. Mode 1
+now round-trips wheel rate through ERPM on the Rust side (`sim-backend`
+divides by `RAD_S_PER_ERPM`, this binary multiplies back) where the
+Python-hosted comparator casts `data.qvel[6]` to `f32` directly -- an extra
+`f32` rounding through a ratio that otherwise cancels algebraically, smaller
+than the summation-order noise below it. So the only mechanism left that
+could make the two diverge over a 4000-step, chaotic, contact-rich trajectory
+is still floating-point noise -- utterly negligible relative to the control
+loop's own excursions. So the bound below is generous on purpose, not fitted
+to what was observed:
 
   * `peak_abs_pitch_deg`: absolute difference < 0.1 deg
   * `t_peak_s` / `settle_time_s`: absolute difference < 0.01 s (5 control
@@ -111,8 +115,7 @@ def _python_hosted_metrics() -> dict:
     model = load_model()
     with RustController(
         com_above_axle=False,
-        estimator_accel_aiding=2,
-        accel_ff_current_source=0,
+        estimator_accel_aiding=1,
     ) as controller:
         result = run(
             ImpulseParams(magnitude_ns=NOMINAL_IMPULSE_NS),

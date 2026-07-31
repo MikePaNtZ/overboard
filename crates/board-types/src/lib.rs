@@ -35,6 +35,24 @@ use serde::{Deserialize, Serialize};
 /// eventual bench-measured loaded rolling radius (ICD §10.5) supersedes it.
 pub const DEFAULT_R_EFF_M: f32 = 0.1454;
 
+/// Mechanical wheel rate, rad/s, per 1 ERPM. ICD §10.5: "1 ERPM = 6.98e-3
+/// rad/s" — the same ratio `sim/scenarios/imperfections.py` names
+/// `wheel_rate_quantum_rad_s` (the size of one ERPM step in the wheel-rate
+/// domain). The single Rust-side source for that conversion, so
+/// `erpm <-> wheel_rate_rad_s` round-trips read the same number everywhere
+/// rather than each site hand-copying the literal (issue #121).
+///
+/// **Not derived from an independently-known pole-pair count.** VESC ERPM is
+/// electrical RPM (`mechanical_rpm * pole_pairs`), so this ratio implicitly
+/// encodes the motor's pole-pair count — back-solving `(2*pi/60) / 0.00698`
+/// lands close to 15, a plausible pole-pair count for a hoverboard-class hub
+/// motor, but **that back-derivation has not been confirmed against the
+/// actual motor** and is not asserted as fact here. The ICD's ratio is used
+/// directly instead of an independently guessed pole-pair count, per the
+/// project rule against fabricating a protocol constant that cannot be
+/// verified.
+pub const RAD_S_PER_ERPM: f32 = 0.00698;
+
 // ---------------------------------------------------------------------------
 // Commands — ICD §7.5
 // ---------------------------------------------------------------------------
@@ -381,6 +399,15 @@ mod tests {
         // on the Python side. This crate has no MuJoCo binding to check
         // against the compiled model directly; that check lives in Python.
         assert_eq!(DEFAULT_R_EFF_M, 0.1454);
+    }
+
+    #[test]
+    fn rad_s_per_erpm_matches_the_icd_quantum_sim_scenarios_imperfections_uses() {
+        // Regression pin against sim/scenarios/imperfections.py's
+        // `wheel_rate_quantum_rad_s` (STAGE0_PLACEHOLDER / cutback profiles) --
+        // same ICD §10.5 ratio, so the two cannot silently drift apart. No
+        // Python binding here, so this crate can only pin the literal.
+        assert_eq!(RAD_S_PER_ERPM, 0.00698);
     }
 
     #[test]

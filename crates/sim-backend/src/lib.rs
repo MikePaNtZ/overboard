@@ -41,7 +41,7 @@
 
 use board_types::{
     Applied, Command, DisarmReason, FaultCode, ImuSample, IoError, Observation, Params, Profile,
-    RunMetadata, Saturation, ValidityFlags, DEFAULT_R_EFF_M,
+    RunMetadata, Saturation, ValidityFlags, DEFAULT_R_EFF_M, RAD_S_PER_ERPM,
 };
 use hal::{BoardObserve, CallSequence};
 use hal_actuate::{BoardActuate, Disarm};
@@ -97,6 +97,11 @@ pub struct SimBackend {
     /// `(adr, dim)` into `mjData::sensordata`, resolved once in `open()`.
     gyro_sensor: (usize, usize),
     accel_sensor: (usize, usize),
+    /// `wheel_hinge`'s `jointvel` sensor (issue #121) -- already declared in
+    /// `overboard_onewheel.xml`, unread until now. Same joint and sign
+    /// convention the model's own motor sign comment and `ctrl` use, so no
+    /// extra sign flip is needed here.
+    wheel_vel_sensor: (usize, usize),
     /// `mjModel` body id of the `frame` body, resolved once in `open()`.
     /// Only used by [`SimBackend::apply_external_force`], not by `hal`.
     frame_body: usize,
@@ -230,6 +235,9 @@ impl BoardObserve for SimBackend {
         self.accel_sensor = plant
             .sensor_adr_dim("frame_accel")
             .expect("overboard_onewheel.xml must declare a frame_accel sensor");
+        self.wheel_vel_sensor = plant
+            .sensor_adr_dim("wheel_vel")
+            .expect("overboard_onewheel.xml must declare a wheel_vel sensor");
         self.frame_body = plant
             .body_id("frame")
             .expect("overboard_onewheel.xml must declare a frame body");
@@ -297,6 +305,20 @@ impl BoardObserve for SimBackend {
         let gyro_icd = [-gyro[0] as f32, gyro[1] as f32, -gyro[2] as f32];
         let accel_icd = [-accel[0] as f32, accel[1] as f32, -accel[2] as f32];
 
+        // Wheel rate (issue #121): same `wheel_hinge` joint and sign
+        // convention `ctrl` uses, read via the model's existing `wheel_vel`
+        // jointvel sensor -- read AFTER stepping, same ordering rule as the
+        // IMU sensors above. Converted to ERPM through the single
+        // ICD-sourced ratio (`RAD_S_PER_ERPM`), not quantised to the nearest
+        // integer ERPM: this backend has no imperfection-profile plumbing
+        // yet (see this crate's own header on the actuation-delay stub), so
+        // like `motor_current_a` this is the idealised, noiseless reading --
+        // integer ERPM quantisation is `imperfections.py`'s
+        // `wheel_rate_quantum_rad_s` row, which has no Rust-side home yet.
+        let wheel_rate_rad_s =
+            plant.read_sensor(self.wheel_vel_sensor.0, self.wheel_vel_sensor.1)[0];
+        let erpm = (wheel_rate_rad_s / RAD_S_PER_ERPM as f64) as f32;
+
         let mut obs = Observation::COLD_START;
         obs.cycle = self.cycle;
         obs.t_recv_ns = t_ns;
@@ -307,6 +329,20 @@ impl BoardObserve for SimBackend {
         };
         obs.imu_count = 1;
         obs.motor_current_a = self.applied_current_a;
+        obs.erpm = erpm;
+        // Honestly fresh, not a leftover default (issue #121 AC3): the sim
+        // has no ERPM transport lag to model, so every cycle's ERPM really is
+        // as fresh as the frame carrying it -- unlike hardware, where ICD
+        // §8.4 warns this can be far staler at low speed.
+        obs.erpm_effective_age_ns = 0;
+        // `tacho_raw` and `duty` are deliberately left at COLD_START's zero,
+        // not an oversight (issue #121 AC2): neither has an established,
+        // verifiable semantics to populate honestly yet. `tacho_raw` is a
+        // raw e-rev counter whose wrap/reset convention on the real VESC is
+        // not documented anywhere this project can check; `duty` depends on
+        // bus voltage and back-EMF, which this backend does not model at
+        // all. Inventing either would be presenting a fabricated protocol
+        // quantity as data, which this project rules out explicitly.
         obs.validity = ValidityFlags::ALL_FRESH;
 
         self.seq.on_observe();
