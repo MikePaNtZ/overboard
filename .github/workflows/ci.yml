@@ -140,62 +140,17 @@ jobs:
         run: pytest tests/ -v
 
   # ---------------------------------------------------------------------
-  # Policy gate. Stdlib-only Python, no install step, a couple of seconds.
+  # The `policy` job MOVED to .github/workflows/policy.yml (#87).
   #
-  # Checks the decision record has not drifted from its own index, that every
-  # top-level directory has a named owner, and that public-facing markdown
-  # neither uses the absolutes this project committed to never saying nor
-  # makes claims without a requirement ID behind them. Full rationale, and
-  # why the capability-language check is advisory rather than hard, is in
-  # docs/decisions/ADR-0003-policy-ci-gate.md.
+  # Not deleted -- relocated, so the job's owner owns its file. This file is
+  # Senior Controls' by CODEOWNERS; the policy gate is the COO's by ADR-0003,
+  # and every COO change to it was tripping a turf failure that needed an
+  # override. A routine override is a check that has stopped meaning anything.
   #
-  # Deliberately NOT a required status check yet: it has to pass green at
-  # least once first. Required checks stay `rust` and `sim`. It is also not a
-  # `needs:` of the publish job -- a policy failure should not be able to
-  # suppress an artifact whose physics passed.
-  #
-  # Run it locally before opening a PR: python3 .github/policy_check.py
+  # The job kept its NAME. `policy` is a required status check and branch
+  # protection matches by job name, not by workflow file, so protection is
+  # unaffected. Renaming it would hang every PR forever.
   # ---------------------------------------------------------------------
-  policy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      # fetch-depth: 0 is load-bearing, not hygiene. The default depth-1
-      # checkout has no origin/master and no merge-base, so every diff-based
-      # check (turf, doc-drift) resolved no base and SKIPPED ITSELF while the
-      # gate still printed "all hard checks pass". Both had never once run in
-      # CI. See POLICY_BRANCH below for the second half of the same bug.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      # The fence is opened and closed around the run so the summary stays
-      # readable on failure too. PIPESTATUS rather than the pipeline's own
-      # status: `tee` succeeds even when the check does not, and a policy gate
-      # that reports green because its logger worked would be worse than none.
-      - name: Policy gate
-        env:
-          # `actions/checkout` leaves a detached HEAD, so the script's own
-          # `rev-parse --abbrev-ref HEAD` returned the literal string "HEAD",
-          # which matches no registered branch prefix -- so the turf check
-          # skipped on every PR. Pass the real branch name in.
-          POLICY_BRANCH: ${{ github.head_ref || github.ref_name }}
-          POLICY_BASE_REF: origin/${{ github.base_ref || github.event.repository.default_branch }}
-          # POLICY_PR_BODY is deliberately NOT set. Overrides must live in a
-          # commit message so the reason is in git history rather than in a
-          # field anyone can edit after the gate went green.
-        run: |
-          { echo '### Policy gate'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          set +e
-          python3 .github/policy_check.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-          status=${PIPESTATUS[0]}
-          set -e
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          exit $status
 
   # ---------------------------------------------------------------------
   # Film the scenario and publish it, always behind a green gate -- the landing
