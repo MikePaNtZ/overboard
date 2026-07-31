@@ -129,6 +129,44 @@ class ImpulseParams:
     # the signal-path imperfections -- two places to configure the same physics
     # is how they end up disagreeing.
 
+    # -- the control loop's OWN cadence (issue #113) ------------------------
+    #
+    # These are deliberately NOT imperfection-profile rows. The profile is the
+    # plant-and-signal-path fidelity contract (Sr. Mechanical & Systems'); how
+    # often the controller runs and how punctually its output lands are
+    # properties of the *computer*, not of the vehicle. Putting them here keeps
+    # the ICD 12 profile describing one thing.
+
+    control_period_s: float | None = None
+    """Seconds between controller updates. `None` runs it every physics step,
+    which is what every scenario did before this existed and is exactly
+    equivalent to `control_period_s == timestep`. Rounded to a whole number of
+    physics steps, so the physics timestep bounds the representable rates."""
+
+    control_jitter_s: float = 0.0
+    """Lateness of the actuation instant, seconds, drawn per cycle from a
+    seeded uniform `[0, control_jitter_s]`.
+
+    ONE-SIDED ON PURPOSE. Real-time jitter is late-only: a cycle can miss its
+    deadline, it cannot run before its own wake-up. A symmetric model would
+    cancel to zero mean and make jitter look free, which is exactly the
+    optimism this repo's imperfection work exists to remove. It composes with
+    `ImperfectionProfile.actuation_delay_s` rather than replacing it -- that
+    row is the transport's fixed cost, this one is the scheduler's variable
+    cost, and they are in series on the hardware too."""
+
+    control_seed: int = 20260731
+    """Seed for the jitter stream. Never touched when jitter is zero, so a
+    jitter-free run stays bit-identical to one from before this field."""
+
+    physics_timestep_s: float | None = None
+    """Override the model's own timestep for this run, seconds.
+
+    Only needed to study control rates ABOVE the model's 500 Hz timestep, and
+    it is a real change of fidelity: set it and the run is no longer comparable
+    to the pinned gates. `run()` restores the model's timestep afterwards, so a
+    shared model object is not left mutated."""
+
 
 @dataclass
 class ImpulseMetrics:
@@ -163,6 +201,13 @@ class ImpulseMetrics:
     #: runs on truth; the estimator's own contribution when it does not.
     pitch_est_rms_deg: float = 0.0
     pitch_est_max_deg: float = 0.0
+
+    #: What the control loop actually ran at, seconds per cycle, and how many
+    #: cycles it got. Reported rather than assumed from the params: the period
+    #: is rounded to a whole number of physics steps, so the requested rate and
+    #: the delivered one are not always the same number (issue #113).
+    control_period_s: float = 0.0
+    control_cycles: int = 0
 
     # --- provenance ---
     imperfection_profile_id: str = ""
@@ -290,16 +335,33 @@ def run(
     **Radians, nose-up-positive, per ICD 10.1** -- not degrees, and not the
     old nose-down convention. The return is CURRENT in amps; the scenario
     converts to torque via KT_NM_PER_A, and the actuator's ctrlrange bounds the
-    result. The command takes effect `actuation_delay_cycles` steps later.
+    result. The command lands `ImperfectionProfile.actuation_delay_s` later,
+    plus whatever `ImpulseParams.control_jitter_s` adds on that cycle.
+
+    By default the controller runs on EVERY physics step -- 500 Hz, because the
+    model's timestep is 2 ms. `control_period_s` decouples the two so a rate
+    can be swept independently of the physics (issue #113).
 
     Left None the scenario is open-loop -- the baseline the controller has to
     beat.
 
-    Fully deterministic: fixed timestep, no stochastic terms, no wall clock.
-    Two calls with equal params return bit-identical trajectories.
+    Fully deterministic: fixed timestep, no wall clock, and every random draw
+    comes from a seeded generator -- the imperfection profile's for sensing,
+    `ImpulseParams.control_seed`'s for scheduler jitter. Two calls with equal
+    params return bit-identical trajectories.
     """
     params = params or ImpulseParams()
     model = model or load_model()
+    original_timestep = float(model.opt.timestep)
+    if params.physics_timestep_s is not None:
+        model.opt.timestep = float(params.physics_timestep_s)
+    try:
+        return _run(params, model, controller, capture_state, profile)
+    finally:
+        model.opt.timestep = original_timestep
+
+
+def _run(params, model, controller, capture_state, profile) -> ImpulseResult:
     data = mujoco.MjData(model)
 
     frame = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
@@ -346,7 +408,26 @@ def run(
     # delay already separate the two.
     flowing_a = 0.0
 
-    for _ in range(n_steps):
+    # The control loop's own cadence (issue #113). `ctrl_every == 1` is the
+    # historical behaviour -- controller on every physics step -- and every
+    # branch below collapses to exactly that, including the RNG, which is never
+    # drawn from when jitter is off.
+    ctrl_every = 1
+    if params.control_period_s is not None:
+        ctrl_every = max(1, int(round(params.control_period_s / dt)))
+    jitter_rng = (
+        np.random.default_rng(params.control_seed)
+        if params.control_jitter_s > 0.0
+        else None
+    )
+    #: The command the plant is acting on right now, held between updates.
+    proposed = 0.0
+    #: (physics step at which it lands, amps) for a cycle whose output is late.
+    pending: tuple[int, float] | None = None
+    m.control_period_s = ctrl_every * dt
+    m.control_cycles = 0
+
+    for step in range(n_steps):
         data.xfrc_applied[frame] = 0.0
         if params.t0_s <= data.time < params.t0_s + params.duration_s:
             data.xfrc_applied[frame][:3] = force
@@ -357,19 +438,35 @@ def run(
         # Logging the sensor's version would make it impossible to tell a plant
         # problem from a sensing one, which is most of what these runs are for.
         pitch = frame_pitch_rad(model, data)
-        true_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
-        sensed_rate = imp.gyro(true_rate)
-        sensed_wheel = imp.wheel_rate(float(data.qvel[6]), float(data.time))
 
-        proposed = 0.0
-        if controller is not None:
+        # The sensors are READ ONCE PER CONTROL CYCLE, not once per physics
+        # step. Drawing noise at the physics rate would give a slow loop a
+        # quietly different noise realisation from a fast one purely because
+        # the integrator ran more often, which would contaminate the very
+        # comparison the rate sweep exists to make.
+        if controller is not None and step % ctrl_every == 0:
+            true_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
+            sensed_rate = imp.gyro(true_rate)
+            sensed_wheel = imp.wheel_rate(float(data.qvel[6]), float(data.time))
             true_gyro, true_accel = imu_readings(model, data)
-            proposed = float(controller(
+            fresh = float(controller(
                 float(data.time), pitch, sensed_rate, sensed_wheel,
                 gyro_rad_s=imp.gyro_vec(true_gyro),
                 accel_m_s2=imp.accel_vec(true_accel),
                 motor_current_a=flowing_a,
             ))
+            m.control_cycles += 1
+            late = 0
+            if jitter_rng is not None:
+                late = int(round(
+                    float(jitter_rng.uniform(0.0, params.control_jitter_s)) / dt
+                ))
+            # A later cycle's output supersedes an earlier one still in flight.
+            # That is what the hardware does too: the drive holds the last
+            # value it was actually handed.
+            pending = (step + late, fresh)
+        if pending is not None and step >= pending[0]:
+            proposed, pending = pending[1], None
 
         # Delay and current-loop lag live here, not in the controller.
         current = imp.apply_current(proposed)
