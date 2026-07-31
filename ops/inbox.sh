@@ -31,9 +31,19 @@ ROWS="$(gh pr list --state open --limit 50 \
           --jq '.[] | select(.isDraft | not)
                 | [ .number,
                     (if .autoMergeRequest == null then "UNQUEUED" else "queued" end),
-                    ( [ .statusCheckRollup[]? | select(.conclusion != null) ] as $c
-                      | if ($c | length) == 0 then "no-checks"
-                        elif ([ $c[] | select(.conclusion != "SUCCESS" and .conclusion != "NEUTRAL" and .conclusion != "SKIPPED") ] | length) > 0 then "RED"
+                    # Branch on .status, NOT on .conclusion being null. A check
+                    # that is still running reports conclusion "" (an empty
+                    # STRING, not null), so filtering on `!= null` kept it and
+                    # then `"" != "SUCCESS"` classified every in-flight PR as
+                    # RED. Caught within minutes of shipping, by this tool
+                    # calling a green PR red -- a report nobody can trust is
+                    # worse than no report.
+                    ( [ .statusCheckRollup[]? ] as $all
+                      | [ $all[] | select(.status == "COMPLETED") ] as $done
+                      | [ $done[] | select(.conclusion != "SUCCESS" and .conclusion != "NEUTRAL" and .conclusion != "SKIPPED") ] as $bad
+                      | if ($all | length) == 0 then "no-checks"
+                        elif ($bad | length) > 0 then "RED"
+                        elif ($done | length) < ($all | length) then "running"
                         else "green" end ),
                     .mergeStateStatus,
                     .title ]
