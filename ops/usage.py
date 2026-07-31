@@ -67,7 +67,21 @@ WEIGHTS = {
 ROLE_MAP = Path(__file__).parent / "session-roles.json"
 
 # Calibration observations for the percentage gate. See estimate_pct().
-CALIBRATION = Path(__file__).parent / "usage-calibration.json"
+#
+# OUTSIDE the repo, deliberately. A calibration describes THE MACHINE'S PLAN,
+# not this checkout -- and every role has its own worktree (ADR-0006), each with
+# its own ops/ directory. Stored in-repo, a reading taken in ~/projects/overboard
+# would be invisible to dispatch running in ~/projects/overboard-coo, and the
+# gate would silently report "NO CALIBRATION" in the very place that gates.
+# Caught while writing the instructions for taking the first reading.
+CALIBRATION = Path.home() / ".claude" / "overboard-usage-calibration.json"
+
+# Below this, a reading is too small to divide by. At 2% an eight-point rounding
+# error on the bar swings the implied full scale by ~50%, and the gate would sit
+# permanently green because it thinks the plan is enormous. A gate that cannot
+# fire is the failure mode this whole design exists to avoid, so it refuses the
+# observation rather than accepting a number it cannot use.
+MIN_CALIBRATION_PCT = 15.0
 
 ROLES_MD = Path(__file__).parent.parent / "docs" / "decisions" / "ROLES.md"
 
@@ -271,6 +285,18 @@ def main() -> int:
     week_m = rolling_week_m(by_day)
 
     if args.calibrate is not None:
+        if args.calibrate < MIN_CALIBRATION_PCT:
+            print(f"REFUSED: {args.calibrate:.0f}% is too low to calibrate from "
+                  f"(minimum {MIN_CALIBRATION_PCT:.0f}%).")
+            print(f"  Full scale is week_m / percent, so a small percent divides by a")
+            print(f"  small number: at {args.calibrate:.0f}% a one-point reading error moves the")
+            print(f"  implied ceiling enormously, and the gate would sit permanently green")
+            print(f"  because it believes the plan is far bigger than it is.")
+            print(f"  Take the reading later in the week, when the bar has moved.")
+            return 1
+        if args.calibrate > 100:
+            print(f"REFUSED: {args.calibrate:.0f}% is not a percentage of a meter.")
+            return 1
         obs = calibration()
         obs.append({"observed_at": datetime.now().isoformat(timespec="seconds"),
                     "percent": args.calibrate, "week_m": round(week_m, 2)})
