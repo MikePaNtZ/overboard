@@ -1,16 +1,18 @@
 //! Positive control for `crates/xtask`'s dependency-graph gate.
 //!
 //! This binary is deliberately shaped like `board-app-ridden` but links
-//! `hal-actuate` anyway — the exact mistake the real crate split exists to
-//! catch (issue #1: a copy-pasted `main.rs` that keeps the `BoardActuate`
-//! import, or a "just for now" dependency that never gets removed). The gate
-//! is required to flag this crate. If it stops flagging `canary-ridden` —
-//! because the marker crate was renamed and the gate wasn't updated, or the
-//! walk logic regressed — that is exactly the silent failure mode this
-//! canary is here to turn loud instead.
+//! `hal-actuate` AND `plant-mujoco` anyway — the exact mistakes the real
+//! crate split, and `hal`'s `#![no_std]`-ness, exist to catch (issue #1: a
+//! copy-pasted `main.rs` that keeps the `BoardActuate` import, or a "just
+//! for now" dependency that never gets removed; issue #91: a native physics
+//! dependency leaking into the ridden binary the same way). The gate is
+//! required to flag this crate for BOTH of them. If it stops flagging
+//! `canary-ridden` — because a marker crate was renamed and the gate wasn't
+//! updated, or the walk logic regressed — that is exactly the silent
+//! failure mode this canary is here to turn loud instead.
 //!
 //! Not built or run as part of the normal loop; `cargo build --workspace`
-//! compiles it (proving the graph edge is real, not just declared and
+//! compiles it (proving both graph edges are real, not just declared and
 //! unused), and `xtask` is what actually inspects it.
 
 use board_types::{
@@ -76,11 +78,19 @@ impl BoardActuate for CanaryBackend {
 
 fn main() {
     println!(
-        "canary-ridden: this binary links hal-actuate on purpose -- \
-         the gate in `cargo run -p xtask -- gate` must fail if it does not flag this crate."
+        "canary-ridden: this binary links hal-actuate AND plant-mujoco on purpose -- \
+         the gate in `cargo run -p xtask -- gate` must fail if it does not flag both."
     );
     let mut backend = CanaryBackend;
     let _ = backend.open();
     let _disarm = backend.arm();
     let _ = backend.apply(&Command::ZERO);
+
+    // Real use of plant-mujoco's linked symbol, not just a declared-but-dead
+    // dependency -- proves the graph edge is something the linker actually
+    // has to resolve.
+    println!(
+        "canary-ridden: linked libmujoco reports version {}",
+        plant_mujoco::mujoco_version_string()
+    );
 }

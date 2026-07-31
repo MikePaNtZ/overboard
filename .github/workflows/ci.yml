@@ -76,6 +76,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # crates/plant-mujoco (issue #91) links libmujoco out of the pip
+      # 'mujoco' wheel -- MUJOCO_DIR is unset here, so its build.rs falls
+      # back to the wheel probe, which needs `python3 -c 'import mujoco'` to
+      # succeed. Installed from the SAME pin as requirements-sim.txt (not
+      # duplicated by hand) so the version this job links can never drift
+      # from the one `sim` tests against.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install MuJoCo (plant-mujoco's native dependency)
+        run: pip install "$(grep '^mujoco==' requirements-sim.txt)"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

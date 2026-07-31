@@ -14,6 +14,7 @@ members = [
     "crates/board-app-driverless",
     "crates/canary-ridden",
     "crates/can-harness",
+    "crates/plant-mujoco",
     "crates/xtask",
 ]
 
@@ -31,5 +32,6 @@ vesc-tx = { path = "crates/vesc-tx" }
 control-core = { path = "crates/control-core" }
 safety = { path = "crates/safety" }
 sim-backend = { path = "crates/sim-backend" }
+plant-mujoco = { path = "crates/plant-mujoco" }
 serde = { version = "1", default-features = false, features = ["derive"] }
 socketcan = "3.6"
