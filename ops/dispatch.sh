@@ -159,10 +159,13 @@ done
 # BEFORE trusting it: audit first, then show exactly what this role would get.
 audit_routing || exit 1
 
+# -E, not basic regex: BSD sed (macOS, where this is actually run) does not
+# support \+, so 's/[^a-z0-9]\+/-/g' silently matched nothing and "Senior
+# Controls" resolved to the label "role:senior controls" -- which cannot exist.
+# The refusal was correct and the slug was wrong.
 ROLE_SLUG="$(printf '%s' "$ROLE" \
   | tr '[:upper:]' '[:lower:]' \
-  | sed -e 's/[^a-z0-9]\+/-/g' -e 's/^-//' -e 's/-$//' \
-        -e 's/^sr-mechanical-and-systems$/sr-mechanical-systems/')"
+  | sed -E -e 's/[^a-z0-9]+/-/g' -e 's/^-+//' -e 's/-+$//')"
 LABEL="role:${ROLE_SLUG}"
 
 if ! gh label list --limit 100 --json name --jq '.[].name' | grep -qx "$LABEL"; then
