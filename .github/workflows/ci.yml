@@ -273,6 +273,15 @@ jobs:
       - name: Build the plant-mujoco replay binary
         run: cargo build --release -p plant-mujoco --bin plant-replay
 
+      # I1c (issue #107, AC6): tests/test_rust_hosted_impulse_response.py shells
+      # out to this binary, same as the `sim` job above. Missing here since
+      # #120 added the binary and its test without updating this job -- the
+      # same "fail rather than pass vacuously" check meant `Emit claims
+      # manifest` below has been failing on every push since, silently,
+      # because this job is not a required status check.
+      - name: Build the Rust-hosted impulse-response binary
+        run: cargo build --release -p board-app-driverless --bin impulse-response-rust
+
       # Only tests that PASS contribute a claim (docs/design-claims-manifest.md,
       # issue #61). A red run here still writes a manifest of whatever passed,
       # but the step itself fails loudly -- this job already needs `sim` green,
