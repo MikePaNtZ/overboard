@@ -185,8 +185,12 @@ fn main() -> ExitCode {
         let proposed_torque_nm =
             regulator.update(attitude.pitch_rad, attitude.pitch_rate_rad_s, 0.0);
         let proposed_amps = proposed_torque_nm / DEFAULT_KT_NM_PER_A;
-        let (bounded_cmd, _envelope_sat) =
-            envelope.apply(Command::MotorCurrent { amps: proposed_amps }, Faults::NONE);
+        let (bounded_cmd, _envelope_sat) = envelope.apply(
+            Command::MotorCurrent {
+                amps: proposed_amps,
+            },
+            Faults::NONE,
+        );
 
         if let Err(e) = backend.apply(&bounded_cmd) {
             eprintln!("impulse-response-rust: apply failed: {e:?}");

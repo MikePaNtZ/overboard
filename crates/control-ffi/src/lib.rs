@@ -476,9 +476,12 @@ pub unsafe extern "C" fn ob_controller_update(
     // the unchanged `max_current_a` clamp downstream actually represents.
     let proposed_torque_nm = ctl.regulator.update(pitch_in, rate_in, pitch_ref);
     let proposed_amps = proposed_torque_nm / ctl.kt_nm_per_a;
-    let (bounded, sat) = ctl
-        .envelope
-        .apply(Command::MotorCurrent { amps: proposed_amps }, Faults::NONE);
+    let (bounded, sat) = ctl.envelope.apply(
+        Command::MotorCurrent {
+            amps: proposed_amps,
+        },
+        Faults::NONE,
+    );
 
     cmd.amps = match bounded {
         Command::MotorCurrent { amps } => amps,
@@ -667,7 +670,10 @@ mod tests {
         // how many amps it took to get there.
         let (o, mut c_low) = (obs(-0.02, 0.0), out());
         let (mut c_high, low, high) = (out(), armed_with_kt(0.5), armed_with_kt(0.9));
-        assert_eq!(unsafe { ob_controller_update(low.0, &o, &mut c_low) }, OB_OK);
+        assert_eq!(
+            unsafe { ob_controller_update(low.0, &o, &mut c_low) },
+            OB_OK
+        );
         assert_eq!(
             unsafe { ob_controller_update(high.0, &o, &mut c_high) },
             OB_OK
@@ -695,7 +701,10 @@ mod tests {
         // ceiling is understood to represent (tau_max = kt * max_current_a).
         let (o, mut c_low) = (obs(-1.0, 0.0), out());
         let (mut c_high, low, high) = (out(), armed_with_kt(0.5), armed_with_kt(0.9));
-        assert_eq!(unsafe { ob_controller_update(low.0, &o, &mut c_low) }, OB_OK);
+        assert_eq!(
+            unsafe { ob_controller_update(low.0, &o, &mut c_low) },
+            OB_OK
+        );
         assert_eq!(
             unsafe { ob_controller_update(high.0, &o, &mut c_high) },
             OB_OK
@@ -714,7 +723,10 @@ mod tests {
         assert!(!h.0.is_null());
         let (o, mut c_default) = (obs(-0.02, 0.0), out());
         unsafe { ob_controller_arm(h.0) };
-        assert_eq!(unsafe { ob_controller_update(h.0, &o, &mut c_default) }, OB_OK);
+        assert_eq!(
+            unsafe { ob_controller_update(h.0, &o, &mut c_default) },
+            OB_OK
+        );
 
         let reference = armed_with_kt(DEFAULT_KT_NM_PER_A);
         let mut c_ref = out();
