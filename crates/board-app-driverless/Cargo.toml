@@ -8,6 +8,10 @@ license.workspace = true
 name = "board-app-driverless"
 path = "src/main.rs"
 
+[[bin]]
+name = "impulse-response-rust"
+path = "src/bin/impulse-response-rust.rs"
+
 [dependencies]
 board-types = { workspace = true }
 hal = { workspace = true }

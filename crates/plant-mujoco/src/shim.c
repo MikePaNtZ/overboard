@@ -87,3 +87,71 @@ void plant_mujoco_get_qpos(void* data, double* out, int n) {
 void plant_mujoco_get_qvel(void* data, double* out, int n) {
   memcpy(out, ((mjData*)data)->qvel, (size_t)n * sizeof(double));
 }
+
+// Everything below exists for I1c (issue #107): sim-backend's `hal`
+// implementation against the real plant, plus the closed-loop Rust-hosted
+// impulse-response harness that AC6 asks for.
+
+// `mjModel::opt.timestep`, seconds. AC2's `wait_observe()` stepping-ratio
+// assertion (control_period / mj_timestep) reads this rather than assuming
+// it matches CYCLE_NS.
+double plant_mujoco_timestep(void* model) {
+  return ((mjModel*)model)->opt.timestep;
+}
+
+// The pre-loop priming call the CONTROLLED scenarios make (AC8 / issue #107's
+// carried-forward criterion): populates sensordata and qacc_warmstart for the
+// controller's first cycle, in the same position relative to the first
+// mj_step every Python scenario uses -- once, right after mj_makeData,
+// before any mj_step.
+void plant_mujoco_forward(void* model, void* data) {
+  mj_forward((const mjModel*)model, (mjData*)data);
+}
+
+// Sensor lookup by NAME, mirroring Python's `mujoco.mj_name2id(...,
+// mjOBJ_SENSOR, name)` -- an index into `sensordata` would silently point at
+// the wrong sensor if the block is ever reordered (see plant.py's
+// imu_readings() docstring for exactly that history).
+int plant_mujoco_sensor_id(void* model, const char* name) {
+  return mj_name2id((const mjModel*)model, mjOBJ_SENSOR, name);
+}
+
+int plant_mujoco_sensor_adr(void* model, int sensor_id) {
+  return ((mjModel*)model)->sensor_adr[sensor_id];
+}
+
+int plant_mujoco_sensor_dim(void* model, int sensor_id) {
+  return ((mjModel*)model)->sensor_dim[sensor_id];
+}
+
+// Ownership: `out` must point to at least `n` writable doubles. Callers must
+// call this AFTER plant_mujoco_step, same rule as plant_mujoco_get_qpos --
+// sensordata is computed during mj_step (or by plant_mujoco_forward before
+// the first one).
+void plant_mujoco_get_sensordata(void* data, int adr, double* out, int n) {
+  memcpy(out, ((mjData*)data)->sensordata + adr, (size_t)n * sizeof(double));
+}
+
+// Body lookup by name, for the Rust-hosted impulse harness's disturbance
+// injection (AC6) -- not used by sim-backend's `hal` implementation itself.
+int plant_mujoco_body_id(void* model, const char* name) {
+  return mj_name2id((const mjModel*)model, mjOBJ_BODY, name);
+}
+
+// Ownership: `frc6` must point to 6 doubles (force xyz, torque xyz), mirroring
+// `mjData::xfrc_applied`'s own per-body layout. Mirrors the Python scenarios'
+// `data.xfrc_applied[body][:3] = force; data.xfrc_applied[body][3:] = torque`.
+void plant_mujoco_set_xfrc_applied(void* data, int body_id, const double* frc6) {
+  memcpy(((mjData*)data)->xfrc_applied + 6 * body_id, frc6, 6 * sizeof(double));
+}
+
+// Ownership: `out` must point to 9 writable doubles. Row-major 3x3 rotation
+// matrix, exactly `data.xmat[body_id].reshape(3, 3)` on the Python side --
+// this exists so the I1c Rust-hosted impulse harness (AC6) can compute
+// ground-truth pitch with `sim/scenarios/impulse_response.py::frame_pitch_rad`'s
+// own formula (atan2(R[0,2], R[2,2])) against the SAME underlying array,
+// rather than re-deriving it from the free joint's quaternion and risking a
+// second, independently-wrong convention.
+void plant_mujoco_get_body_xmat(void* data, int body_id, double* out) {
+  memcpy(out, ((mjData*)data)->xmat + 9 * body_id, 9 * sizeof(double));
+}
