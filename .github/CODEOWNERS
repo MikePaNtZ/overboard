@@ -82,6 +82,13 @@
 /docs/sim-impulse-response.md   @MikePaNtZ
 # role: Senior Controls
 /.github/workflows/ci.yml       @MikePaNtZ
+# The policy gate lives in its OWN workflow so its owner owns its file (#87).
+# ci.yml above is Controls'; the gate is the COO's by ADR-0003, and while they
+# shared a file every COO change to the gate needed a turf override. Stated
+# explicitly rather than relying on /.github/ above, so a later broad
+# /.github/workflows/ rule cannot silently reassign it -- last match wins.
+# role: COO
+/.github/workflows/policy.yml   @MikePaNtZ
 
 # --------------------------------------------------------------------------
 # sim/out/ is harness output and belongs to Controls. Media PROMOTED for

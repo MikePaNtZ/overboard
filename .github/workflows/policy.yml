@@ -1,0 +1,83 @@
+name: Policy
+
+# Split out of ci.yml so the job's OWNER owns its file (#87).
+#
+# ci.yml is Senior Controls' by CODEOWNERS, but the `policy` job is the COO's by
+# ADR-0003. Every COO change to the gate therefore tripped a genuine turf
+# failure and needed a TURF-OVERRIDE -- and a routine override is a check that
+# has stopped meaning anything. One file, one owner, no standing exception.
+#
+# THE JOB IS STILL NAMED `policy`, DELIBERATELY AND LOAD-BEARINGLY.
+# `policy` is a REQUIRED status check on master. Branch protection matches by
+# check-run name, which for Actions is the job name -- not the workflow file.
+# Renaming it would leave protection waiting forever for a check that never
+# reports, which is exactly why `publish-sim-artifact` is documented as
+# deliberately NOT required. Do not rename this job without updating branch
+# protection in the same pass.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A DISTINCT concurrency group from ci.yml. Sharing `ci-${{ github.ref }}` would
+# make the two workflows cancel each other on every push, and the survivor would
+# look green while the other silently never ran.
+concurrency:
+  group: policy-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  # Checks the decision record has not drifted from its own index, that every
+  # top-level directory has a named owner, that no role trespasses on another's
+  # paths, that a doc moves when the code it describes moves, and that public
+  # markdown neither uses the absolutes this project committed to never saying
+  # nor makes claims without a requirement ID. Rationale: ADR-0003, ADR-0005,
+  # ADR-0008.
+  #
+  # Run it locally before opening a PR -- but AFTER committing, and with the CI
+  # environment, or the diff-based checks have nothing to diff and report a
+  # meaningless pass:
+  #
+  #   GITHUB_ACTIONS=1 POLICY_BRANCH=$(git branch --show-current) \
+  #     POLICY_BASE_REF=origin/master python3 .github/policy_check.py
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 is load-bearing, not hygiene. The default depth-1
+      # checkout has no origin/master and no merge-base, so every diff-based
+      # check (turf, doc-drift) resolved no base and SKIPPED ITSELF while the
+      # gate still printed "all hard checks pass". Both had never once run in
+      # CI. See POLICY_BRANCH below for the second half of the same bug.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # The fence is opened and closed around the run so the summary stays
+      # readable on failure too. PIPESTATUS rather than the pipeline's own
+      # status: `tee` succeeds even when the check does not, and a policy gate
+      # that reports green because its logger worked would be worse than none.
+      - name: Policy gate
+        env:
+          # `actions/checkout` leaves a detached HEAD, so the script's own
+          # `rev-parse --abbrev-ref HEAD` returned the literal string "HEAD",
+          # which matches no registered branch prefix -- so the turf check
+          # skipped on every PR. Pass the real branch name in.
+          POLICY_BRANCH: ${{ github.head_ref || github.ref_name }}
+          POLICY_BASE_REF: origin/${{ github.base_ref || github.event.repository.default_branch }}
+          # POLICY_PR_BODY is deliberately NOT set. Overrides must live in a
+          # commit message so the reason is in git history rather than in a
+          # field anyone can edit after the gate went green.
+        run: |
+          { echo '### Policy gate'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          python3 .github/policy_check.py 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $status
