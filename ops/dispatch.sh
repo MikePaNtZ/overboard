@@ -4,10 +4,46 @@
 # This is the only actuator the org has, so it is also the only place worth
 # putting a limit. See docs/decisions/ADR-0007.
 #
-#   ops/dispatch.sh <role> [issue-number ...]
+#   ops/dispatch.sh <role> [issue-number ...]   pre-flight gate, then the queue
+#   ops/dispatch.sh --audit                     routing integrity only, no role
 #
 # Exits non-zero and explains itself if dispatching now would be unsafe.
 set -uo pipefail
+
+# --- 0. Routing integrity -------------------------------------------------
+# Every open issue must carry EXACTLY ONE role: label. Zero labels means the
+# issue is invisible to every cron -- nobody polls it and it is not "backlog",
+# it is lost. Two labels means two routines both pick it up, which is the bug
+# the old --assignee design had (all eight roles share one GitHub account, so
+# --assignee could never discriminate) wearing a new costume.
+#
+# A hard error, never a silent skip. This week produced two checks that
+# reported green while enforcing nothing; this is not going to be the third.
+audit_routing() {
+  local bad=0 line num labels count
+  while IFS=$'\t' read -r num labels; do
+    [ -n "$num" ] || continue
+    if [ -z "$labels" ]; then count=0; else count="$(tr ',' '\n' <<<"$labels" | grep -c '^role:')"; fi
+    if [ "$count" -ne 1 ]; then
+      echo "  ROUTING ERROR: issue #${num} has ${count} role: labels (need exactly 1) [${labels}]"
+      bad=$((bad + 1))
+    fi
+  done < <(gh issue list --state open --limit 200 \
+             --json number,labels \
+             --jq '.[] | "\(.number)\t\([.labels[].name] | join(","))"')
+  if [ "$bad" -gt 0 ]; then
+    echo "REFUSED: ${bad} open issue(s) are unroutable."
+    echo "         An unlabelled issue is invisible to every poll. Label it, or"
+    echo "         close it -- but do not leave it looking like backlog."
+    return 1
+  fi
+  echo "routing: every open issue carries exactly one role: label"
+  return 0
+}
+
+if [ "${1:-}" = "--audit" ]; then
+  audit_routing; exit $?
+fi
 
 ROLE="${1:-}"
 shift || true
@@ -79,5 +115,37 @@ for issue in "$@"; do
   echo "                  ${ROLE}'s turf, and no open design question."
 done
 
+# --- 7. The queue, from the label router ----------------------------------
+# `gh issue list --label` is the poll a cron routine runs. Prove it routes
+# BEFORE trusting it: audit first, then show exactly what this role would get.
+audit_routing || exit 1
+
+ROLE_SLUG="$(printf '%s' "$ROLE" \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed -e 's/[^a-z0-9]\+/-/g' -e 's/^-//' -e 's/-$//' \
+        -e 's/^sr-mechanical-and-systems$/sr-mechanical-systems/')"
+LABEL="role:${ROLE_SLUG}"
+
+if ! gh label list --limit 100 --json name --jq '.[].name' | grep -qx "$LABEL"; then
+  fail "no '${LABEL}' label exists. The router cannot address ${ROLE}.
+         Labels are the routing field -- see #38. Create it before dispatching."
+fi
+
+echo
+echo "  QUEUE for ${ROLE}  (poll: gh issue list --label \"${LABEL}\" --state open)"
+QUEUE="$(gh issue list --state open --label "$LABEL" --limit 50 \
+           --json number,title --jq '.[] | "    #\(.number)  \(.title)"')"
+if [ -z "$QUEUE" ]; then
+  echo "    (empty -- nothing routed to this role)"
+else
+  echo "$QUEUE"
+fi
+
+echo
 echo "OK to dispatch as ${ROLE}. Give each agent its own worktree (isolation: worktree)."
-echo "Every worker reads roles/<role>/CONTEXT.md first and may append to it in its PR."
+echo "Every worker reads roles/<role>/CONTEXT.md first."
+echo "Completed work goes in roles/<role>/log/YYYY-MM-DD-<slug>.md -- ONE FILE PER ENTRY."
+echo "Appending a work-log entry to CONTEXT.md is a CI failure since #92."
+echo
+echo "AFTER the hand-back: run ops/inbox.sh. A finished PR that is not queued is"
+echo "indistinguishable from work in progress -- #94 sat green and unqueued for 10 hours."

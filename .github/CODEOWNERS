@@ -143,8 +143,20 @@
 /roles/                         @MikePaNtZ
 
 # --------------------------------------------------------------------------
-# Each role owns its own working-context file and may append to it in any PR.
-# This is what makes dispatch to a fresh agent safe instead of amnesiac.
+# Each role owns its own working-context file. This is what makes dispatch to a
+# fresh agent safe instead of amnesiac.
+#
+# Standing context is EDITED here; completed work goes in
+# roles/<role>/log/YYYY-MM-DD-<slug>.md, one file per entry. Appending a
+# work-log entry to CONTEXT.md is a CI failure since #92 -- parallel agents all
+# touching one file made every PR conflict every other one.
+#
+# A role missing from this block does not own its own context file: it falls
+# through to /roles/ above, which is the COO's. That is not a formality. The
+# Archivist was Ratified in ROLES.md, given feat/archive/, and left out of this
+# block -- so the turf check refused its own context file the first day the
+# check actually ran (#90). Ratification is all three of registry entry,
+# CODEOWNERS rule and Notion select, or it is none of them.
 # --------------------------------------------------------------------------
 # role: CEO
 /roles/ceo/                     @MikePaNtZ
@@ -158,6 +170,8 @@
 /roles/sr-mechanical-systems/   @MikePaNtZ
 # role: Senior Controls
 /roles/senior-controls/         @MikePaNtZ
+# role: Archivist
+/roles/archivist/               @MikePaNtZ
 
 # --------------------------------------------------------------------------
 # The canonical term list, in git so a machine can read it.
