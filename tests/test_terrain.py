@@ -253,3 +253,10 @@ def test_capture_state_records_one_pose_per_sample():
         "one qpos row per recorded sample -- a mismatch would let the renderer "
         "silently film a trajectory that is not the one the metrics describe"
     )
+
+    # Capturing must not perturb the run: the count check above cannot catch a
+    # capture that changes sub-step or has a side effect, only that pinning the
+    # trajectory itself against the capture_state=False run can.
+    assert np.array_equal(off.t, on.t)
+    assert np.array_equal(off.pitch_deg, on.pitch_deg)
+    assert np.array_equal(off.travel_m, on.travel_m)
