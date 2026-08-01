@@ -176,25 +176,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # The closed-loop gate loads the REAL control law over the C ABI, so the
-      # cdylib has to exist before pytest runs. If it is missing those tests
-      # FAIL rather than skip -- a closed-loop test that passes because the
-      # controller was absent would be worse than no test at all.
-      - name: Build the control library
-        run: cargo build --release -p control-ffi
-
-      # I1b (issue #106): tests/test_rust_python_plant_replay_equivalence.py shells out to this
-      # binary to compare the Rust-hosted plant against the Python-hosted one
-      # it runs in-process. Same "fail rather than skip" rule as above.
-      - name: Build the plant-mujoco replay binary
-        run: cargo build --release -p plant-mujoco --bin plant-replay
-
-      # I1c (issue #107, AC6): tests/test_rust_hosted_impulse_response.py
-      # shells out to this binary to compare the Rust-hosted closed loop
-      # (hal + sim-backend's real plant) against the Python-hosted one. Same
-      # "fail rather than skip" rule as above.
-      - name: Build the Rust-hosted impulse-response binary
-        run: cargo build --release -p board-app-driverless --bin impulse-response-rust
+      # Every Rust artifact the suite loads or shells out to. Shared with
+      # `publish-sim-artifact` below, which runs the same suite indirectly via
+      # `scripts/emit_claims.py` -- see the script's header for why these two
+      # lists must not be maintained separately (issue #124).
+      - name: Build the sim test binaries
+        run: ./scripts/ci_build_sim_binaries.sh
 
       # ADR-0011: tests/test_cmd_envelope_reserve.py shells out to this binary
       # for the command-envelope-reserve acceptance matrix. Same "fail rather
@@ -298,30 +285,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # --compare films the SAME disturbance closed-loop as a second pane, and
-      # that pane runs the real control law over the C ABI -- so the cdylib has
-      # to exist. The script has no fallback here on purpose: publishing an
-      # "open vs closed" clip whose closed pane was quietly uncontrolled would
-      # be a lie in the most visible artifact the project produces.
-      - name: Build the control library
-        run: cargo build --release -p control-ffi
-
-      # I1b (issue #106): tests/test_rust_python_plant_replay_equivalence.py shells out to this
-      # binary, same as the `sim` job above. `Emit claims manifest` below also
-      # runs `pytest tests/`, so without this the equivalence gate's own
-      # "fail rather than pass vacuously" check (added by #117) correctly
-      # fails the suite here too.
-      - name: Build the plant-mujoco replay binary
-        run: cargo build --release -p plant-mujoco --bin plant-replay
-
-      # I1c (issue #107, AC6): tests/test_rust_hosted_impulse_response.py shells
-      # out to this binary, same as the `sim` job above. Missing here since
-      # #120 added the binary and its test without updating this job -- the
-      # same "fail rather than pass vacuously" check meant `Emit claims
-      # manifest` below has been failing on every push since, silently,
-      # because this job is not a required status check.
-      - name: Build the Rust-hosted impulse-response binary
-        run: cargo build --release -p board-app-driverless --bin impulse-response-rust
+      # The SAME list the `sim` job builds, from the same script, because this
+      # job runs the same suite indirectly: `Emit claims manifest` below shells
+      # out to `pytest tests/`. Maintaining these by hand drifted three times
+      # in one day, always in this direction -- #117 and #120 each added a
+      # binary to `sim` and not here, and because this job is deliberately not
+      # a required check, it failed on master unnoticed. Issue #124.
+      #
+      # It also builds the control library the render needs: --compare films
+      # the closed loop as a second pane, and publishing an "open vs closed"
+      # clip whose closed pane was quietly uncontrolled would be a lie in the
+      # most visible artifact the project produces.
+      - name: Build the sim test binaries
+        run: ./scripts/ci_build_sim_binaries.sh
 
       # ADR-0011: tests/test_cmd_envelope_reserve.py shells out to this binary
       # for the command-envelope-reserve acceptance matrix. Same "fail rather
