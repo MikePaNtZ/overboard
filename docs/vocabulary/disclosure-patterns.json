@@ -16,7 +16,11 @@
     "Every pattern is word-anchored. An unanchored scan is worse than useless here: it cries",
     "wolf until people stop reading it. Measured false positives from the manual sweep that",
     "these anchors exist to kill -- 'CI gates' (10x), 'SoC family', a 'relative' table column,",
-    "and '@lru_cache' read as a user tag."
+    "and '@lru_cache' read as a user tag.",
+    "",
+    "2026-07-31: '@rpath' in a macOS dylib path (PR #135) was read as a user tag. Added it and",
+    "its two siblings '@loader_path' and '@executable_path' -- one dyld family, allowlisted the",
+    "way the Python decorators were, because the next macOS linker change raises all three."
   ],
 
   "patterns": [
@@ -46,9 +50,9 @@
     },
     {
       "id": "stray-user-tag",
-      "pattern": "(?<![\\w/`@])@(?!MikePaNtZ\\b)(?!lru_cache\\b)(?!staticmethod\\b)(?!classmethod\\b)(?!property\\b)(?!dataclass\\b)(?!pytest\\b)[A-Za-z][A-Za-z0-9-]{2,38}\\b",
+      "pattern": "(?<![\\w/`@])@(?!MikePaNtZ\\b)(?!lru_cache\\b)(?!staticmethod\\b)(?!classmethod\\b)(?!property\\b)(?!dataclass\\b)(?!pytest\\b)(?!rpath\\b)(?!loader_path\\b)(?!executable_path\\b)[A-Za-z][A-Za-z0-9-]{2,38}\\b",
       "severity": "warn",
-      "note": "Tagging a stranger on a public repo pulls an uninvolved person into our thread -- happened once with an '@COO' tag that resolved to a real, unrelated GitHub user. Owner and Python decorators allowlisted. WARN because role names in prose are legitimate; a human reads the list."
+      "note": "Tagging a stranger on a public repo pulls an uninvolved person into our thread -- happened once with an '@COO' tag that resolved to a real, unrelated GitHub user. Owner, Python decorators and the three dyld path tokens allowlisted. WARN because role names in prose are legitimate; a human reads the list."
     }
   ],
 
