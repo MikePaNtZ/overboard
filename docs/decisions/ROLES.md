@@ -45,6 +45,7 @@ All-three-or-none is the definition of `Ratified`. It is **not** a precondition 
 | `Sr. Mechanical & Systems` | Ratified | `COO` | `feat/mech/` | BoM, platform selection, the bench rig, the sim-to-hardware fidelity contract |
 | `Senior Controls` | Ratified | `COO` | `feat/controls/` | The control law and its harness |
 | `Archivist` | Ratified | `CEO` | `feat/archive/` | Strategy-tier Notion, shared vocabulary across all three repos, drift tooling. Owns `docs/vocabulary/` and no other repo path |
+| `Game Engineer` | Provisional | `COO` | `feat/game/` | The Unreal client in `overboard-game` — rendering, gamepad input, world authoring, avatar. **Peer of Senior Controls, not subordinate to it.** Owns nothing in this repo by design; the wire schema is the seam between them. See ADR-0009 |
 
 ✅ **Branch prefixes for `Sr. Mechanical & Systems` (`feat/mech/`) and `Senior Controls`
 (`feat/controls/`) are now OBSERVED**, not inferred — both appear repeatedly in merged branch
@@ -76,6 +77,12 @@ no pretence of automation.
 
 ## Repo scope
 
-This registry covers all three repos — `overboard`, `overboard-web`, `overboard-viz`. Only
-`overboard` has a `CODEOWNERS` today, so "do not edit paths another role owns" is still
-unfalsifiable in two thirds of the estate. Open item in ADR-0002.
+This registry covers all four repos — `overboard`, `overboard-web`, `overboard-viz`, and
+`overboard-game` (added by ADR-0009). **Two of the four have a `CODEOWNERS`:** `overboard`, and
+`overboard-web` since overboard-web#35. So "do not edit paths another role owns" remains
+unfalsifiable in `overboard-viz` and `overboard-game`. Open item in ADR-0002.
+
+This is also the concrete reason `Game Engineer` is `Provisional` rather than `Ratified`: the
+ownership leg of the three cannot exist until `overboard-game` has a `CODEOWNERS`. The flag
+follows the artefact. It does not block the role from working — see "Existence is not
+ratification" above.

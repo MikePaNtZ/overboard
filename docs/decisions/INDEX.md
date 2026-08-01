@@ -31,6 +31,7 @@ primitive the org has.
 | [0006](ADR-0006-one-worktree-per-role.md) | One git worktree per role | Accepted | Where every session may work |
 | [0007](ADR-0007-delegation-dispatch-and-utilization.md) | Delegation: board → issues → dispatch | Accepted | How work flows downward, and the concurrency cap |
 | [0008](ADR-0008-documentation-drift.md) | Two doc tiers; drift caught at PR time | Accepted | Anyone changing code a doc describes |
+| [0009](ADR-0009-fourth-repo-and-game-engineer-seat.md) | Fourth repo for the Unreal client, and a Game Engineer seat | Accepted | Where game/renderer code may live; the repo-boundary rule |
 
 **Roles:** [`ROLES.md`](ROLES.md) is the single home for the role list — `policy` parses it.
 `python3 .github/policy_check.py --who <path>` answers "who owns this?".

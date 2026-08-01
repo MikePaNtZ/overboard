@@ -31,9 +31,17 @@ finished, which has now happened three times in two days.
 - **This repo is controls only** — Rust, sim, hardware, design docs. The public landing page and all
   brand/marketing assets live in the sibling repo **`overboard-web`** (`~/projects/overboard-web`).
   Keep them separate: no HTML/marketing here, no control code there.
-- The two are coupled by **facts, not code**. When a capability ships or a phase turns over, the
-  `overboard-web` page status must be updated in the same pass (Requirements `SR-WEB-4`, and the
-  lock-step rule in [M0](https://app.notion.com/p/3a8472a5fb6981ffbf73ee8297e62f07)).
+- **Four repos.** `overboard` (controls + sim) · `overboard-web` (landing page, brand) ·
+  `overboard-viz` (cinematic renders) · `overboard-game` (the Unreal client — real-time,
+  gamepad-driven, ADR-0009).
+- **Nothing outside this repo computes board physics.** `overboard-viz` and `overboard-game` both
+  replay motion MuJoCo already computed. A renderer that computes a board state has broken the
+  boundary, and no control decision is ever tuned from one.
+- Each pairing is coupled by **one data contract, not by code** — neither side imports the other.
+  `overboard-viz` reads a pose track; `overboard-game` reads a live state stream and writes
+  setpoints back. When a capability ships or a phase turns over, the `overboard-web` page status
+  must be updated in the same pass (Requirements `SR-WEB-4`, and the lock-step rule in
+  [M0](https://app.notion.com/p/3a8472a5fb6981ffbf73ee8297e62f07)).
 - Local multi-repo work: open `~/projects/overboard.code-workspace` to get both folders at once.
 
 ## Git workflow — feature branches + PR, CI is the gate (HARD)
