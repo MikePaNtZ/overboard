@@ -5,12 +5,23 @@
 - **Read first:** [`docs/decisions/INDEX.md`](../../docs/decisions/INDEX.md)
 
 ## Current sub-goals
-- **The BoM is the critical path and the CEO has called it out.** It was written as a reasoning
-  document; you cannot shop from a reasoning document. Split into two versioned sheets, identical
-  columns — `Part · Part number · Qty · Unit price · Link · Status · Rev` — as **BoM-BENCH-001**
-  (test stand, ~$200–250) and **BoM-BOARD-001**. All prose moves to a linked decision log.
-- **$0 ordered to date.** Hardware ordered / delivered is the first row of the board doc.
-- Verify a Pi 5 / RP1-compatible CAN HAT exists and ships before any board is bought. Blocks everything.
+
+**Delete a sub-goal in the pass that finishes it.** The BoM, the CAN HAT and "$0 ordered" sat here
+as live priorities for four days after closing, with the decisions recording their own closure
+directly below. A stale list is read as the current one by the next session.
+
+- **The fidelity contract does not reach the Rust host yet.** `crates/sim-backend` steps the real
+  plant through the `hal` seam (#107/#120) carrying no imperfection profile —
+  `imperfection_profile_id: None`, raw MuJoCo truth to the IMU, a one-cycle actuation-delay stub.
+  Until that closes SR-SIM-3's "no ideal-only mode in CI" does not hold there, so **no margin
+  claim may be gated through the Rust path.** Wiring is Controls' (#129); the contract is
+  delivered — `log/2026-07-31-imperfection-conformance-vectors.md`.
+- **Every number in `STAGE0_PLACEHOLDER` / `STAGE0_CUTBACK` is still a placeholder.** The shape is
+  the claim; the breakpoints are unmeasured. Next real mech deliverable, gated on hardware being
+  physically in hand rather than on anything in the repo.
+- **Ask to be in the sim-fidelity roadmap session (#33).** Filed CEO/COO, and it defines
+  "representative enough" numerically — that is this role's contract. Being absent from the
+  session that scopes your own surface is how turf gets decided by default.
 
 ## Turf notes
 - Owns `sim/models/`, `sim/scenarios/plant.py`, `imperfections.py`, `bench_*`, `tests/test_bench_*`.

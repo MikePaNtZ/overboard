@@ -377,3 +377,215 @@ class ImperfectionState:
             alpha = self.dt_s / (p.current_loop_tau_s + self.dt_s)
             self._applied_a += alpha * (delayed - self._applied_a)
         return self._applied_a
+
+
+# ==========================================================================
+# The cross-language conformance contract
+# ==========================================================================
+#
+# WHY THIS EXISTS. `crates/sim-backend` now hosts the real plant through the
+# `hal` seam (issue #107, I1c), and it carries NO imperfection profile: it
+# stamps `imperfection_profile_id: None`, feeds raw MuJoCo truth to the IMU,
+# and models actuation delay as a crude one-whole-cycle buffer. Its own module
+# doc defers the gap here by name -- "the real first-order current loop, which
+# arrives with the imperfection profile (Mechanical's territory, not this
+# crate's)". Until it closes, SR-SIM-3's "no ideal-only mode in CI" cannot hold
+# on the Rust-hosted path, and no margin claim may be gated through it.
+#
+# `crates/` is Senior Controls' turf, so the wiring is theirs. What is MINE is
+# the contract: what the seam must reproduce, and how anyone proves it did.
+# These vectors are that contract in executable form -- a Rust conformance test
+# reads them and must reproduce every number. Handing over prose would make
+# Controls re-derive semantics from Python, which is how the two hosts drift.
+#
+# NOT COMMITTED AS A FIXTURE, GENERATED. There is no mech-owned path where a
+# JSON fixture belongs (`/tests/` and `/sim/` default to Controls; `sim/models/`
+# is MJCF), and the BoM set the precedent already: the generator script is the
+# reproducible artefact, not its output. Emit with
+#
+#     python -m sim.scenarios.imperfections --emit-conformance-vectors [path]
+#
+# DETERMINISTIC ROWS ARE BIT-IDENTICAL; STOCHASTIC ROWS ARE NOT. Gyro and
+# accel noise come off numpy's PCG64 through its own normal-variate algorithm.
+# Requiring Rust to reproduce that stream bitwise would mean reimplementing
+# both, and would put the project's strictest cross-language requirement on
+# its least consequential row -- noise is meant to be noise. So the split is:
+#
+#   * Deterministic -- cutback cap, saturation, transport delay, current-loop
+#     lag, wheel-rate quantisation and hold. These have exactly one right
+#     answer and the vectors below carry it. Bit-identical, no tolerance.
+#   * Stochastic -- gyro/accel noise and bias. Conformance is distributional
+#     (1 sigma within tolerance of the profile) plus reproducibility under a
+#     fixed seed. The stream may be Rust's own.
+#
+# A NOTE ON ROUNDING, because it will bite silently. `_quantise` uses
+# `np.round`, which is round-half-to-EVEN. Rust's `f64::round` is
+# round-half-away-from-zero. They disagree at exactly the half-quantum values
+# a quantiser hits constantly, by one whole ERPM, in a direction that changes
+# with the value. The vectors below deliberately include half-quantum inputs;
+# a Rust implementation that reaches for `f64::round` will fail on them, which
+# is the entire point of including them.
+
+#: Bumped when the vector set's SHAPE changes, so a stale Rust fixture fails
+#: loudly rather than silently checking fewer rows than it thinks.
+CONFORMANCE_SCHEMA = "imperfection-conformance-v1"
+
+#: Timesteps the vectors are generated at. Both models in `sim/models/` are
+#: covered, because the delay row is expressed in SECONDS and its sub-cycle
+#: interpolation behaves differently at each -- at the onewheel's 2 ms the
+#: ICD's 1 ms delay is exactly half a cycle, which is the case that once
+#: rounded away to nothing.
+_CONFORMANCE_DT_S = {
+    "overboard_onewheel": 0.002,
+    "bench_rig": 0.0005,
+}
+
+
+def _actuation_case(profile: "ImperfectionProfile", dt_s: float) -> dict:
+    """Drive `apply_current` through the whole chain and record every step.
+
+    The command sequence is chosen to exercise each link: a rising step, a
+    hold long enough for the lag to settle, a sign reversal through zero (the
+    braking case), a command far beyond the cap in both directions, and a
+    return to zero. The wheel-rate sequence sweeps through the cutback
+    breakpoints so a cutback profile's cap MOVES during the run -- a fixed
+    wheel rate would let a Rust implementation pass while treating the cap as
+    a constant.
+    """
+    commanded = [0.0, 0.0, 10.0, 10.0, 10.0, 10.0, -10.0, -10.0,
+                 0.0, 999.0, 999.0, -999.0, 0.0, 0.0, 0.0, 0.0]
+    # Below onset, on the ramp, past full, and negative -- symmetric by design.
+    wheel = [0.0, 5.0, 20.0, 27.0, 35.0, 45.0, 55.0, 60.0,
+             -60.0, -35.0, -20.0, 0.0, 20.0, 40.0, 60.0, 80.0]
+
+    st = ImperfectionState(profile=profile, dt_s=dt_s)
+    applied, available = [], []
+    for c, w in zip(commanded, wheel):
+        applied.append(st.apply_current(c, w))
+        available.append(profile.available_current_a(w))
+    return {
+        "commanded_a": commanded,
+        "wheel_rate_rad_s": wheel,
+        "available_a": available,
+        "applied_a": applied,
+    }
+
+
+def _quantisation_case(profile: "ImperfectionProfile", dt_s: float) -> dict:
+    """Quantisation in isolation, with the hold forced open.
+
+    Samples are spaced far wider than the update period so every call
+    refreshes; whatever comes out is the quantiser alone. Inputs are integer
+    AND half-integer multiples of the quantum -- the halves are the
+    round-half-to-even trap described above.
+    """
+    q = profile.wheel_rate_quantum_rad_s or 1.0
+    ks = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.5,
+          -0.5, -1.5, -2.5, -3.5, 0.4, 0.6, -0.4, -0.6, 137.5]
+    true = [k * q for k in ks]
+    dwell = 10.0 / (profile.wheel_rate_update_hz or 1.0)  # always refreshes
+
+    st = ImperfectionState(profile=profile, dt_s=dt_s)
+    t = [i * dwell for i in range(len(true))]
+    return {
+        "quantum_multiple": ks,
+        "t_s": t,
+        "true_rate_rad_s": true,
+        "reported_rad_s": [st.wheel_rate(v, ti) for v, ti in zip(true, t)],
+    }
+
+
+def _hold_case(profile: "ImperfectionProfile", dt_s: float) -> dict:
+    """The zero-order hold, sampled at the rate a loop actually samples it.
+
+    At the onewheel's 2 ms the STATUS rate and the control period are the same
+    500 Hz, so nothing is ever stale and this case is a near-no-op -- that is
+    a true statement about the configuration, not a hole in the vectors. The
+    bench rig's 0.5 ms is where the staircase appears, one refresh in four.
+
+    Both are worth carrying, because the refresh test is `t - last >= period`
+    on floats that arrive as `i * dt_s`: at the onewheel timestep the two
+    sides are equal to within one ulp and the branch could fall either way.
+    Which way it falls here IS the contract -- an implementation that uses `>`,
+    or that accumulates `last += period` instead of assigning `t`, drifts off
+    these numbers immediately.
+    """
+    st = ImperfectionState(profile=profile, dt_s=dt_s)
+    n = 24
+    t = [i * dt_s for i in range(n)]
+    true = [0.5 * i for i in range(n)]
+    return {
+        "t_s": t,
+        "true_rate_rad_s": true,
+        "reported_rad_s": [st.wheel_rate(v, ti) for v, ti in zip(true, t)],
+    }
+
+
+def _available_current_case(profile: "ImperfectionProfile") -> dict:
+    """The cutback curve as a pure function: below onset, on the ramp at both
+    ends and the midpoint, past full, and the mirror of each. Sampled directly
+    rather than through a run, because a cap that is wrong only at a
+    breakpoint is exactly what a run-shaped test averages away."""
+    ws = [0.0, 1.0, 26.9, 27.0, 30.0, 41.0, 54.9, 55.0, 55.1, 100.0,
+          -26.9, -30.0, -41.0, -55.0, -100.0]
+    return {
+        "wheel_rate_rad_s": ws,
+        "cap_a": [profile.available_current_a(w) for w in ws],
+    }
+
+
+def conformance_vectors() -> dict:
+    """Reference input->output vectors for the deterministic rows of every
+    non-ideal profile, at every timestep in `sim/models/`.
+
+    A host that reproduces all of these is conforming on the deterministic
+    half of ICD §12. `IDEAL` is deliberately absent: it models nothing, so
+    conforming to it proves nothing.
+    """
+    cases = []
+    for profile in (STAGE0_PLACEHOLDER, STAGE0_CUTBACK):
+        for model, dt_s in _CONFORMANCE_DT_S.items():
+            cases.append({
+                "profile_id": profile.profile_id,
+                "model": model,
+                "dt_s": dt_s,
+                "profile": profile.to_dict(),
+                "available_current_a": _available_current_case(profile),
+                "apply_current": _actuation_case(profile, dt_s),
+                "wheel_rate_quantisation": _quantisation_case(profile, dt_s),
+                "wheel_rate_hold": _hold_case(profile, dt_s),
+            })
+    return {
+        "schema": CONFORMANCE_SCHEMA,
+        "rounding": "half-to-even",
+        "chain_order": ["cutback", "saturate", "transport_delay", "current_loop_lag"],
+        "stochastic_rows_are_bit_identical": False,
+        "cases": cases,
+    }
+
+
+if __name__ == "__main__":  # pragma: no cover - a generator, not a scenario
+    import argparse
+    import json
+    import sys
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--emit-conformance-vectors",
+        nargs="?",
+        const="-",
+        metavar="PATH",
+        help="write the cross-host conformance vectors as JSON ('-' or omitted "
+             "for stdout). Regenerate rather than commit: the generator is the "
+             "artefact, its output is not.",
+    )
+    args = ap.parse_args()
+    if args.emit_conformance_vectors is None:
+        ap.error("nothing to do -- pass --emit-conformance-vectors")
+
+    blob = json.dumps(conformance_vectors(), indent=2, allow_nan=False)
+    if args.emit_conformance_vectors == "-":
+        sys.stdout.write(blob + "\n")
+    else:
+        with open(args.emit_conformance_vectors, "w") as fh:
+            fh.write(blob + "\n")
