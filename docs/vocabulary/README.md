@@ -25,6 +25,15 @@ Lane B          -> Concept
 Plus any term whose misuse would mislead — particularly ones that could put an unbacked
 capability claim in front of the public.
 
+**Also `provenance-marks.json`** — the inverse of the mapping above. Some on-frame marks
+carry an obligation that a tag alone cannot discharge: the mark being present *requires*
+other text to also be present. **Playable Sim** is the first of these (#163) — a
+`PLAYABLE SIM` mark with no non-physical channel declaration nearby is exactly the failure
+that category exists to prevent, because it is the only category where some of what is on
+screen is physics and some of it is not. `sweep_public.py` treats a mark with no matching
+declaration as an `error`-severity finding, scoped the same as the vocabulary check: open
+items only, never rewriting a past asset's declaration to match a later, longer one.
+
 ## What does not belong here
 
 Definitions, rationale, or the argument for a term. Those are Notion's. Keep this file
@@ -48,3 +57,10 @@ mistakes made during the sweep it was built from:
   four documents were scored "handled" on the strength of a banner at the top while still
   restating the retired definition further down, and two of those restatements had already
   gone false.
+
+**2026-08-01 — fifth category, `Playable Sim` (#163), and `provenance-marks.json`.** The four
+categories became five before any footage existed: game capture is live, unrecorded and
+unreproducible, so it fit none of `Footage · Sim Replay · Hardware Replay · Concept`. Landed
+in Shared Vocabulary § 1, mirrored here. Playable Sim also introduced the first
+required-presence check — see "What belongs here" above — because it is the only category
+where a tag alone cannot tell a viewer which part of the frame is physics.
