@@ -33,8 +33,19 @@ vocabulary page. That is the duplication rule enforcing itself: the only legal
 way to name a retired term is to say where the current definition lives.
 
 Data lives beside this script and is owned by the Archivist:
-`retired-terms.json`, `disclosure-patterns.json`. The script is deliberately
-dumb about policy -- to change what is enforced, edit the data, not this file.
+`retired-terms.json`, `disclosure-patterns.json`, `provenance-marks.json`.
+The script is deliberately dumb about policy -- to change what is enforced,
+edit the data, not this file.
+
+PROVENANCE MARKS -- THE INVERSE CHECK
+--------------------------------------
+`retired-terms.json` says a pattern must NOT appear. `provenance-marks.json`
+(added for the Playable Sim category, #163) says the opposite: an on-frame
+mark being present creates an obligation for OTHER text -- the non-physical
+channel declaration -- to also be present on the same page. Playable Sim is
+the only category where a tag alone cannot tell a viewer which part of what
+they are looking at is physics and which is not, so a `PLAYABLE SIM` mark
+with no declaration nearby is exactly the failure this check exists to catch.
 """
 
 from __future__ import annotations
@@ -97,6 +108,54 @@ def compile_rules() -> tuple[list, list, re.Pattern | None]:
     return rules, vocab, exempt
 
 
+def compile_marks() -> list[dict]:
+    """Load provenance-marks.json. Optional -- absence just means nothing to check yet."""
+    mf = HERE / "provenance-marks.json"
+    if not mf.exists():
+        return []
+    data = json.loads(mf.read_text())
+    marks = []
+    for m in data.get("marks", []):
+        if not m.get("requires_channel_declaration"):
+            continue
+        required = [
+            (r["id"], re.compile(r["pattern"], re.I))
+            for r in m.get("channel_declaration", {}).get("required_patterns", [])
+        ]
+        marks.append({
+            "id": m["id"],
+            "category": m["category"],
+            "mark_rx": re.compile(m["mark_pattern"]),
+            "required": required,
+        })
+    return marks
+
+
+def scan_declarations(text: str, url: str, marks: list[dict]) -> list[dict]:
+    """A tagged asset must carry its FULL channel declaration wherever it appears.
+
+    Unlike `scan()` this is not line-by-line: the declaration is a list and is
+    expected to span several lines, so the check is over the whole text. A mark
+    with no `marks` entry produces no findings -- this only fires for categories
+    that opted into the extra obligation.
+    """
+    hits = []
+    text = text or ""
+    for m in marks:
+        if not m["mark_rx"].search(text):
+            continue
+        missing = [rid for rid, rx in m["required"] if not rx.search(text)]
+        if missing:
+            hits.append({
+                "rule": f"{m['id']}-missing-declaration",
+                "severity": "error",
+                "url": url,
+                "match": m["category"],
+                "line": f"on-frame mark present but declaration missing: {', '.join(missing)}",
+            })
+    return hits
+
+
 def scan(text: str, url: str, rules: list, exempt: re.Pattern | None) -> list[dict]:
     """Scan text line by line so the canonical-link exemption can apply per line."""
     hits = []
@@ -133,8 +192,14 @@ def sweep(use_timeline: bool = True) -> list[dict]:
     correctly renamed*. Every one would have been a demand to corrupt the record.
     That is exactly the cry-wolf failure the anchors exist to prevent, arriving
     by a different door.
+
+    **Provenance-mark declarations run over OPEN items only, same reasoning.**
+    A past asset's declaration is the record of what was known at the time and
+    is never rewritten to match a later, longer declaration -- see
+    provenance-marks.json.
     """
     disclosure, vocab, exempt = compile_rules()
+    marks = compile_marks()
     findings: list[dict] = []
 
     for repo in REPOS:
@@ -148,6 +213,9 @@ def sweep(use_timeline: bool = True) -> list[dict]:
             rules = disclosure + vocab if live else disclosure
             findings += scan(it.get("title", ""), url, rules, exempt)
             findings += scan(it.get("body", ""), url, rules, exempt)
+            if live and marks:
+                whole = f"{it.get('title', '')}\n{it.get('body', '')}"
+                findings += scan_declarations(whole, url, marks)
 
         # Comments carry no state of their own; treat them as record, not live
         # document. Disclosure still applies -- a leak in a comment is a leak.

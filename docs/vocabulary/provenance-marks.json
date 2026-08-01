@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "owner": "Archivist",
+  "canonical_definitions": "https://app.notion.com/p/3aa472a5fb6981ebaaa7cf2e996f1e8b",
+
+  "_comment": [
+    "Machine-readable record of on-frame provenance marks that carry an extra",
+    "REQUIRED-presence obligation beyond the tag itself. Data only -- no",
+    "definitions, no rationale. Those live in Shared Vocabulary (canonical) sec 1,",
+    "the page named above.",
+    "",
+    "This is the inverse of retired-terms.json. That file says a pattern must NOT",
+    "appear (or must appear only next to a canonical link). This file says a",
+    "pattern -- an on-frame mark -- being present creates an obligation for OTHER",
+    "patterns to also be present on the same page. Consumed by sweep_public.py.",
+    "",
+    "Added 2026-08-01 for the Playable Sim category (#163). Playable Sim is the",
+    "only category where a tag alone cannot tell a viewer which part of what they",
+    "are looking at is physics and which is not -- so the mark is not enough; the",
+    "full non-physical channel declaration has to travel with it, every time.",
+    "",
+    "Scope note: checked over OPEN issues only, same reasoning as retired-terms.json",
+    "-- a past asset's declaration is the record of what was known at the time and",
+    "is never rewritten to match a later, longer declaration."
+  ],
+
+  "marks": [
+    {
+      "id": "playable-sim",
+      "category": "Playable Sim",
+      "on_frame_mark": "PLAYABLE SIM",
+      "mark_pattern": "\\bPLAYABLE SIM\\b",
+      "requires_channel_declaration": true,
+      "channel_declaration": {
+        "_note": [
+          "Every channel invented or diverged from the hardware model, stated",
+          "wherever the asset appears. For Monday's launch these are the four",
+          "required lines. Extend this list as new non-physical channels are added",
+          "-- do not silently shrink it: a shorter declaration on a later asset is",
+          "itself a finding, not a simplification."
+        ],
+        "required_patterns": [
+          {
+            "id": "steering-invented",
+            "pattern": "steering[^.]{0,60}(invented|cylinder)",
+            "note": "The simulated wheel is a cylinder and physically cannot carve."
+          },
+          {
+            "id": "wheel-widened",
+            "pattern": "wheel[^.]{0,60}widened",
+            "note": "The wheel is widened for playability."
+          },
+          {
+            "id": "rigid-ballast",
+            "pattern": "rigid ballast|not a person",
+            "note": "The rider is a rigid ballast, not a person."
+          },
+          {
+            "id": "no-hardware",
+            "pattern": "no(?:body| one)[^.]{0,60}ridden|no hardware exists",
+            "note": "Nobody has ridden anything, because no hardware exists."
+          }
+        ]
+      }
+    }
+  ]
+}
