@@ -32,7 +32,7 @@
 
 use crate::pacer::Pacer;
 use crate::wire::{self, InputIn, StateOut};
-use board_types::{Command, Faults, ImuSample, Params, RAD_S_PER_ERPM};
+use board_types::{Command, Faults, ImuSample, Params, DEFAULT_R_EFF_M, RAD_S_PER_ERPM};
 use control_core::{CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator};
 use hal::BoardObserve;
 use hal_actuate::BoardActuate;
@@ -336,6 +336,20 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut prev_reset_bit = false;
     let mut yaw_rad: f32 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
+    // Dead-reckoned game-ground path -- see the PARTIALLY SYNTHETIC POSITION
+    // block further down for why this exists and what it costs. f64: this
+    // accumulates every tick for the whole run, and f32 would visibly drift
+    // over a multi-minute session the way `wheel_angle_rad` (f32, but reset
+    // every run and never compared against a long-run reference) does not
+    // need to guard against.
+    let mut dr_pos_x_m: f64 = 0.0;
+    let mut dr_pos_y_m: f64 = 0.0;
+    // Latest TRUE MuJoCo x/y, kept for `write_stats` -- the out-of-band
+    // channel that keeps ground truth available now that `pos`'s x/y on the
+    // wire itself are dead-reckoned, not MuJoCo truth. See the PARTIALLY
+    // SYNTHETIC POSITION block below.
+    let mut truth_pos_x_m: f64 = 0.0;
+    let mut truth_pos_y_m: f64 = 0.0;
 
     let start = Instant::now();
     let mut pacer = Pacer::new(Duration::from_nanos(CYCLE_NS), start);
@@ -506,8 +520,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // (Tuesday) needs a better one.
         let roll_rad = (xmat[5] as f32).atan2(xmat[8] as f32);
         let pos_f64 = backend.truth_frame_xpos();
+        truth_pos_x_m = pos_f64[0];
+        truth_pos_y_m = pos_f64[1];
         let quat_f64 = backend.truth_frame_xquat();
-        let pos = [pos_f64[0] as f32, pos_f64[1] as f32, pos_f64[2] as f32];
         let quat = [
             quat_f64[0] as f32,
             quat_f64[1] as f32,
@@ -524,10 +539,56 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // geometry, achievable roll is ~0.03 deg, so `steer` is effectively
         // the primary driver of yaw this weekend, NOT roll; the floor is
         // what makes that honest instead of a limiter that reads as "off".
+        // Updated BEFORE the position dead-reckoning below, so that
+        // reckoning always projects against this tick's freshest heading.
         let roll_authority = YAW_AUTHORITY_FLOOR
             + (1.0 - YAW_AUTHORITY_FLOOR)
                 * (roll_rad.abs() / ROLL_FULL_YAW_AUTHORITY_RAD).clamp(0.0, 1.0);
         yaw_rad += steer * YAW_RATE_GAIN_RAD_S * roll_authority * DT_S as f32;
+
+        // --- PARTIALLY SYNTHETIC POSITION (issue #161/#163) -------------
+        //
+        // MuJoCo only ever translates this plant along its own -X axis
+        // (there is no lateral/carving force anywhere in this model --
+        // `yaw_rad` never touches the physics). Sending MuJoCo's own
+        // x/y straight through, the way W1/W2's first cut did, is
+        // therefore honest about the SIM but dishonest about the GAME: on
+        // screen the board would spin to face `yaw_rad` while sliding
+        // along its original straight line underneath -- a car spinning
+        // out, not a board carving -- and that reads as a physics bug to
+        // anyone watching, on the single artifact (Monday's footage) this
+        // whole channel exists to protect.
+        //
+        // So `pos`'s x/y are DEAD-RECKONED here, in the host (never in
+        // Unreal -- the renderer computes no board state, ADR-0009 and
+        // `overboard-game`'s own README are explicit about that boundary):
+        // REAL forward ground speed (`wheel_rate_rad_s * DEFAULT_R_EFF_M`,
+        // straight off `hal`, nothing invented) is projected along the
+        // SYNTHETIC heading (`yaw_rad`) and integrated every tick. The
+        // result is a curved path that matches where the board is
+        // pointing -- exactly as partially synthetic as the heading that
+        // drives it, no more and no less.
+        //
+        // z is untouched: vertical position stays real MuJoCo truth (the
+        // wheel's own rolling motion in the sagittal plane needs no
+        // reckoning -- MuJoCo already integrates that correctly, which is
+        // the entire property this block exists to compensate for the
+        // LACK of in the lateral plane).
+        //
+        // This is a NEW non-physical channel, same status as `yaw_rad`/
+        // `steer` -- it needs its own line in the `Playable Sim` channel
+        // declaration (issue #163), flagged in this PR's body rather than
+        // added to `docs/vocabulary/` directly (Archivist's path, not
+        // this crate's). True MuJoCo x/y is NOT deleted -- see
+        // `write_stats`'s `truth_pos_x_m`/`truth_pos_y_m` lines below,
+        // which keep it available out-of-band for anything downstream
+        // that needs ground truth rather than the game path.
+        let heading_x = -yaw_rad.cos();
+        let heading_y = -yaw_rad.sin();
+        let forward_speed_m_s = wheel_rate_rad_s * DEFAULT_R_EFF_M;
+        dr_pos_x_m += (forward_speed_m_s * heading_x) as f64 * DT_S;
+        dr_pos_y_m += (forward_speed_m_s * heading_y) as f64 * DT_S;
+        let pos = [dr_pos_x_m as f32, dr_pos_y_m as f32, pos_f64[2] as f32];
 
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
         if pitch_rad.abs() > FALLEN_PITCH_RAD {
@@ -554,7 +615,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
 
         if let Some(path) = &cfg.stats_path {
             if last_stats_write.elapsed() >= Duration::from_millis(100) {
-                write_stats(path, ticks, pacer.missed_deadlines());
+                write_stats(
+                    path,
+                    ticks,
+                    pacer.missed_deadlines(),
+                    truth_pos_x_m,
+                    truth_pos_y_m,
+                );
                 last_stats_write = Instant::now();
             }
         }
@@ -571,7 +638,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     }
 
     if let Some(path) = &cfg.stats_path {
-        write_stats(path, ticks, pacer.missed_deadlines());
+        write_stats(
+            path,
+            ticks,
+            pacer.missed_deadlines(),
+            truth_pos_x_m,
+            truth_pos_y_m,
+        );
     }
 
     let _ = backend.close();
@@ -582,13 +655,25 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     })
 }
 
-/// Best-effort, atomic (write-then-rename) write of the host's own counters,
-/// for `wire-probe` to pick up. Never allowed to interrupt the control loop
-/// -- a failure here is silently swallowed ON PURPOSE (unlike a missed
-/// deadline or a malformed input packet, which issue #161 requires surfacing
-/// loudly): this file is internal tooling, not the wire.
-fn write_stats(path: &std::path::Path, ticks: u64, missed_deadlines: u64) {
+/// Best-effort, atomic (write-then-rename) write of the host's own counters
+/// AND true MuJoCo ground position, for `wire-probe` (or anyone else) to
+/// pick up. Never allowed to interrupt the control loop -- a failure here is
+/// silently swallowed ON PURPOSE (unlike a missed deadline or a malformed
+/// input packet, which issue #161 requires surfacing loudly): this file is
+/// internal tooling, not the wire. `truth_pos_x_m`/`truth_pos_y_m` exist
+/// because `pos`'s x/y on the wire are now dead-reckoned, not MuJoCo truth
+/// (see the PARTIALLY SYNTHETIC POSITION block in `run`) -- ground truth
+/// must stay reachable for anything downstream that needs it.
+fn write_stats(
+    path: &std::path::Path,
+    ticks: u64,
+    missed_deadlines: u64,
+    truth_pos_x_m: f64,
+    truth_pos_y_m: f64,
+) {
     let tmp = path.with_extension("tmp");
-    let contents = format!("ticks={ticks}\nmissed_deadlines={missed_deadlines}\n");
+    let contents = format!(
+        "ticks={ticks}\nmissed_deadlines={missed_deadlines}\ntruth_pos_x_m={truth_pos_x_m}\ntruth_pos_y_m={truth_pos_y_m}\n"
+    );
     let _ = std::fs::write(&tmp, contents).and_then(|_| std::fs::rename(&tmp, path));
 }
