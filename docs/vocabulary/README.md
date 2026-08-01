@@ -64,3 +64,12 @@ unreproducible, so it fit none of `Footage · Sim Replay · Hardware Replay · C
 in Shared Vocabulary § 1, mirrored here. Playable Sim also introduced the first
 required-presence check — see "What belongs here" above — because it is the only category
 where a tag alone cannot tell a viewer which part of the frame is physics.
+
+**2026-08-01, same day — the declaration grew a fifth line before the fourth one shipped.**
+PR #172 (`overboard`, `crates/sim-host`) found that `yaw_rad` never touched the MuJoCo
+physics, so the game's `pos_x`/`pos_y` had to be dead-reckoned in the host from real forward
+speed projected along the synthetic heading rather than sent as literal MuJoCo truth. That is
+a new non-physical channel, caught before any footage existed rather than after — which is the
+whole reason this is a *check* against `provenance-marks.json` and not prose someone has to
+remember. `ground-path-dead-reckoned` added to `required_patterns`; a `PLAYABLE SIM` asset
+declaring only four of five now fails the sweep by name.

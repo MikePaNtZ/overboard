@@ -19,6 +19,17 @@
     "are looking at is physics and which is not -- so the mark is not enough; the",
     "full non-physical channel declaration has to travel with it, every time.",
     "",
+    "2026-08-01, same day: fifth required pattern (ground-path-dead-reckoned) added",
+    "per the COO's finding on PR #172 (sim-host). yaw_rad never touched the MuJoCo",
+    "physics -- the plant only ever translated along one axis -- so the game's",
+    "ground path (pos_x/pos_y on the wire) is now dead-reckoned in the host from",
+    "real forward speed projected along the synthetic heading, not read as literal",
+    "MuJoCo truth. True MuJoCo x/y stays available out-of-band (truth_pos_x_m /",
+    "truth_pos_y_m). This is exactly the failure the category exists to catch: a",
+    "viewer who accepts \"steering is invented\" could still assume the path drawn",
+    "on the ground is simulated output, and a path is exactly what a stranger",
+    "would screenshot and treat as a controls result.",
+    "",
     "Scope note: checked over OPEN issues only, same reasoning as retired-terms.json",
     "-- a past asset's declaration is the record of what was known at the time and",
     "is never rewritten to match a later, longer declaration."
@@ -34,7 +45,7 @@
       "channel_declaration": {
         "_note": [
           "Every channel invented or diverged from the hardware model, stated",
-          "wherever the asset appears. For Monday's launch these are the four",
+          "wherever the asset appears. For Monday's launch these are the five",
           "required lines. Extend this list as new non-physical channels are added",
           "-- do not silently shrink it: a shorter declaration on a later asset is",
           "itself a finding, not a simplification."
@@ -54,6 +65,11 @@
             "id": "rigid-ballast",
             "pattern": "rigid ballast|not a person",
             "note": "The rider is a rigid ballast, not a person."
+          },
+          {
+            "id": "ground-path-dead-reckoned",
+            "pattern": "dead[- ]?reckon\\w*",
+            "note": "The board's ground path is dead-reckoned from a synthetic heading, not simulated -- PR #172. Forward speed and balance come from the physics; the travel direction comes from the invented yaw channel, not tyre contact."
           },
           {
             "id": "no-hardware",
