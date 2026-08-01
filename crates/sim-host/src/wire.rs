@@ -52,9 +52,27 @@ pub struct StateOut {
     pub flags: u16,
     pub seq: u64,
     pub sim_time_s: f64,
-    /// Board body position, raw MuJoCo world frame, metres, Z-up
-    /// right-handed. **Not** converted to Unreal's frame -- that conversion
+    /// Board body position, metres, Z-up right-handed, in `sim-host`'s own
+    /// world frame. **Not** converted to Unreal's frame -- that conversion
     /// is deliberately the game side's job, not this host's (issue #161).
+    ///
+    /// **`x`/`y` are PARTIALLY SYNTHETIC as of issue #161/#169's follow-up,
+    /// NOT raw MuJoCo truth** -- `crate::host` dead-reckons them from real
+    /// forward ground speed projected along the synthetic `yaw_rad` heading,
+    /// because MuJoCo itself never turns this plant (there is no lateral
+    /// force in the model; `yaw_rad` is a rendering-only overlay). Sending
+    /// literal MuJoCo x/y here would make the board spin in place while
+    /// sliding along its original straight line on screen -- a car spinning
+    /// out, not a board carving. See `crate::host::run`'s "PARTIALLY
+    /// SYNTHETIC POSITION" comment for the full reasoning; true MuJoCo x/y
+    /// stays reachable out-of-band via `crate::host::write_stats`'s
+    /// `truth_pos_x_m`/`truth_pos_y_m`. This deviates from this field's
+    /// original description in ADR-0010's wire table (which predates the
+    /// widened-wheel roll-authority finding that made it necessary); per
+    /// that ADR's own "Consequences" section, the code and this comment are
+    /// authoritative over the table when they disagree.
+    ///
+    /// `z` is untouched: vertical position is real MuJoCo truth throughout.
     pub pos: [f32; 3],
     /// Board body orientation, raw MuJoCo, **w, x, y, z**.
     pub quat: [f32; 4],

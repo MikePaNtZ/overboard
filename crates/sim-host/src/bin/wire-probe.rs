@@ -19,7 +19,9 @@
 //! received packet -- seq, sim_time_s, pos_x/y, pitch/yaw/roll_rad,
 //! wheel_rate_rad_s, motor_current_a -- because "the board balances" is no
 //! longer the claim W2 needs evidence for; "speed responds to lean" is, and
-//! that needs a real trace, not a min/max/final summary.
+//! that needs a real trace, not a min/max/final summary. `pos_x`/`pos_y` are
+//! `sim-host`'s dead-reckoned game path, NOT raw MuJoCo x/y -- see
+//! `sim_host::wire::StateOut::pos`'s doc comment.
 
 use sim_host::wire::{StateOut, SCHEMA_VERSION, STATE_MAGIC};
 use std::net::UdpSocket;
