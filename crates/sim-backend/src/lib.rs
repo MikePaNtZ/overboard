@@ -187,6 +187,35 @@ impl SimBackend {
             .expect("truth_frame_xmat: backend is not open");
         plant.body_xmat(self.frame_body)
     }
+
+    /// Ground-truth world position of the `frame` body, metres. Same
+    /// non-`hal`, harness-only status as [`SimBackend::truth_frame_xmat`] --
+    /// added for `sim-host` (issue #161), which puts raw MuJoCo-world
+    /// position directly on its state wire.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_frame_xpos(&self) -> [f64; 3] {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("truth_frame_xpos: backend is not open");
+        plant.body_xpos(self.frame_body)
+    }
+
+    /// Ground-truth world orientation of the `frame` body, quaternion
+    /// w,x,y,z, MuJoCo's own convention. Same status as
+    /// [`SimBackend::truth_frame_xpos`].
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_frame_xquat(&self) -> [f64; 4] {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("truth_frame_xquat: backend is not open");
+        plant.body_xquat(self.frame_body)
+    }
 }
 
 impl BoardObserve for SimBackend {

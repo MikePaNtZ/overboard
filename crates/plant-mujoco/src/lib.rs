@@ -54,6 +54,8 @@ extern "C" {
     fn plant_mujoco_body_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_set_xfrc_applied(data: *mut c_void, body_id: c_int, frc6: *const f64);
     fn plant_mujoco_get_body_xmat(data: *mut c_void, body_id: c_int, out: *mut f64);
+    fn plant_mujoco_get_body_xpos(data: *mut c_void, body_id: c_int, out: *mut f64);
+    fn plant_mujoco_get_body_xquat(data: *mut c_void, body_id: c_int, out: *mut f64);
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -339,6 +341,30 @@ impl Plant {
         // SAFETY: `self.data` is non-null and owned for the life of `self`;
         // `out` has exactly the 9 elements `xmat`'s per-body stride expects.
         unsafe { plant_mujoco_get_body_xmat(self.data, body_id as c_int, out.as_mut_ptr()) };
+        out
+    }
+
+    /// `mjData::xpos[body_id]`, exactly `data.xpos[body]` on the Python side
+    /// -- world position, metres. Exists for `sim-host` (issue #161), which
+    /// puts the board body's position on the wire directly rather than
+    /// re-deriving it from qpos indices that depend on joint declaration
+    /// order. Not part of `hal`.
+    pub fn body_xpos(&self, body_id: usize) -> [f64; 3] {
+        let mut out = [0.0f64; 3];
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `out` has exactly the 3 elements `xpos`'s per-body stride expects.
+        unsafe { plant_mujoco_get_body_xpos(self.data, body_id as c_int, out.as_mut_ptr()) };
+        out
+    }
+
+    /// `mjData::xquat[body_id]`, w,x,y,z -- MuJoCo's own quaternion
+    /// convention, exactly `data.xquat[body]` on the Python side. Same
+    /// rationale and caller as [`Plant::body_xpos`].
+    pub fn body_xquat(&self, body_id: usize) -> [f64; 4] {
+        let mut out = [0.0f64; 4];
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `out` has exactly the 4 elements `xquat`'s per-body stride expects.
+        unsafe { plant_mujoco_get_body_xquat(self.data, body_id as c_int, out.as_mut_ptr()) };
         out
     }
 

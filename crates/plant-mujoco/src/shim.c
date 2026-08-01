@@ -155,3 +155,22 @@ void plant_mujoco_set_xfrc_applied(void* data, int body_id, const double* frc6) 
 void plant_mujoco_get_body_xmat(void* data, int body_id, double* out) {
   memcpy(out, ((mjData*)data)->xmat + 9 * body_id, 9 * sizeof(double));
 }
+
+// Everything below exists for issue #161 (I2): the `sim-host` state-out wire
+// carries the board body's world position and orientation directly, rather
+// than making the receiver re-derive them from qpos indices that depend on
+// the model's joint declaration order -- the same reasoning plant.py's own
+// `data.xpos[body]` / `data.xquat[body]` usage already follows on the Python
+// side (see `sim/scenarios/plant.py`).
+
+// Ownership: `out` must point to 3 writable doubles. World position, exactly
+// `data.xpos[body_id]` on the Python side.
+void plant_mujoco_get_body_xpos(void* data, int body_id, double* out) {
+  memcpy(out, ((mjData*)data)->xpos + 3 * body_id, 3 * sizeof(double));
+}
+
+// Ownership: `out` must point to 4 writable doubles, w,x,y,z -- MuJoCo's own
+// quaternion convention, exactly `data.xquat[body_id]` on the Python side.
+void plant_mujoco_get_body_xquat(void* data, int body_id, double* out) {
+  memcpy(out, ((mjData*)data)->xquat + 4 * body_id, 4 * sizeof(double));
+}
