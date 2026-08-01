@@ -6,24 +6,22 @@
 
 ## Current sub-goals
 
-**Everything the previous list named is closed.** The BoM shipped, the CAN HAT question is
-answered, and wave-0 parts are purchased — `bench_rig.xml` was matched to what was actually
-bought (#72). Those three sat here as live priorities for four days after they were done, with
-the decisions recording their own closure directly below. **If you finish a sub-goal, delete it
-here in the same pass** — a stale priority list is read as the current one by the next session.
+**Delete a sub-goal in the pass that finishes it.** The BoM, the CAN HAT and "$0 ordered" sat here
+as live priorities for four days after closing, with the decisions recording their own closure
+directly below. A stale list is read as the current one by the next session.
 
-- **The fidelity contract does not reach the Rust host yet.** `crates/sim-backend` now steps the
-  real plant through the `hal` seam (#107/#120) and carries no imperfection profile at all —
-  `imperfection_profile_id: None`, raw MuJoCo truth to the IMU, a one-cycle stub for actuation
-  delay. Until that closes, SR-SIM-3's "no ideal-only mode in CI" does not hold on the Rust path
-  and **no margin claim may be gated through it.** `crates/` is Controls' turf, so the wiring is
-  theirs; the contract is mine and is delivered — see the conformance-vector decision below.
+- **The fidelity contract does not reach the Rust host yet.** `crates/sim-backend` steps the real
+  plant through the `hal` seam (#107/#120) carrying no imperfection profile —
+  `imperfection_profile_id: None`, raw MuJoCo truth to the IMU, a one-cycle actuation-delay stub.
+  Until that closes SR-SIM-3's "no ideal-only mode in CI" does not hold there, so **no margin
+  claim may be gated through the Rust path.** Wiring is Controls' (#129); the contract is
+  delivered — `log/2026-07-31-imperfection-conformance-vectors.md`.
 - **Every number in `STAGE0_PLACEHOLDER` / `STAGE0_CUTBACK` is still a placeholder.** The shape is
-  the claim; the breakpoints are not measured. This is the next real mech deliverable and it is
-  gated on hardware being physically in hand, not on anything in the repo.
-- **Ask to be in the sim-fidelity roadmap session (#33).** It is filed CEO/COO and defines
-  "representative enough" numerically — that is the fidelity contract, which is this role's.
-  Being absent from the session that scopes your own surface is how turf gets decided by default.
+  the claim; the breakpoints are unmeasured. Next real mech deliverable, gated on hardware being
+  physically in hand rather than on anything in the repo.
+- **Ask to be in the sim-fidelity roadmap session (#33).** Filed CEO/COO, and it defines
+  "representative enough" numerically — that is this role's contract. Being absent from the
+  session that scopes your own surface is how turf gets decided by default.
 
 ## Turf notes
 - Owns `sim/models/`, `sim/scenarios/plant.py`, `imperfections.py`, `bench_*`, `tests/test_bench_*`.
@@ -115,28 +113,6 @@ window-open time (12.5 ms) that costs nothing against a 2 s decay. No published 
 had ever been derived through the STAGE0 path — only `IDEAL` was ever asserted — so nothing
 downstream needed correcting, only the `scripts/stage0b_runbook.py::step_coast_down` `IDEAL`
 workaround needs removing now, which is Senior Controls' file. PR #70.
-
-**2026-07-31 — The imperfection profile crosses to Rust as generated vectors, and only the
-deterministic half is bit-identical.** Controls' `sim-backend` deferred the profile to this role
-by name in its own module doc, which is a handoff in a code comment — not a lane. Converted to
-GitHub issue (work request) with the contract delivered as executable conformance vectors from
-`conformance_vectors()`, rather than prose Controls would have to re-derive semantics from.
-Two calls worth remembering:
-*(a) Deterministic rows bit-identical, stochastic rows statistical.* Cutback, saturation,
-transport delay, current-loop lag, quantisation and hold have exactly one right answer and are
-pinned to the digit. Gyro/accel noise comes off numpy's PCG64; requiring Rust to reproduce that
-stream bitwise would mean reimplementing PCG64 and its normal-variate algorithm to put the
-project's strictest cross-language requirement on its *least* consequential row. Noise conforms
-distributionally, on its own seeded stream.
-*(b) Generated, never committed.* There is no mech-owned path a JSON fixture belongs in —
-`/tests/` and `/sim/` default to Controls, `sim/models/` is MJCF — and the BoM already set the
-precedent that the generator is the artefact. Emit with
-`python -m sim.scenarios.imperfections --emit-conformance-vectors`.
-The vectors' sharpest tooth: `np.round` is round-half-to-**even**, Rust's `f64::round` is
-half-away-from-zero. They disagree at exactly the half-quantum values a quantiser lands on
-constantly — 0.5→0 not 1, 2.5→2 not 3 — by one whole ERPM, in a direction that flips with the
-value. Four of the nine half-quantum vectors differ. That divergence would have surfaced as an
-unreproducible Rust conformance failure weeks later.
 
 ## Known dead ends
 
