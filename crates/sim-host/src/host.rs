@@ -94,14 +94,55 @@ const BALLAST_RANGE_M: f32 = 0.05;
 const YAW_RATE_GAIN_RAD_S: f32 = 1.5;
 
 /// Roll magnitude, radians, at which the roll-shaped yaw limiter reaches
-/// full authority (issue #161 W2 item 4 -- the cheap stopgap: `steer`'s
-/// authority is scaled by how much the rider is actually leaning, so a
-/// player has to lean to turn hard, rather than `steer` alone doing
-/// everything regardless of stance). Not derived from the widened wheel's
-/// exact tip angle -- this crate has no Rust binding to that collision-hull
-/// geometry query, same caveat as [`FALLEN_PITCH_RAD`] below -- a documented
-/// round placeholder, not a bench-tuned number.
-const ROLL_FULL_YAW_AUTHORITY_RAD: f32 = 10.0 * std::f32::consts::PI / 180.0;
+/// full authority (issue #161 W2 item 4).
+///
+/// **MEASURED, not guessed -- and the honest number is tiny.** The first cut
+/// of this constant (10 deg) was a placeholder that turned out to be ~400x
+/// too high: issue #169's follow-up measured 0.267 deg of yaw over the whole
+/// `send-input` turn phase against a 10 deg threshold, which is what a
+/// limiter that never leaves its floor looks like. Diagnosed by holding a
+/// steady balance controller and commanding `ballast_lat` directly
+/// (`sim/models/overboard_rider.xml`, full stick = 0.05 m target): the
+/// actuator DOES reach its commanded position (~0.0401 m at 0.8 stick, ~full
+/// convergence, ruling out a wiring/scaling bug) -- but the resulting
+/// steady-state roll tops out at only **~0.032 deg at full stick (1.0)**.
+/// The widened wheel geom (issue #161 W2, same PR) is the reason: a much
+/// wider flat cylinder rim sitting on the ground plane resists tipping far
+/// more than the original narrow tire did, and a 70 kg / 0.05 m lateral
+/// shift's ~24.5 N*m of roll torque is nowhere near enough to peel it.
+///
+/// Recalibrated to slightly below that measured ceiling (not the ceiling
+/// itself) so a genuinely full-stick lateral command reliably saturates
+/// `roll_authority` to 1.0 with some margin, rather than sitting just under
+/// it. This is a real physical limit of the current geometry, not a
+/// placeholder -- but see [`YAW_AUTHORITY_FLOOR`] below for why this
+/// threshold alone does NOT make yaw usable.
+const ROLL_FULL_YAW_AUTHORITY_RAD: f32 = 0.025 * std::f32::consts::PI / 180.0;
+
+/// Floor on `roll_authority`, below which the roll gate would otherwise clamp
+/// `steer` to near-zero.
+///
+/// **Read this before touching the roll gate again.** At the widened wheel's
+/// achievable roll (~0.03 deg, see [`ROLL_FULL_YAW_AUTHORITY_RAD`]'s doc
+/// comment), a PURE roll-gated limiter is not "shaped by lean" in any
+/// perceptible sense -- lean this small is not something a player can feel
+/// or control, so without a floor the gate would function as an near-binary
+/// on/off switch that happens to correlate weakly with the lateral stick,
+/// not a smooth lean-to-turn feel. That is not what issue #161 W2 asked
+/// for, and pretending otherwise in a comment is exactly the mistake #169
+/// already caught twice in this crate.
+///
+/// So: **this gate is now largely cosmetic, and steer is effectively the
+/// primary driver of yaw this weekend.** The floor guarantees full `steer`
+/// always produces a usable turn (tens of degrees over a few seconds, not
+/// tenths) regardless of how much roll the geometry can actually deliver;
+/// the roll term still nudges authority up smoothly from the floor toward
+/// 1.0 as lean increases, which is the connection to lean the design intends
+/// to keep and what the real lean-steer controller (Tuesday) inherits --
+/// it just cannot be the WHOLE story on this geometry. 0.35 is chosen so
+/// full steer alone clears a "tens of degrees" turn even at zero lean
+/// (`0.6 (steer) * 1.5 rad/s * 0.35 * a few seconds`); not bench-tuned.
+const YAW_AUTHORITY_FLOOR: f32 = 0.35;
 
 /// How long a stale input is still trusted before the host zeroes it rather
 /// than continuing to act on a value from a client that may have gone away.
@@ -474,12 +515,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             quat_f64[3] as f32,
         ];
 
-        // yaw_rad: NON-PHYSICAL game channel (issue #161), roll-shaped
-        // (issue #161 W2 item 4) -- `steer`'s authority scales with how much
-        // the rider is actually leaning (roll_authority in [0, 1]), zero at
-        // zero roll, full at ROLL_FULL_YAW_AUTHORITY_RAD or beyond. `steer`
-        // still supplies the SIGN/direction; only the magnitude is limited.
-        let roll_authority = (roll_rad.abs() / ROLL_FULL_YAW_AUTHORITY_RAD).clamp(0.0, 1.0);
+        // yaw_rad: NON-PHYSICAL game channel (issue #161). `steer` supplies
+        // the sign/direction; `roll_authority` scales its magnitude between
+        // YAW_AUTHORITY_FLOOR (steer alone, however little the player is
+        // leaning) and 1.0 (at/above ROLL_FULL_YAW_AUTHORITY_RAD's measured,
+        // physically-achievable roll). Read BOTH constants' doc comments
+        // before touching this line -- on the current (widened) wheel
+        // geometry, achievable roll is ~0.03 deg, so `steer` is effectively
+        // the primary driver of yaw this weekend, NOT roll; the floor is
+        // what makes that honest instead of a limiter that reads as "off".
+        let roll_authority = YAW_AUTHORITY_FLOOR
+            + (1.0 - YAW_AUTHORITY_FLOOR)
+                * (roll_rad.abs() / ROLL_FULL_YAW_AUTHORITY_RAD).clamp(0.0, 1.0);
         yaw_rad += steer * YAW_RATE_GAIN_RAD_S * roll_authority * DT_S as f32;
 
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
