@@ -80,6 +80,15 @@
 /scripts/                       @MikePaNtZ
 # role: Senior Controls
 /docs/sim-impulse-response.md   @MikePaNtZ
+# The delay budget is Controls' analysis end to end -- their derivation, their
+# measured numbers, their maintenance. It sat under the COO's /docs/ rule and
+# needed a TURF-OVERRIDE twice in a row (#122 creating it, #134 correcting it),
+# which is the signal that the seam is wrong rather than that the author is.
+# Same shape as ci.yml in #87: a path whose owner and whose author differ, where
+# the override was becoming routine -- and a routine override is a check that
+# has stopped meaning anything.
+# role: Senior Controls
+/docs/design-delay-budget-stage0b.md  @MikePaNtZ
 # role: Senior Controls
 /.github/workflows/ci.yml       @MikePaNtZ
 # The policy gate lives in its OWN workflow so its owner owns its file (#87).

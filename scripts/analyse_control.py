@@ -44,8 +44,15 @@ G = 9.81
 
 
 def ctl(**kw):
-    base = dict(kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0,
-                com_above_axle=True)
+    # This script's own kwargs stay amps/rad for backward compatibility with
+    # every dataset already archived against it; the conversion to the
+    # torque-denominated ABI (issue #137) happens right here.
+    if "kp_a_per_rad" in kw:
+        kw["kp_nm_per_rad"] = kw.pop("kp_a_per_rad") * KT_NM_PER_A
+    if "kd_a_per_rad_s" in kw:
+        kw["kd_nm_per_rad_s"] = kw.pop("kd_a_per_rad_s") * KT_NM_PER_A
+    base = dict(kp_nm_per_rad=200.0 * KT_NM_PER_A, kd_nm_per_rad_s=30.0 * KT_NM_PER_A,
+                kt_nm_per_a=KT_NM_PER_A, max_current_a=40.0, com_above_axle=True)
     base.update(kw)
     return RustController(**base)
 
@@ -184,6 +191,107 @@ def delay_margin() -> dict:
     return {"rows": rows}
 
 
+# ---------------------------------------------------------------------------
+# 3. Issue #113 -- the unstable pole, and the estimator's cut of the delay
+#    budget. See docs/design-delay-budget-stage0b.md for the write-up this
+#    data backs.
+# ---------------------------------------------------------------------------
+
+def unstable_pole() -> dict:
+    """Linearised RHP pole of the RIDDEN plant, read off the compiled model
+    rather than hand-summed -- `mgl` here must equal `plant_summary`'s own
+    figure, since both come from the same `mj_forward` state.
+
+    `p = sqrt(mgl / I)` is the standard small-angle inverted-pendulum-on-a-
+    pivot pole. It ignores the wheel's rolling/translation coupling entirely
+    (that is the outer loop's job, not this pole's), so it is an order-of-
+    magnitude tipping-mode estimate, not a full multi-body derivation --
+    stated as its validity range in the doc, not silently assumed.
+    """
+    import mujoco
+
+    m = build_model(70.0, 0.75, 40.0)
+    d = mujoco.MjData(m)
+    mujoco.mj_forward(m, d)
+    axle = d.xpos[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "frame")].copy()
+
+    summary = plant_summary(m)
+    mgl = summary["mgl_n_m_per_rad"]
+
+    i_total = 0.0
+    bodies = []
+    for i in range(m.nbody):
+        mass = float(m.body_mass[i])
+        if mass <= 0:
+            continue
+        iyy_own = float(m.body_inertia[i][1])
+        dx = float(d.xipos[i][0] - axle[0])
+        dz = float(d.xipos[i][2] - axle[2])
+        parallel = mass * (dx**2 + dz**2)
+        i_total += iyy_own + parallel
+        bodies.append(dict(body=mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, i),
+                           mass_kg=mass, iyy_own=round(iyy_own, 5),
+                           parallel_axis=round(parallel, 5)))
+
+    p = (mgl / i_total) ** 0.5
+    return {
+        "mgl_n_m_per_rad": mgl,
+        "i_total_kg_m2": round(i_total, 4),
+        "unstable_pole_rad_s": round(float(p), 4),
+        "fundamental_delay_ceiling_ms": round(1000.0 / p, 1),
+        "robust_target_ms": round(200.0 / p, 1),
+        "bodies": bodies,
+    }
+
+
+def _boundary_ms(use_estimator: bool, lo_ms: int, hi_ms: int) -> dict:
+    """Bisect to the 1 ms boundary between surviving and striking, for the
+    ridden/cascade plant under the nominal impulse. `lo_ms` must survive and
+    `hi_ms` must strike, or the search is meaningless."""
+    m = build_model(70.0, 0.75, 40.0)
+
+    def strikes(ms: int) -> bool:
+        p = ImperfectionProfile(
+            f"delay-{ms}ms-est{use_estimator}", actuation_delay_s=ms / 1000.0,
+            current_loop_tau_s=STAGE0_PLACEHOLDER.current_loop_tau_s,
+            gyro_noise_rad_s=STAGE0_PLACEHOLDER.gyro_noise_rad_s,
+            gyro_bias_rad_s=STAGE0_PLACEHOLDER.gyro_bias_rad_s,
+            accel_noise_m_s2=STAGE0_PLACEHOLDER.accel_noise_m_s2,
+            wheel_rate_quantum_rad_s=STAGE0_PLACEHOLDER.wheel_rate_quantum_rad_s,
+            wheel_rate_update_hz=STAGE0_PLACEHOLDER.wheel_rate_update_hz)
+        r, _ = impulse(m, profile=p, kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02,
+                       use_estimator=use_estimator)
+        return bool(r.metrics.nose_strike)
+
+    assert not strikes(lo_ms), f"{lo_ms} ms must survive to bound the search"
+    assert strikes(hi_ms), f"{hi_ms} ms must strike to bound the search"
+    while hi_ms - lo_ms > 1:
+        mid = (lo_ms + hi_ms) // 2
+        if strikes(mid):
+            hi_ms = mid
+        else:
+            lo_ms = mid
+    return {"use_estimator": use_estimator, "last_survivor_ms": lo_ms, "first_strike_ms": hi_ms}
+
+
+def delay_budget() -> dict:
+    """The measured total-loop delay-margin ceiling, with and without the
+    estimator in the loop, isolating what the estimator actually costs.
+
+    Bisects rather than re-using `delay_margin()`'s coarse grid, because the
+    number that matters here is the exact boundary, not a scatter of
+    survive/strike points.
+    """
+    with_est = _boundary_ms(True, 20, 100)
+    without_est = _boundary_ms(False, 20, 100)
+    estimator_cost_ms = without_est["last_survivor_ms"] - with_est["last_survivor_ms"]
+    return {
+        "with_estimator": with_est,
+        "without_estimator_truth_pitch": without_est,
+        "estimator_cost_ms": estimator_cost_ms,
+    }
+
+
 def outer_loop_traces() -> dict:
     """Inner-only vs cascade, as time series -- the plot the notebook wants."""
     m = build_model(70.0, 0.75, 40.0)
@@ -215,6 +323,8 @@ def main() -> int:
         "gain_floor": gain_floor(),
         "coupling_sign": coupling_sign(),
         "delay_margin": delay_margin(),
+        "unstable_pole": unstable_pole(),
+        "delay_budget": delay_budget(),
     }
     (args.out_dir / "control-analysis.json").write_text(json.dumps(summary, indent=2) + "\n")
 
@@ -238,6 +348,18 @@ def main() -> int:
     print("\ndelay margin:")
     for r in summary["delay_margin"]["rows"]:
         print(f"  {r['delay_ms']:>4} ms  strike={r['strike']}")
+    up = summary["unstable_pole"]
+    print(f"\nunstable pole (ridden plant): p={up['unstable_pole_rad_s']:.3f} rad/s "
+          f"(I={up['i_total_kg_m2']:.3f} kg*m^2, mgl={up['mgl_n_m_per_rad']:.2f} N*m/rad)  "
+          f"1/p={up['fundamental_delay_ceiling_ms']:.1f} ms  0.2/p={up['robust_target_ms']:.1f} ms")
+    db = summary["delay_budget"]
+    we, wo = db["with_estimator"], db["without_estimator_truth_pitch"]
+    print(f"\ndelay budget (ridden/cascade, nominal impulse):")
+    print(f"  with estimator:    survives {we['last_survivor_ms']} ms, "
+          f"strikes {we['first_strike_ms']} ms")
+    print(f"  truth pitch:       survives {wo['last_survivor_ms']} ms, "
+          f"strikes {wo['first_strike_ms']} ms")
+    print(f"  estimator cost:    ~{db['estimator_cost_ms']} ms of delay margin")
     print(f"\nwrote {args.out_dir/'control-analysis.json'} and .npz")
     return 0
 

@@ -54,7 +54,8 @@ OFF, ACTIVE, SHADOW = 0, 1, 2
 
 def _run(model, use_estimator, tau=TAU, secs=8.0, impulse=NOMINAL_IMPULSE_NS):
     with RustController(
-        kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0,
+        # 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A, re-denominated (#137).
+        kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0, max_current_a=40.0,
         kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True,
         use_estimator=use_estimator, estimator_tau_s=tau,
     ) as c:
@@ -222,7 +223,8 @@ def test_estimator_runs_are_deterministic(ridden):
 # ---------------------------------------------------------------------------
 
 SHUTTLE_GAINS = dict(
-    kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0,
+    # 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A, re-denominated (#137).
+    kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0, max_current_a=40.0,
     kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True,
 )
 
@@ -497,7 +499,7 @@ def test_the_default_current_source_survives_a_backend_that_reports_nothing():
     )
     assert r.metrics.nose_strike, (
         "trusting an unpopulated motor_current_a should fail LOUDLY. If this "
-        "now survives, the default in ObParamsV1 can safely become MEASURED"
+        "now survives, the default in ObParamsV2 can safely become MEASURED"
     )
 
 

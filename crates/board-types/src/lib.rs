@@ -35,6 +35,24 @@ use serde::{Deserialize, Serialize};
 /// eventual bench-measured loaded rolling radius (ICD §10.5) supersedes it.
 pub const DEFAULT_R_EFF_M: f32 = 0.1454;
 
+/// Mechanical wheel rate, rad/s, per 1 ERPM. ICD §10.5: "1 ERPM = 6.98e-3
+/// rad/s" — the same ratio `sim/scenarios/imperfections.py` names
+/// `wheel_rate_quantum_rad_s` (the size of one ERPM step in the wheel-rate
+/// domain). The single Rust-side source for that conversion, so
+/// `erpm <-> wheel_rate_rad_s` round-trips read the same number everywhere
+/// rather than each site hand-copying the literal (issue #121).
+///
+/// **Not derived from an independently-known pole-pair count.** VESC ERPM is
+/// electrical RPM (`mechanical_rpm * pole_pairs`), so this ratio implicitly
+/// encodes the motor's pole-pair count — back-solving `(2*pi/60) / 0.00698`
+/// lands close to 15, a plausible pole-pair count for a hoverboard-class hub
+/// motor, but **that back-derivation has not been confirmed against the
+/// actual motor** and is not asserted as fact here. The ICD's ratio is used
+/// directly instead of an independently guessed pole-pair count, per the
+/// project rule against fabricating a protocol constant that cannot be
+/// verified.
+pub const RAD_S_PER_ERPM: f32 = 0.00698;
+
 // ---------------------------------------------------------------------------
 // Commands — ICD §7.5
 // ---------------------------------------------------------------------------
@@ -310,11 +328,24 @@ pub enum IoError {
 /// equal the hardware backend's, from this same struct** — otherwise a CI
 /// margin gate is not comparable to hardware, which breaks the whole "sim as a
 /// margin instrument" bet.
+///
+/// `kp`/`kd` are **N·m-denominated** (issue #137) — a property of the plant
+/// (its inertia and restoring stiffness), not of the motor. `kt_nm_per_a` is
+/// the one place a fitted motor torque constant crosses this seam: it is used
+/// only to convert a torque command to the amps the drive accepts and to turn
+/// `max_current_a` into a torque ceiling ([`Params::tau_max_nm`]), never inside
+/// the control law itself.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Params {
-    pub kp: f32,
+    /// Proportional gain, N·m per radian of nose-up-positive pitch.
+    pub kp_nm_per_rad: f32,
     pub ki: f32,
-    pub kd: f32,
+    /// Derivative gain, N·m per rad/s.
+    pub kd_nm_per_rad_s: f32,
+    /// Motor torque constant, N·m per amp. **Unfitted placeholder until a
+    /// bench measurement lands** — see `sim/scenarios/plant.py::KT_NM_PER_A`,
+    /// which this mirrors when a run intends to model the plant faithfully.
+    pub kt_nm_per_a: f32,
     /// Envelope clamp on commanded current, amps.
     pub max_current_a: f32,
     /// Envelope trip on absolute pitch, radians.
@@ -324,12 +355,24 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Params {
-            kp: 0.0,
+            kp_nm_per_rad: 0.0,
             ki: 0.0,
-            kd: 0.0,
+            kd_nm_per_rad_s: 0.0,
+            kt_nm_per_a: 0.0,
             max_current_a: 0.0,
             max_abs_pitch_rad: 0.0,
         }
+    }
+}
+
+impl Params {
+    /// `τ_max = kt · I_max` — the 40 A envelope clamp, expressed as the
+    /// torque ceiling it actually represents once the law is denominated in
+    /// torque (issue #137, AC3). A wrong `kt_nm_per_a` moves this number, not
+    /// the loop gain: the headroom shrinks or grows, but the commanded torque
+    /// for a given pitch error does not change.
+    pub fn tau_max_nm(&self) -> f32 {
+        self.kt_nm_per_a * self.max_current_a.abs()
     }
 }
 
@@ -384,8 +427,54 @@ mod tests {
     }
 
     #[test]
+    fn rad_s_per_erpm_matches_the_icd_quantum_sim_scenarios_imperfections_uses() {
+        // Regression pin against sim/scenarios/imperfections.py's
+        // `wheel_rate_quantum_rad_s` (STAGE0_PLACEHOLDER / cutback profiles) --
+        // same ICD §10.5 ratio, so the two cannot silently drift apart. No
+        // Python binding here, so this crate can only pin the literal.
+        assert_eq!(RAD_S_PER_ERPM, 0.00698);
+    }
+
+    #[test]
     fn command_zero_is_zero_amps() {
         assert_eq!(Command::ZERO, Command::MotorCurrent { amps: 0.0 });
+    }
+
+    #[test]
+    fn tau_max_is_kt_times_i_max() {
+        // Issue #137 AC3: the 40 A clamp expressed as a torque ceiling.
+        let p = Params {
+            kt_nm_per_a: 0.7,
+            max_current_a: 40.0,
+            ..Params::default()
+        };
+        assert!((p.tau_max_nm() - 28.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn tau_max_is_unaffected_by_the_sign_of_max_current_a() {
+        let p = Params {
+            kt_nm_per_a: 0.7,
+            max_current_a: -40.0,
+            ..Params::default()
+        };
+        assert!((p.tau_max_nm() - 28.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_higher_kt_buys_more_torque_headroom_at_the_same_current_limit() {
+        // The whole point of issue #137: kt moves headroom, not loop gain.
+        let low = Params {
+            kt_nm_per_a: 0.5,
+            max_current_a: 40.0,
+            ..Params::default()
+        };
+        let high = Params {
+            kt_nm_per_a: 0.9,
+            max_current_a: 40.0,
+            ..Params::default()
+        };
+        assert!(high.tau_max_nm() > low.tau_max_nm());
     }
 
     #[test]

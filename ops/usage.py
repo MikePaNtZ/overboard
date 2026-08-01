@@ -74,14 +74,21 @@ ROLE_MAP = Path(__file__).parent / "session-roles.json"
 # would be invisible to dispatch running in ~/projects/overboard-coo, and the
 # gate would silently report "NO CALIBRATION" in the very place that gates.
 # Caught while writing the instructions for taking the first reading.
-CALIBRATION = Path.home() / ".claude" / "overboard-usage-calibration.json"
+# OPS_CALIBRATION_PATH overrides this, for tests only. Added because verifying
+# the gate end to end otherwise means mutating the operator's real calibration --
+# and a check you can only exercise by damaging live state is a check nobody
+# exercises. Never set it in normal use.
+CALIBRATION = Path(os.environ.get(
+    "OPS_CALIBRATION_PATH",
+    Path.home() / ".claude" / "overboard-usage-calibration.json",
+))
 
-# Below this, a reading is too small to divide by. At 2% an eight-point rounding
-# error on the bar swings the implied full scale by ~50%, and the gate would sit
-# permanently green because it thinks the plan is enormous. A gate that cannot
-# fire is the failure mode this whole design exists to avoid, so it refuses the
-# observation rather than accepting a number it cannot use.
-MIN_CALIBRATION_PCT = 15.0
+# Minimum SEPARATION between two readings before a scale is derived from them.
+# NOT a floor on the reading itself -- under the delta method any first reading
+# is a valid anchor, including 4%. What must be meaningful is the GAP: derive a
+# scale from two readings 2 points apart and a one-point misread of either bar
+# moves the implied ceiling by roughly 50%.
+MIN_DELTA_PCT = 5.0
 
 ROLES_MD = Path(__file__).parent.parent / "docs" / "decisions" / "ROLES.md"
 
@@ -232,13 +239,41 @@ def rolling_week_m(by_day: dict) -> float:
     return sum(weighted(b) for d, b in by_day.items() if d >= cutoff) / 1e6
 
 
-def calibration() -> list[dict]:
+def _state() -> dict:
     if CALIBRATION.is_file():
         try:
-            return json.loads(CALIBRATION.read_text()).get("observations", [])
-        except (json.JSONDecodeError, AttributeError):
+            d = json.loads(CALIBRATION.read_text())
+            if isinstance(d, dict):
+                return d
+        except json.JSONDecodeError:
             pass
-    return []
+    return {}
+
+
+def _write_state(d: dict) -> None:
+    CALIBRATION.write_text(json.dumps(d, indent=2) + "\n")
+
+
+def calibration() -> list[dict]:
+    return _state().get("observations", [])
+
+
+def stored_threshold() -> float | None:
+    """The dispatch threshold, PERSISTED rather than left in a shell.
+
+    It used to live only in OPS_USAGE_THRESHOLD_PCT. An environment variable is
+    set in one shell and absent in the next, so opening a new terminal silently
+    reverted the gate to reporting -- and a gate that quietly stops gating is
+    the failure this whole file exists to avoid. Same defect the calibration
+    itself had before it moved out of the repo.
+
+    Stored next to the calibration because it describes the same thing: this
+    machine's plan, not any checkout. The env var still WINS when set, so a
+    one-off `OPS_USAGE_THRESHOLD_PCT=10 ... --check` can still be used to prove
+    the gate refuses, without disturbing the stored value.
+    """
+    v = _state().get("threshold_pct")
+    return float(v) if isinstance(v, (int, float)) else None
 
 
 def estimate_pct(week_m: float) -> tuple[float, int] | None:
@@ -249,21 +284,59 @@ def estimate_pct(week_m: float) -> tuple[float, int] | None:
     cannot be a token count anybody can look up, and inventing one would be
     worse than none: it would get wired into this gate and then believed.
 
-    Instead a human reads the real bar and tells this tool once:
+    Instead a human reads the real bar and tells this tool -- TWICE, with work
+    in between:
 
-        ops/usage.py --calibrate 62
+        ops/usage.py --calibrate 4     # now, any percentage at all
+        ...work happens...
+        ops/usage.py --calibrate 31    # later
 
-    which records (trailing-7-day weighted M, observed %). Full scale is then
-    weighted_per_pct * 100, and today's estimate follows. More observations
-    average out; each is only as good as the moment it was read.
+    DELTA, NOT ABSOLUTE, AND THIS IS THE WHOLE POINT
+    ------------------------------------------------
+    The obvious method -- full_scale = week_m / percent from ONE reading -- is
+    wrong here, and quietly so. `week_m` is a TRAILING 7-DAY window; the meter
+    is a WEEKLY window that resets on a cadence we cannot read. Those two agree
+    only by luck. Read the bar shortly after a reset and it says 4% while
+    `week_m` still carries a full week of spend from before it, implying a
+    ceiling roughly 14x too large -- and a gate that believes the plan is
+    enormous never fires.
+
+    Between two readings, both counters advance by the same ACTUAL consumption,
+    so the offset cancels: scale = delta_week_m / delta_percent. The current
+    estimate then extrapolates from the most recent reading as an anchor, using
+    only the change since it. Nothing depends on the two windows lining up.
+
+    Consequence worth stating plainly: the FIRST reading can be any value. 4% is
+    a perfectly good anchor. It is the SEPARATION between readings that has to
+    be meaningful, which is what MIN_DELTA_PCT enforces.
     """
-    obs = [o for o in calibration() if o.get("percent", 0) > 0 and o.get("week_m", 0) > 0]
-    if not obs:
+    obs = [o for o in calibration() if o.get("percent") is not None and o.get("week_m") is not None]
+    if len(obs) < 2:
         return None
-    per_pct = sum(o["week_m"] / o["percent"] for o in obs) / len(obs)
-    if per_pct <= 0:
+
+    # Scale from the pair with the LARGEST percentage separation, not an average
+    # of absolute ratios. Two readings far apart carry the most signal and the
+    # least sensitivity to a one-point misread of the bar.
+    best = None
+    for i in range(len(obs)):
+        for j in range(i + 1, len(obs)):
+            a, b = obs[i], obs[j]
+            d_pct = b["percent"] - a["percent"]
+            d_m = b["week_m"] - a["week_m"]
+            # Both must move the same way. A negative d_pct across a pair means
+            # the meter RESET between them, which makes that pair meaningless
+            # rather than merely noisy -- skip it rather than average it in.
+            if d_pct < MIN_DELTA_PCT or d_m <= 0:
+                continue
+            if best is None or d_pct > best[0]:
+                best = (d_pct, d_m)
+    if best is None:
         return None
-    return week_m / per_pct, len(obs)
+
+    per_pct = best[1] / best[0]          # weighted M per percentage point
+    anchor = max(obs, key=lambda o: o["percent"])
+    est = anchor["percent"] + (week_m - anchor["week_m"]) / per_pct
+    return est, len(obs)
 
 
 def main() -> int:
@@ -272,9 +345,14 @@ def main() -> int:
     env = os.environ.get("OPS_USAGE_CEILING_M")
     ap.add_argument("--ceiling", type=float, default=float(env) if env else None,
                     help="daily ceiling, millions of weighted tokens")
+    # Precedence: --threshold-pct > env var > persisted. The env var stays on top
+    # so a one-off override can prove the gate refuses without editing state.
     tenv = os.environ.get("OPS_USAGE_THRESHOLD_PCT")
-    ap.add_argument("--threshold-pct", type=float, default=float(tenv) if tenv else None,
+    ap.add_argument("--threshold-pct", type=float,
+                    default=float(tenv) if tenv else stored_threshold(),
                     help="refuse to dispatch above this %% of the weekly meter")
+    ap.add_argument("--set-threshold", type=float, metavar="PCT",
+                    help="persist the dispatch threshold so it survives a new shell")
     ap.add_argument("--calibrate", type=float, metavar="PCT",
                     help="record the %% shown in Settings -> Usage right now")
     args = ap.parse_args()
@@ -284,26 +362,45 @@ def main() -> int:
     today_w = weighted(by_day.get(today, {})) / 1e6
     week_m = rolling_week_m(by_day)
 
-    if args.calibrate is not None:
-        if args.calibrate < MIN_CALIBRATION_PCT:
-            print(f"REFUSED: {args.calibrate:.0f}% is too low to calibrate from "
-                  f"(minimum {MIN_CALIBRATION_PCT:.0f}%).")
-            print(f"  Full scale is week_m / percent, so a small percent divides by a")
-            print(f"  small number: at {args.calibrate:.0f}% a one-point reading error moves the")
-            print(f"  implied ceiling enormously, and the gate would sit permanently green")
-            print(f"  because it believes the plan is far bigger than it is.")
-            print(f"  Take the reading later in the week, when the bar has moved.")
+    if args.set_threshold is not None:
+        if not (0 < args.set_threshold <= 100):
+            print(f"REFUSED: {args.set_threshold:.0f}% is not a usable threshold.")
             return 1
-        if args.calibrate > 100:
+        st = _state()
+        st["threshold_pct"] = args.set_threshold
+        _write_state(st)
+        print(f"threshold persisted: refuse to dispatch above "
+              f"{args.set_threshold:.0f}% of the weekly meter")
+        print(f"  stored in {CALIBRATION}")
+        print("  survives a new shell, and is shared by every worktree")
+        if estimate_pct(week_m) is None:
+            print(f"  NOTE: no usable calibration yet, so this gates NOTHING until two")
+            print(f"  readings at least {MIN_DELTA_PCT:.0f} points apart are on file.")
+        return 0
+
+    if args.calibrate is not None:
+        if args.calibrate < 0 or args.calibrate > 100:
             print(f"REFUSED: {args.calibrate:.0f}% is not a percentage of a meter.")
             return 1
-        obs = calibration()
+        st = _state()
+        obs = st.get("observations", [])
         obs.append({"observed_at": datetime.now().isoformat(timespec="seconds"),
                     "percent": args.calibrate, "week_m": round(week_m, 2)})
-        CALIBRATION.write_text(json.dumps({"observations": obs}, indent=2) + "\n")
-        print(f"calibrated: {week_m:.1f}M trailing-7d == {args.calibrate:.0f}% of the weekly meter")
-        print(f"  implied full scale ~{week_m / args.calibrate * 100:.0f}M weighted")
-        print(f"  {len(obs)} observation(s) on file. This is a PROXY, not the meter.")
+        st["observations"] = obs
+        _write_state(st)   # preserves threshold_pct rather than clobbering it
+        print(f"recorded: bar at {args.calibrate:.0f}%, trailing-7d {week_m:.1f}M weighted")
+        est = estimate_pct(week_m)
+        if est is None:
+            need = ("a second reading" if len(obs) < 2
+                    else f"two readings at least {MIN_DELTA_PCT:.0f} points apart")
+            print(f"  {len(obs)} observation(s) on file -- need {need} before this can gate.")
+            print("  Go and work. Read the bar again once it has moved a few points and")
+            print("  run this again. The GAP between readings is what calibrates; the")
+            print("  individual values do not need to be large.")
+        else:
+            pct, n = est
+            print(f"  CALIBRATED from {n} observations -- estimate now ~{pct:.0f}% of the weekly meter.")
+            print("  A PROXY derived from deltas, not the meter itself.")
         return 0
 
     if args.check:

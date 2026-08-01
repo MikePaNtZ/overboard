@@ -287,7 +287,9 @@ def _impulse(model, profile, delay_s=None):
         wheel_rate_quantum_rad_s=profile.wheel_rate_quantum_rad_s,
         wheel_rate_update_hz=profile.wheel_rate_update_hz,
     )
-    with RustController(kp_a_per_rad=200.0, kd_a_per_rad_s=30.0, max_current_a=40.0,
+    with RustController(
+                        # 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A (#137).
+                        kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0, max_current_a=40.0,
                         kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02,
                         com_above_axle=True) as c:
         return run(ImpulseParams(magnitude_ns=NOMINAL_IMPULSE_NS, sim_seconds=8.0),

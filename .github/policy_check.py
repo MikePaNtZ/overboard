@@ -329,10 +329,38 @@ def check_role_log() -> None:
     conflicts every other -- five at once on 2026-07-28, serialising a queue
     that was otherwise entirely green.
 
-    The rule is mechanical because the failure is mechanical. Standing context
-    is EDITED -- stale entries come out as new ones go in, so a real edit roughly
-    breaks even. A log entry only ever grows the file. `CONTEXT-OK: <reason>` in
-    a commit message is the escape hatch, same shape as TURF-OVERRIDE and DOC-OK.
+    THE SIZE HEURISTIC WAS WRONG. IT IS NOW ADVISORY.
+    ------------------------------------------------
+    The premise was: standing context is EDITED, so a real edit roughly breaks
+    even, while a log entry only grows the file. **That is false**, and the
+    evidence is unambiguous -- it fired four times and was wrong four times:
+
+      1. The COO's own standing-context rewrite (+38/-4)   -> overridden
+      2. A brand-new role's CONTEXT.md, i.e. file creation  -> overridden
+      3. Digital Content Production #105 (+54/-6)           -> BLOCKED A PEER
+      4. Sr. Mechanical & Systems #128 (+41/-6)             -> BLOCKED A PEER
+
+    Cases 3 and 4 were textbook standing context -- worktrees, "In flight",
+    "Waiting on", current sub-goals with the finished ones deleted. Exactly what
+    roles/README.md asks for. **Zero true positives.**
+
+    Real curation ADDS a lot while deleting a little: closing out four stale
+    sub-goals and writing the current three is +40/-6 and entirely correct. Size
+    simply does not separate "completed work" from "current state"; only SHAPE
+    would, and a shape heuristic on prose is not obviously better.
+
+    So this reports and does not block. A gate with no true positives that has
+    blocked two peers is a tax, and a tax gets routed around until the override
+    is reflexive -- the argument this repo already accepted for doc-drift (#85)
+    and for the site's feedstock rule. The behaviour it was built to stop has
+    already changed on its own: roles have been writing log/ entries all week
+    because the CONVENTION is clear, not because a check forced them.
+
+    `CONTEXT-OK: <reason>` still suppresses the advisory entirely.
+
+    The log/ FILENAME check below stays HARD. It is structural rather than
+    heuristic, it has never misfired, and it is what actually keeps the log
+    directory from decaying back into a shared list.
 
     NET growth, not "added with no deletions". The first version of this check
     skipped whenever a file had any deletion at all, and the very PR that
@@ -367,17 +395,15 @@ def check_role_log() -> None:
             continue  # an edit, or a small standing-context change
         role_dir = m.group(1)
         if om:
-            print(f"role-log: {path} grew by a net {net} lines (+{added}/-{removed}), "
-                  f"overridden -- {om.group(1).strip()}")
             continue
-        fail(
-            "role-log",
-            f"{path} grew by a NET {net} lines (+{added}/-{removed}) -- that is an "
-            f"appended work-log entry, not an edit to standing context. Move it "
-            f"to roles/{role_dir}/log/YYYY-MM-DD-<slug>.md (one entry, one file) "
-            f"so it cannot conflict with every other open PR. If it really is "
-            f"standing context, edit the stale entry it replaces, or put "
-            f"'CONTEXT-OK: <reason>' in a COMMIT MESSAGE on this branch",
+        # ADVISORY, not a failure. See the docstring: this heuristic was wrong
+        # four times out of four and never once right.
+        advisories.append(
+            f"{path} grew by a net {net} lines (+{added}/-{removed}). If that is a "
+            f"COMPLETED-WORK entry it belongs in roles/{role_dir}/log/YYYY-MM-DD-<slug>.md, "
+            f"one entry per file, so it cannot conflict with every other open PR. "
+            f"If it is standing context -- sub-goals, blockers, turf, dead ends -- "
+            f"this is exactly right and there is nothing to do"
         )
 
     # The other direction: a log file that does not match the convention is a
