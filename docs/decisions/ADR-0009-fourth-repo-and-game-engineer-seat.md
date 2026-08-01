@@ -21,15 +21,23 @@ control law at 500 Hz. Unreal renders and takes input; it computes no board phys
 registry and `ROLES.md` describe an estate of three repos. Neither anticipated an interactive
 client, and the M3 work has nowhere to legally live.
 
-There was a real candidate already in the estate. `overboard-viz` was created on 2026-07-26 with
-a charter that is almost exactly the boundary M3 needs:
+There was a real candidate already in the estate. `overboard-viz` was created on 2026-07-26 with a
+charter whose *first half* is what M3 needs:
 
 > The renderer never computes physics. It replays motion MuJoCo already computed. [...] One file
 > crosses the boundary: a pose track. `overboard` writes it, `overboard-viz` reads it, and neither
 > imports the other.
 
-So the question was not "what should the boundary be" — that is settled and reused — but "does the
-Unreal client belong in the repo that already holds that boundary".
+**Only the first sentence carries over, and an earlier draft of this ADR overstated the rest.**
+"The renderer never computes physics" is a genuine inheritance. The mechanism is not: viz's
+contract is **one file, one direction, offline**. M3's is **two-way and live** — pose out at render
+rate, and player input in against a 500 Hz loop. A reverse channel into a real-time control loop
+has no precedent anywhere in this estate, and calling it a reuse hides the one genuinely novel and
+risky thing M3 introduces. It is a new versioned contract that happens to share a principle.
+
+So the question was never "what should the boundary be" — the *principle* is settled and inherited
+— but "does the Unreal client belong in the repo that already holds it", with the live two-way
+contract itself needing its own design decision either way.
 
 ## Decision
 
@@ -41,8 +49,14 @@ Unreal client belong in the repo that already holds that boundary".
   CMO owns nothing here.
 - Senior Controls owns everything on the `overboard` side of the seam — the plant variant, the
   real-time host, the wire crate, the observer.
-- **The wire schema is the contract between them**, exactly as the pose track is the contract
-  between `overboard` and `overboard-viz`. Neither repo imports the other.
+- **The wire schema is the contract between them.** Neither repo imports the other. Unlike viz's
+  pose track this contract is bidirectional and live, so it is versioned like the C ABI
+  (`ob_abi_version()` and `size`-tagged structs) and a mismatch must fail loudly rather than
+  misparse.
+- **The 500 Hz host — MuJoCo plus the control law — belongs to `overboard`** and is published as a
+  versioned artifact. `overboard-game` consumes it across the wire contract and **must not link
+  MuJoCo or `control-core` directly**, so that "which control law was this session run against" is
+  answerable from one version string rather than a build graph.
 
 A change complies with this ADR if Unreal, game-asset and renderer-client code is in
 `overboard-game`, control law and physics are in `overboard`, and the only thing crossing is a
@@ -50,9 +64,10 @@ versioned data contract.
 
 ## Options considered
 
-**1. Extend `overboard-viz`.** Its charter already states the right boundary, and the existing
-pose track is the direct ancestor of the live wire schema. Rejected on two counts, either of which
-would have been sufficient. *Lifecycle:* viz is offline, batch, Blender; the game is interactive,
+**1. Extend `overboard-viz`.** Its charter already states the right *principle*, and its pose track
+is the nearest thing in the estate to a live wire schema — though see the correction above: nearest
+is not the same as ancestor, and the live reverse channel is new work either way. Rejected on two
+counts, either of which would have been sufficient. *Lifecycle:* viz is offline, batch, Blender; the game is interactive,
 real-time, multi-gigabyte UE assets and a game engine's build system. Sharing a repo means every
 cinematic render carries the game's checkout weight and vice versa. *Turf:* `ROLES.md` gives
 `overboard-viz` to **Digital Content Production**, which sits under the marketing line. The game is
