@@ -6,11 +6,16 @@
 //! a final summary when the loop stops.
 //!
 //! ```text
-//! sim-host [--duration-secs SECONDS]
+//! sim-host [--duration-secs SECONDS] [--startup-kick]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
-//! it, stops after that many seconds and exits -- used for the issue #161
-//! verification run and for anything else that wants a bounded process.
+//! it, stops after that many seconds and exits -- used for verification runs
+//! and anything else that wants a bounded process.
+//!
+//! `--startup-kick` is OFF by default (issue #169): a normal run must not
+//! shove the board before a player has touched anything. Pass it explicitly
+//! for a `wire-probe` diagnostic run that wants a guaranteed disturbance to
+//! show recovery from.
 
 use sim_host::HostConfig;
 use std::process::ExitCode;
@@ -35,6 +40,10 @@ fn main() -> ExitCode {
                 cfg.duration = Some(Duration::from_secs_f64(secs));
                 i += 2;
             }
+            "--startup-kick" => {
+                cfg.startup_kick = true;
+                i += 1;
+            }
             other => {
                 eprintln!("sim-host: unrecognized argument '{other}'");
                 return ExitCode::FAILURE;
@@ -43,8 +52,8 @@ fn main() -> ExitCode {
     }
 
     eprintln!(
-        "sim-host: starting -- state out to {}, input in on {}, duration={:?}",
-        cfg.state_out_addr, cfg.input_in_addr, cfg.duration
+        "sim-host: starting -- state out to {}, input in on {}, duration={:?}, startup_kick={}",
+        cfg.state_out_addr, cfg.input_in_addr, cfg.duration, cfg.startup_kick
     );
 
     let handle = sim_host::spawn(cfg);
