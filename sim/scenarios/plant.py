@@ -501,3 +501,181 @@ def imu_readings(model, data) -> tuple:
     gyro, accel = out
     R = R_MODEL_TO_ICD()
     return R @ gyro, R @ accel
+
+
+# ==========================================================================
+# Kerb strike: what an obstacle is worth, in the currency the controller feels
+# ==========================================================================
+#
+# Issue #142 AC2 asks this role what a kerb strike is worth, because the
+# reference disturbance the #132 retune is scoped against -- 20 N*s -- is
+# inherited from a scenario nominal and derived from nothing.
+#
+# WHAT IS DERIVED HERE, and what is deliberately not. This produces the
+# impulse an obstacle delivers, from geometry and speed. It does NOT pick the
+# reference disturbance: that is a duty-cycle judgement about what the board is
+# for, and the honest output of the arithmetic is a RANGE plus the reason the
+# range is wide. See `kerb_strike_impulse.__doc__` for the model and
+# `KERB_STRIKE_VALIDITY` for where it stops being true.
+#
+# THE FIRST MODEL I WROTE WAS WRONG, and the way it was wrong is worth keeping.
+# Conserving angular momentum about the step edge and letting the body rotate
+# rigidly about it -- the textbook step-climb model -- gives dv = 0.25*v at a
+# step height of ZERO. A zero-height step is not an obstacle, so any model that
+# charges 0.25 v for it is broken, and it is broken in the direction that makes
+# every number look alarming. The defect: rotation about the contact point is
+# only forced when the wheel is BLOCKED. Nothing blocks it as h -> 0, and the
+# wheel simply rolls on. Checking a limit that has a known answer is what
+# caught it; the numbers themselves looked entirely plausible.
+
+#: Where the rigid-wheel model stops describing reality. The sim's wheel is a
+#: rigid cylinder (`sim/models/overboard_onewheel.xml`), but the real part is an
+#: 11.5 in PNEUMATIC tyre, and a pneumatic tyre swallows an obstacle smaller
+#: than its own deflection -- it deforms around the lip and rolls over it
+#: instead of striking it. Below that height the rigid model does not
+#: overestimate slightly, it describes a different event.
+#:
+#: **The deflection figure is an open input, not a measurement.** It wants the
+#: tyre spec and a load-deflection check at riding pressure, which is this
+#: role's to supply and does not exist yet. Until it does, anything derived
+#: below ~20 mm is a bound, not an answer.
+KERB_STRIKE_VALIDITY = {
+    "tyre_deflection_mm": (10.0, 20.0),
+    "assumes": "rigid wheel, impulsive contact, rider rigid through the strike",
+    "excludes": "tyre compliance, suspension, rider articulation, wheel slip",
+}
+
+
+def kerb_strike_impulse(obstacle_height_m: float, speed_m_s: float,
+                        model_params: dict | None = None) -> dict:
+    """Impulse delivered by a square-edged obstacle, as a bracket.
+
+    Two models, and the truth is between them, because how much the edge GRIPS
+    is the thing neither one knows:
+
+    * **Frictionless normal** (lower bound). The normal to a circular rim
+      passes through the wheel centre, so the impulse has no moment about the
+      axle: the wheel keeps spinning and the impulse enters the frame at the
+      axle. Only the approach velocity along the edge->centre line is killed.
+      Correct as h -> 0, where it goes to zero.
+    * **Pivot** (upper bound). The edge grips completely and the body rotates
+      rigidly about it. Wrong for small h -- see the module comment -- but
+      right once the step is tall enough that the wheel cannot roll through.
+
+    The two converge above roughly h/r = 0.5, which is the useful structural
+    result: for a real kerb it does not matter which you believe, and for a
+    pavement lip it matters enormously.
+
+    Returns horizontal impulse (N*s), speed lost (m/s) and the pitch rate the
+    strike imparts (deg/s) for each bound. **The pitch rate is the number that
+    matters** -- see `kerb_strike_vs_com_impulse`.
+    """
+    import numpy as np
+
+    p = {"mass_kg": 82.5, "inertia_pitch_kg_m2": 17.2374,
+         "com_height_m": 0.77885, "wheel_radius_m": 0.1454,
+         "wheel_inertia_kg_m2": 0.0595, "edge_friction": 1.0}
+    p.update(model_params or {})
+    M, Ic, zc = p["mass_kg"], p["inertia_pitch_kg_m2"], p["com_height_m"]
+    r, Iw = p["wheel_radius_m"], p["wheel_inertia_kg_m2"]
+    h, v = float(obstacle_height_m), float(speed_m_s)
+    if not 0.0 <= h < r:
+        raise ValueError(
+            f"obstacle height {h} m is outside (0, r={r}). At h >= r the wheel "
+            "strikes at or above its own centre: that is a wall, not a step, "
+            "and no impulse model applies -- the board stops and the rider does "
+            "not.")
+    l = zc - r
+    xE = np.sqrt(max(2.0 * r * h - h * h, 0.0))   # edge, ahead of the axle
+
+    # -- frictionless normal ------------------------------------------------
+    approach = v * xE / r
+    P = approach / (1.0 / M + (l * l) * (xE * xE) / (r * r * Ic))
+    j_lo = P * xE / r
+    q_lo = np.degrees(P * l * xE / (r * Ic))
+
+    # -- pivot, AND whether it is reachable ----------------------------------
+    #
+    # The pivot model does not just get harsh at small h, it becomes
+    # UNPHYSICAL, and the discriminator is derivable rather than a matter of
+    # taste. Pivoting means the edge arrests the wheel's roll, which takes a
+    # tangential impulse alongside the normal one. Their ratio is the friction
+    # coefficient the edge would have to supply:
+    #
+    #     h:        1 mm   5 mm   10 mm   20 mm   30 mm   50 mm   100 mm
+    #     mu_req:   5.43   2.34    1.57    0.99    0.70    0.38     0.08
+    #
+    # Rubber on asphalt is mu ~ 1.0 -- the model's own `<geom friction>`. So
+    # the pivot is unreachable below roughly 20 mm: the edge would slip and the
+    # wheel would roll through. That is the same ~20 mm the tyre's own
+    # deflection gives, arrived at independently, which is the strongest reason
+    # to believe either of them.
+    #
+    # Below that the bracket collapses to the frictionless value. Reporting an
+    # unreachable pivot as the top of a range would be exactly the thing the
+    # module comment warns about: a wrong assumption dressed as a result.
+    dz = zc - h
+    IE = Ic + M * (xE * xE + dz * dz)
+    omega = (M * v * dz + Iw * v / r) / IE
+    j_hi = M * (v - omega * dz)
+    q_hi = np.degrees(omega)
+
+    Jvec = np.array([M * (omega * dz - v), M * omega * xE])   # impulse at the edge
+    nhat = np.array([-xE, r - h]) / r                          # edge -> wheel centre
+    Jn = float(Jvec @ nhat)
+    Jt = float(np.linalg.norm(Jvec - Jn * nhat))
+    mu_req = Jt / Jn if Jn > 1e-12 else float("inf")
+    pivot_reachable = mu_req <= p["edge_friction"]
+
+    # THE TWO MODELS ALSO CROSS near h/r ~ 0.6 -- as the step gets tall the
+    # normal tilts steeply, so killing the approach along it costs MORE than
+    # gripping and pivoting. Not a bug, but it does mean the bracket must be
+    # ordered rather than assumed to be (frictionless, pivot).
+    ends = (float(j_lo), float(j_hi)) if pivot_reachable else (float(j_lo),) * 2
+    q_ends = (float(q_lo), float(q_hi)) if pivot_reachable else (float(q_lo),) * 2
+    lo_hi = tuple(sorted(ends))
+    q_lo_hi = tuple(sorted(q_ends))
+    floor_mm = KERB_STRIKE_VALIDITY["tyre_deflection_mm"][1]
+
+    return {
+        "obstacle_height_m": h, "speed_m_s": v,
+        "impulse_ns": lo_hi,
+        "speed_lost_m_s": (lo_hi[0] / M, lo_hi[1] / M),
+        "pitch_rate_deg_s": q_lo_hi,
+        "pivot_reachable": bool(pivot_reachable),
+        "pivot_friction_required": float(mu_req),
+        "models_agree_within_pct": (
+            100.0 * (lo_hi[1] - lo_hi[0]) / lo_hi[1] if lo_hi[1] > 0.0 else 0.0),
+        "within_validity": floor_mm <= h * 1000.0 and h / r <= 0.6,
+    }
+
+
+def kerb_strike_vs_com_impulse(obstacle_height_m: float, speed_m_s: float) -> dict:
+    """Why N*s is the wrong currency for comparing these two disturbances.
+
+    `impulse_response.py` applies its 20 N*s through the CoM, deliberately and
+    with a paragraph explaining why: at `application_height_m = 0.0` the
+    disturbance is a PURE LINEAR impulse and the pitch response is the
+    vehicle's own dynamics. Its docstring already flags the alternative --
+    *"kept as a parameter for a follow-on 'shove'/curb-strike scenario; not the
+    default"* -- and notes that the angular channel swamps the linear one.
+
+    A kerb strike is that follow-on case. Its impulse lands at the contact,
+    roughly 0.7 m BELOW the CoM, so it injects an angular impulse the CoM-
+    applied disturbance has none of by construction. Matching the two on N*s
+    matches them on the channel that matters least.
+
+    So: **a reference disturbance quoted in N*s and fed to the existing
+    scenario understates a kerb strike, and does so silently.** The comparison
+    Controls needs is pitch rate imparted, not newton-seconds.
+    """
+    s = kerb_strike_impulse(obstacle_height_m, speed_m_s)
+    lo, hi = s["pitch_rate_deg_s"]
+    return {
+        **s,
+        "com_impulse_pitch_rate_deg_s": 0.0,
+        "note": f"a CoM-applied impulse of the same {s['impulse_ns'][0]:.0f}-"
+                f"{s['impulse_ns'][1]:.0f} N*s imparts ZERO initial pitch rate; "
+                f"this strike imparts {lo:.0f}-{hi:.0f} deg/s. Same currency, "
+                "different disturbance.",
+    }
