@@ -1,0 +1,30 @@
+[package]
+name = "sim-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `sim-host` is a library with a thin binary wrapper (SR-GAME-15): the day an
+# in-process consumer wants this loop, linking the library is a build-graph
+# change, not a rewrite of a binary-only crate. `wire-probe` is a second,
+# unrelated binary -- the CEO-visible verification tool for the wire this
+# crate speaks, not something `sim-host` (the library) depends on.
+[lib]
+name = "sim_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sim-host"
+path = "src/bin/sim-host.rs"
+
+[[bin]]
+name = "wire-probe"
+path = "src/bin/wire-probe.rs"
+
+[dependencies]
+board-types = { workspace = true }
+hal = { workspace = true }
+hal-actuate = { workspace = true }
+control-core = { workspace = true }
+safety = { workspace = true }
+sim-backend = { workspace = true }

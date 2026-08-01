@@ -15,6 +15,7 @@ members = [
     "crates/canary-ridden",
     "crates/can-harness",
     "crates/plant-mujoco",
+    "crates/sim-host",
     "crates/xtask",
 ]
 
