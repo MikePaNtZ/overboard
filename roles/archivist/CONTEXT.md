@@ -27,7 +27,13 @@ the strategy is right.*
 [Board level management](https://app.notion.com/p/c1ce234db5c2412382794af2e2cd3411), and repoint
 its *Active board meeting* link — roles publish wherever that points. Never batch-create a week
 ahead; batch docs go stale and invite the re-pasting the cadence exists to stop. Shape to copy:
-[Board — 2026-07-29](https://app.notion.com/p/3ad472a5fb6981e49dc7ca6151b95fbc).
+[Board — 2026-07-31](https://app.notion.com/p/3af472a5fb6981e6ba27d6437bfd4976).
+
+**Missing a board is not a missed chore — it disables the mechanism.** No 07-30 doc was created
+and 07-29 stayed marked LIVE for three days. The COO's section was never published because the
+page they were pointed at was stale, and **the third marketing↔engineering contradiction went
+uncaught for two days** as a direct result. Freezing the old doc and repointing *Active board
+meeting* is half the duty; roles publish wherever that link points.
 
 **You own the frame, each role owns its content** — preamble, carried-forward ledger, CEO-asks
 table, stubbed sections, script-backed metric rows. Never write in another role's section.
@@ -50,15 +56,28 @@ it is still unwritten, and it is the COO's to write.**
 
 ## In flight
 
-- **[#85](https://github.com/MikePaNtZ/overboard/issues/85) — `reconciled:` never advances.**
-  Five of eight manifests carry a stamp older than the doc's own last edit. Nothing is escaping
-  (the gate compares against code, not the stamp), so no urgency — but it is a field that looks
-  checkable and is not. Four options in the issue; the gate half is the COO's.
-  **Default if unanswered by the 2026-08-05 board: implement report-only.**
+- **[PR #153](https://github.com/MikePaNtZ/overboard/pull/153)** — queued. Allowlists the three
+  dyld tokens after `@rpath` became the sweep's first false positive.
 - **`overboard-web#14` is still live** and only the CEO can clear it. Deleting the issue is the
-  only fix; carried two boards. Re-verify each sweep rather than assuming.
+  only fix; **carried three boards.** Re-verify by script each sweep rather than assuming.
+- **Two docs have never been reconciled** — `design-claims-manifest.md`,
+  `design-delay-budget-stage0b.md`. Stamping is opt-in, so this is not a gate failure; nudge the
+  owners rather than stamping docs you have not read.
+- **The two hardest questions in the org are the CEO's and have been open three boards** —
+  publish L1, and what the funding deck shows if there is no hardware by late August. Not stuck
+  on any role. Keep them at the top of the carried-forward ledger until they close.
 
 ## Known dead ends
+
+- **A detector's false positives are its most expensive output.** `sweep_public.py` raised
+  `@rpath` as a stray user tag; the pattern file's own charter says an unanchored scan "cries
+  wolf until people stop reading it". The two real errors it reports sit in the same list as the
+  junk, so junk is never free. Fix the anchor the day it appears, and prove the *real* case still
+  fires before calling it fixed.
+- **A stamp a machine advances is a worse lie than a stale one.** The COO refused the
+  auto-advance option on [#85](https://github.com/MikePaNtZ/overboard/issues/85) and took
+  report-only. Correct: `reconciled:` means *a human looked*, and nothing automated can assert
+  that. `--drift-report` is the standing number; never wire it to a gate.
 
 - **`python3 .github/policy_check.py` on a branch does not run the checks that fail you.**
   `turf`, `doc-drift` and `role-log` are diff-based and skip silently outside CI, so a local
