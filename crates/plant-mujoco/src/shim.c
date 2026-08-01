@@ -174,3 +174,12 @@ void plant_mujoco_get_body_xpos(void* data, int body_id, double* out) {
 void plant_mujoco_get_body_xquat(void* data, int body_id, double* out) {
   memcpy(out, ((mjData*)data)->xquat + 4 * body_id, 4 * sizeof(double));
 }
+
+// Actuator lookup by NAME, for issue #161 W2: `sim-host` now drives models
+// with a variable actuator count (the driverless model's single wheel_motor
+// vs. the rider model's wheel_motor + two ballast position actuators), so
+// `ctrl` must be built by resolving each channel's index rather than
+// assuming a fixed layout -- same reasoning as plant_mujoco_sensor_id.
+int plant_mujoco_actuator_id(void* model, const char* name) {
+  return mj_name2id((const mjModel*)model, mjOBJ_ACTUATOR, name);
+}

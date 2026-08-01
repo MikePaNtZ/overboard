@@ -54,11 +54,27 @@ impl Pacer {
             self.missed_deadlines += 1;
             Duration::ZERO
         };
-        // Advances by exactly one period regardless of the overrun, so a
-        // single slow cycle costs one miss, not a cascading pile-up of
-        // catch-up iterations trying to make up lost ground (which would be
-        // physically meaningless here: one loop iteration is one fixed
-        // sim-time step, not a variable one).
+        // Advances by exactly one period regardless of the overrun, so the
+        // loop never skips a physics step or accelerates sim-time to "catch
+        // up" -- one call to wait_for_next() is always exactly one hal
+        // cycle, whatever real time it actually took.
+        //
+        // CORRECTION (issue #168): an earlier revision of this comment
+        // claimed this arithmetic avoids "a cascading pile-up of catch-up
+        // iterations". It does not, and #168 measured exactly that: OS timer
+        // coalescing (observed on macOS, not this crate's doing -- p50 ~0.09
+        // ms, p99 ~15 ms) can turn a requested ~2 ms sleep into an actual
+        // ~16 ms one, so the next wait_for_next() finds next_deadline
+        // roughly 8 periods behind `now`. Because this only ever advances
+        // the deadline by ONE period per call, the loop then runs ~8
+        // back-to-back iterations with essentially no sleep between them --
+        // each one legitimately a miss (each really did blow its own 2 ms
+        // window) and each legitimately counted, but that IS a burst, not
+        // smoothed-away drift. What this arithmetic actually guarantees is
+        // narrower, and still worth having: the burst is bounded by how far
+        // behind the clock fell, it does not compound further across calls,
+        // and no physics step is ever skipped or doubled up to fake being
+        // caught up.
         self.next_deadline += self.period;
         sleep_for
     }

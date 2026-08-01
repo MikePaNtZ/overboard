@@ -64,9 +64,19 @@ const CYCLE_NS: u64 = 2_000_000;
 /// below pins it against the compiled model so the two cannot silently drift.
 const KT_NM_PER_A: f64 = 0.7;
 
-/// The model this backend steps. Fixed, not configurable -- this crate's own
-/// header has always named it "the MuJoCo onewheel model", and I1c does not
-/// introduce a model-selection surface.
+/// The model this backend steps BY DEFAULT -- the driverless onewheel plant,
+/// unchanged since I1c. Every existing caller (this crate's own tests,
+/// `impulse-response-rust`, the driverless `hal` seam) keeps stepping exactly
+/// this model, because `open()` only reaches for it when
+/// [`SimBackend::model_path_override`] is `None`.
+///
+/// CHANGED from "fixed, not configurable" (I1c's original claim, now stale):
+/// issue #161 W2 needs a second model -- a ridden variant carrying a
+/// physically jointed rider ballast (`overboard_rider.xml`) -- and
+/// `sim-backend` has no Python binding to patch a model string at runtime
+/// the way the Python scenarios do, so a real per-instance override is the
+/// only way `sim-host` can point this backend at it. See
+/// [`SimBackend::with_model_path`].
 fn model_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sim/models/overboard_onewheel.xml")
 }
@@ -105,6 +115,22 @@ pub struct SimBackend {
     /// `mjModel` body id of the `frame` body, resolved once in `open()`.
     /// Only used by [`SimBackend::apply_external_force`], not by `hal`.
     frame_body: usize,
+    /// `mjModel` actuator id of `wheel_motor`, resolved BY NAME in `open()`
+    /// (issue #161 W2). Previously assumed to be `ctrl` index 0 outright --
+    /// only ever correct because the driverless model has exactly one
+    /// actuator. A model with more (the ridden rider model's two ballast
+    /// actuators) makes that assumption wrong, silently.
+    wheel_motor_actuator: usize,
+    /// `mjModel` actuator ids of the two ballast position actuators, if the
+    /// open model declares them -- `None` for the driverless onewheel model,
+    /// which has no ballast at all. Resolved once in `open()`.
+    ballast_fa_actuator: Option<usize>,
+    ballast_lateral_actuator: Option<usize>,
+    /// Commanded ballast actuator targets, metres -- see
+    /// [`SimBackend::set_ballast_targets`]. Zero (centred) until set, and
+    /// reset to zero on every `open()`.
+    ballast_fa_target_m: f32,
+    ballast_lateral_target_m: f32,
     cycle: u64,
     open: bool,
     armed: bool,
@@ -115,6 +141,9 @@ pub struct SimBackend {
     /// The current now actually flowing, as far as the plant is concerned.
     applied_current_a: f32,
     params: Params,
+    /// Overrides `model_path()`'s default when `Some` (issue #161 W2). See
+    /// [`SimBackend::with_model_path`].
+    model_path_override: Option<PathBuf>,
 }
 
 impl SimBackend {
@@ -127,6 +156,35 @@ impl SimBackend {
             params,
             ..SimBackend::default()
         }
+    }
+
+    /// Like [`SimBackend::with_params`], but steps `model_path` instead of
+    /// the default driverless onewheel model (issue #161 W2) -- `sim-host`'s
+    /// ridden configuration uses this to open `overboard_rider.xml`.
+    pub fn with_model_path(params: Params, model_path: PathBuf) -> Self {
+        SimBackend {
+            params,
+            model_path_override: Some(model_path),
+            ..SimBackend::default()
+        }
+    }
+
+    /// Sets the two ballast position-actuator targets, metres, taking effect
+    /// on the next [`BoardObserve::wait_observe`] call (issue #161 W2) -- the
+    /// ridden rider model's physically-simulated fore/aft and lateral
+    /// weight-shift channels. **Not part of `hal`**: real hardware has no
+    /// ballast. A no-op on a model that declares neither actuator (e.g. the
+    /// driverless onewheel model) rather than an error -- same tolerance
+    /// [`SimBackend::apply_external_force`] has for a body/site a model does
+    /// not declare.
+    ///
+    /// Buffered like `apply_external_force`: overwrites whatever was set for
+    /// the current step rather than accumulating, so a caller must call this
+    /// every cycle (with the current weight-shift value, or zero) or a stale
+    /// target will persist.
+    pub fn set_ballast_targets(&mut self, fore_aft_m: f32, lateral_m: f32) {
+        self.ballast_fa_target_m = fore_aft_m;
+        self.ballast_lateral_target_m = lateral_m;
     }
 
     /// The current the plant is seeing. Exposed for tests.
@@ -220,7 +278,8 @@ impl SimBackend {
 
 impl BoardObserve for SimBackend {
     fn open(&mut self) -> Result<(), IoError> {
-        let mut plant = Plant::open(&model_path()).map_err(|e| {
+        let path = self.model_path_override.clone().unwrap_or_else(model_path);
+        let mut plant = Plant::open(&path).map_err(|e| {
             eprintln!("sim-backend: Plant::open failed: {e}");
             IoError::Fatal(FaultCode::ConfigMismatch)
         })?;
@@ -270,11 +329,21 @@ impl BoardObserve for SimBackend {
         self.frame_body = plant
             .body_id("frame")
             .expect("overboard_onewheel.xml must declare a frame body");
+        self.wheel_motor_actuator = plant
+            .actuator_id("wheel_motor")
+            .expect("the model must declare a wheel_motor actuator");
+        // `None` on the driverless model, which declares neither -- resolved
+        // by name so a model that DOES declare them (the ridden rider model,
+        // issue #161 W2) does not depend on ctrl-array position.
+        self.ballast_fa_actuator = plant.actuator_id("ballast_fa");
+        self.ballast_lateral_actuator = plant.actuator_id("ballast_lat");
 
         self.plant = Some(plant);
         self.cycle = 0;
         self.pending_current_a = None;
         self.applied_current_a = 0.0;
+        self.ballast_fa_target_m = 0.0;
+        self.ballast_lateral_target_m = 0.0;
         self.open = true;
         self.seq.reset();
         Ok(())
@@ -309,7 +378,18 @@ impl BoardObserve for SimBackend {
         if let Some(pending) = self.pending_current_a.take() {
             self.applied_current_a = pending;
         }
-        let ctrl = [self.applied_current_a as f64 * KT_NM_PER_A];
+        // Built by resolved actuator index, not a fixed-length array (issue
+        // #161 W2): the driverless model has one actuator, the ridden rider
+        // model has three. Ballast channels stay at MuJoCo's zero-init
+        // default (0.0) on a model that does not declare them.
+        let mut ctrl = vec![0.0f64; plant.nu()];
+        ctrl[self.wheel_motor_actuator] = self.applied_current_a as f64 * KT_NM_PER_A;
+        if let Some(idx) = self.ballast_fa_actuator {
+            ctrl[idx] = self.ballast_fa_target_m as f64;
+        }
+        if let Some(idx) = self.ballast_lateral_actuator {
+            ctrl[idx] = self.ballast_lateral_target_m as f64;
+        }
 
         // AC3: sim time comes from mjData::time, read after stepping, never
         // a parallel counter.

@@ -1,0 +1,232 @@
+<mujoco model="overboard_rider">
+  <!--
+    Overboard onewheel plant model — RIDDEN configuration (issue #161 W2).
+
+    A NEW file, not an edit to overboard_onewheel.xml -- that model carries
+    the bit-identity replay gate (`tests/test_rust_python_plant_replay_equivalence.py`)
+    and this project has already lost time to a model edit that silently
+    invalidated it once. Everything below duplicates that file's frame/wheel/
+    sensor declarations (same names, same signs) with two differences:
+
+    1. A ballast body carrying rider-scale mass, on two chained SLIDE joints
+       (fore/aft then lateral) instead of the Python scenarios' rigid weld
+       (`sim/scenarios/plant.py::build_model`). A rigid weld cannot be driven
+       by a weight-shift input at all; this can.
+
+       `weight_shift_fore_aft` drives `ballast_fa` DIRECTLY AND PHYSICALLY --
+       this is issue #161's original spec, restored after a same-night
+       reversal that briefly tried mapping it to a `v_ref` outer-loop
+       setpoint instead. **The board does not station-keep.** Shifting the
+       ballast forward moves the effective centre of mass forward of the
+       axle, which the inner pitch loop (holding the FRAME level, not the
+       ballast) answers by accelerating the wheel forward -- exactly how a
+       real onewheel responds to a forward lean, and exactly why releasing
+       the lean coasts at the resulting speed rather than returning to rest.
+       See `crates/sim-host/src/host.rs`'s own header for the Rust side of
+       this.
+
+       `weight_shift_lateral` drives `ballast_lat`, and its purpose is
+       different: it is what produces the physically-simulated ROLL the
+       `sim-host` yaw limiter is shaped from (see that crate). Both
+       actuators are position-controlled with a first-order (`dyntype=
+       "filter"`) rate limit, so a step input on the wire arrives at the
+       joint smoothed rather than instantaneously -- "rate-limited position
+       actuators" per the W2 dispatch.
+
+       Ranges are +/-0.05 m on each axis. NOT bench-measured -- at 70 kg /
+       0.75 m (this file's ballast mass/height, matching
+       `sim/scenarios/shuttle_run.py::ShuttleParams`'s own defaults, reused
+       rather than invented), that is a 34.3 N*m disturbance torque at full
+       deflection (70 kg * 9.81 m/s^2 * 0.05 m), already past the drive's own
+       28 N*m ceiling (40 A * KT_NM_PER_A). Full-stick weight shift is
+       therefore ABLE to tip the board over, deliberately -- the same way it
+       can on a real one -- not a bug to be tuned away.
+
+       The fore/aft carrier body's own mass (0.5 kg) is a placeholder for the
+       linkage/foot-shift mechanism, not rider mass -- the full 70 kg rider
+       mass sits on the innermost (lateral) body, which the carrier's slide
+       drags along with it, so both joints are actually reacting against the
+       full rider mass, not the carrier's own.
+
+    2. The wheel geom is WIDENED for playability: half-width 0.075 m -> 0.15
+       m (full width 0.15 m -> 0.30 m), radius UNCHANGED at 0.1454 m. This is
+       a labelled, deliberate divergence from the real vehicle's geometry --
+       required input to the `Playable Sim` channel declaration (issue #163),
+       a launch blocker, not a cosmetic choice. It exists because the
+       original geometry's lateral tip angle (~5 deg) closes almost no roll
+       authority for weight_shift_lateral to work with. Radius is untouched
+       so r_eff_m, the wheel_motor gear ratio and ctrlrange all stay exactly
+       as derived in overboard_onewheel.xml. Wheel inertial is recomputed for
+       the new width using the SAME hoop-model formula that file documents
+       (Iyy = m*a^2, unaffected by width; Ixx = Izz = m*a^2/2 + m*w^2/12,
+       recomputed for w = 0.30 m) -- mass is left at 4.5 kg, i.e. this does
+       NOT model the extra tire rubber a genuinely wider tire would carry,
+       consistent with this being a playability widening, not a claim about
+       the real vehicle.
+
+    Everything else -- frame mass/CoM, wheel radius, motor sign, sensor set,
+    nose-strike bumper geometry -- is copied verbatim from
+    overboard_onewheel.xml. See that file for the full provenance notes this
+    header does not repeat.
+  -->
+  <compiler angle="degree" meshdir="meshes/openwheel"/>
+
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="RK4"/>
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <headlight ambient="0.28 0.29 0.31" diffuse="0.32 0.32 0.32" specular="0.08 0.08 0.08"/>
+    <quality shadowsize="4096" offsamples="8"/>
+    <map shadowclip="2" shadowscale="1.5"/>
+  </visual>
+
+  <default>
+    <geom friction="1.0 0.005 0.0001"/>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="collision">
+      <geom group="3"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.82 0.87 0.90" rgb2="0.35 0.44 0.52"
+             width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.720 0.730 0.720"
+             rgb2="0.560 0.580 0.570" width="512" height="512"/>
+    <material name="ground_mat" texture="grid" texrepeat="160 160" reflectance="0.05" specular="0.1"/>
+
+    <material name="shell_mat" rgba="0.086 0.137 0.180 1" specular="0.35" shininess="0.45"/>
+    <material name="bumper_mat" rgba="0.949 0.635 0.290 1" specular="0.25" shininess="0.3"/>
+    <material name="footpad_mat" rgba="0.059 0.098 0.133 1" specular="0.05" shininess="0.05"/>
+    <material name="platform_mat" rgba="0.165 0.682 0.592 1" specular="0.3" shininess="0.3"/>
+    <material name="tire_mat" rgba="0.078 0.106 0.137 1" specular="0.12" shininess="0.15"/>
+    <!-- Rider-proxy material -- same amber the Python ballast proxy uses
+         (sim/scenarios/plant.py's _AMBER), so a render (overboard-viz) reads
+         this ballast the same way. -->
+    <material name="rider_mat" rgba="0.949 0.635 0.290 1" specular="0.2" shininess="0.2"/>
+
+    <mesh name="front_enclosure" file="front_enclosure.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rear_enclosure" file="rear_enclosure.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="front_bumper" file="front_bumper.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rear_bumper" file="rear_bumper.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="front_footpad" file="front_footpad.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="rear_footpad" file="rear_footpad.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="electronics_platform" file="electronics_platform.stl" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" directional="true" pos="-1.5 -2.0 4.0" dir="0.35 0.45 -1"
+           diffuse="0.75 0.74 0.72" specular="0.25 0.25 0.25" castshadow="true"/>
+    <light name="fill" directional="true" pos="2.5 2.5 3.0" dir="-0.5 -0.5 -1"
+           diffuse="0.30 0.32 0.36" specular="0.05 0.05 0.05" castshadow="false"/>
+
+    <geom name="ground" type="plane" size="20 20 0.1" material="ground_mat"/>
+
+    <body name="frame" pos="0 0 0.1454">
+      <freejoint name="frame_free"/>
+      <inertial pos="0 0 -0.03" mass="8.0" diaginertia="0.040 0.400 0.420"/>
+
+      <site name="imu" pos="-0.06 0 -0.007" size="0.008" group="4"/>
+
+      <geom name="front_enclosure_geom" class="visual" type="mesh" mesh="front_enclosure" material="shell_mat"/>
+      <geom name="rear_enclosure_geom" class="visual" type="mesh" mesh="rear_enclosure" material="shell_mat"/>
+      <geom name="front_footpad_geom" class="visual" type="mesh" mesh="front_footpad" euler="0 0 180" material="footpad_mat"/>
+      <geom name="rear_footpad_geom" class="visual" type="mesh" mesh="rear_footpad" material="footpad_mat"/>
+      <geom name="electronics_platform_geom" class="visual" type="mesh" mesh="electronics_platform" material="platform_mat"/>
+
+      <geom name="front_bumper_geom" type="mesh" mesh="front_bumper" material="bumper_mat"
+            group="2" condim="3" friction="0.6 0.005 0.0001"/>
+      <geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" material="bumper_mat"
+            group="2" condim="3" friction="0.6 0.005 0.0001"/>
+
+      <!--
+        Hub wheel -- WIDENED for playability, see this file's header. Radius
+        0.1454 m is unchanged from overboard_onewheel.xml; half-width is
+        doubled from 0.075 m to 0.15 m. Inertial recomputed for the new
+        width with the same hoop-model formula that file documents (mass
+        left at 4.5 kg -- this is a geometry widening, not a claim that a
+        real tire this wide would weigh the same).
+      -->
+      <body name="wheel" pos="0 0 0">
+        <joint name="wheel_hinge" type="hinge" axis="0 -1 0" pos="0 0 0" damping="0.08"/>
+        <inertial pos="0 0 0" mass="4.5" diaginertia="0.0635 0.0595 0.0635"/>
+        <geom name="wheel_geom" type="cylinder" size="0.1454 0.15" euler="90 0 0"
+              material="tire_mat" condim="4"/>
+      </body>
+
+      <!--
+        Ballast: rider-scale mass on two chained slide joints. See this
+        file's header for the full rationale, ranges and the fore/aft
+        vs. lateral drive split.
+
+        `ballast_fa_carrier` is the near-massless fore/aft stage; `ballast`,
+        nested inside it, carries the actual rider mass and slides laterally.
+        Both joints react against the SAME 70 kg -- the carrier's own 0.5 kg
+        is a placeholder for the shift linkage, not rider mass.
+
+        Axis signs: `ballast_fa`'s axis is -X so a POSITIVE joint value (and
+        therefore a positive weight_shift_fore_aft, forwarded by sim-host as
+        the actuator's ctrl) moves the ballast toward -X, i.e. FORWARD --
+        matching this model's "forward = -X" convention and ICD 7.3's
+        positive-is-forward sign. `ballast_lat`'s axis is +Y (right, per the
+        IMU site comment above), so positive weight_shift_lateral shifts the
+        rider to the RIGHT.
+      -->
+      <body name="ballast_fa_carrier" pos="0 0 0.75">
+        <joint name="ballast_fa" type="slide" axis="-1 0 0" pos="0 0 0"
+               range="-0.05 0.05" damping="600"/>
+        <inertial pos="0 0 0" mass="0.5" diaginertia="0.001 0.001 0.001"/>
+        <body name="ballast">
+          <joint name="ballast_lat" type="slide" axis="0 1 0" pos="0 0 0"
+                 range="-0.05 0.05" damping="600"/>
+          <!-- Same diaginertia formula plant.py's rigid ballast uses
+               (mass*0.15, mass*0.15, mass*0.08) at 70 kg. -->
+          <inertial pos="0 0 0" mass="70.0" diaginertia="10.5000 10.5000 5.6000"/>
+          <!-- Visual proxy only -- a rigid ballast is not a rider (no ankle/
+               knee compliance), so this is a plain sphere, not a figure,
+               the same honesty plant.py's own rider_geoms() docstring
+               argues for. contype/conaffinity 0: collides with nothing. -->
+          <geom name="ballast_mass_geom" type="sphere" size="0.12" material="rider_mat"
+                contype="0" conaffinity="0" group="1"/>
+        </body>
+      </body>
+
+      <camera name="side" mode="trackcom" pos="0 2.6 0.30" xyaxes="-1 0 0 0 0 1" fovy="24"/>
+      <camera name="beauty" mode="trackcom" pos="-1.7 2.0 0.85"
+              xyaxes="-2.0 -1.7 0 1.445 -1.700 6.89" fovy="26"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-28 28" ctrllimited="true"/>
+
+    <!--
+      Ballast position actuators. `timeconst` gives the raw `ctrl` value
+      (the wire's weight_shift_*, straight through) a first-order lag before
+      it reaches the position servo's target -- the "rate-limited" part of
+      "rate-limited position actuators" (MuJoCo's `<position>` shortcut
+      compiles this to `dyntype="filterexact"`, `dynprm[0] = timeconst`).
+      `kp` and the 0.15 s time constant are chosen, not bench-tuned:
+      `kp=3000` N/m against the 70 kg rider mass both joints react against
+      gives a ~1 Hz undamped natural frequency, and `damping` on the joints
+      above (600 N*s/m) is close to critical for that mass/kp pair -- a
+      responsive but not violent weight-shift feel, nothing more precise is
+      claimed.
+    -->
+    <position name="ballast_fa" joint="ballast_fa" kp="3000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.15"/>
+    <position name="ballast_lat" joint="ballast_lat" kp="3000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.15"/>
+  </actuator>
+
+  <sensor>
+    <framequat name="frame_quat" objtype="body" objname="frame"/>
+    <gyro name="frame_gyro" site="imu"/>
+    <accelerometer name="frame_accel" site="imu"/>
+    <jointpos name="wheel_pos" joint="wheel_hinge"/>
+    <jointvel name="wheel_vel" joint="wheel_hinge"/>
+    <actuatorfrc name="motor_torque" actuator="wheel_motor"/>
+  </sensor>
+</mujoco>

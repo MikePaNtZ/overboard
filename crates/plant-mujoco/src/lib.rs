@@ -56,6 +56,7 @@ extern "C" {
     fn plant_mujoco_get_body_xmat(data: *mut c_void, body_id: c_int, out: *mut f64);
     fn plant_mujoco_get_body_xpos(data: *mut c_void, body_id: c_int, out: *mut f64);
     fn plant_mujoco_get_body_xquat(data: *mut c_void, body_id: c_int, out: *mut f64);
+    fn plant_mujoco_actuator_id(model: *mut c_void, name: *const c_char) -> c_int;
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -324,6 +325,23 @@ impl Plant {
         let name_c = CString::new(name).expect("body name must not contain a NUL byte");
         // SAFETY: see `sensor_adr_dim`.
         let id = unsafe { plant_mujoco_body_id(self.model, name_c.as_ptr()) };
+        if id < 0 {
+            None
+        } else {
+            Some(id as usize)
+        }
+    }
+
+    /// `mjModel`'s actuator id for `name`, or `None` if there is no such
+    /// actuator. Exists for issue #161 W2: `sim-host` now drives models with
+    /// a variable actuator count (the driverless model's single
+    /// `wheel_motor` vs. the rider model's `wheel_motor` plus two ballast
+    /// position actuators), so `hal`'s `wait_observe()` no longer assumes a
+    /// fixed `ctrl` layout -- see `sim-backend`'s own resolve-by-name.
+    pub fn actuator_id(&self, name: &str) -> Option<usize> {
+        let name_c = CString::new(name).expect("actuator name must not contain a NUL byte");
+        // SAFETY: see `sensor_adr_dim`.
+        let id = unsafe { plant_mujoco_actuator_id(self.model, name_c.as_ptr()) };
         if id < 0 {
             None
         } else {

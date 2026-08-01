@@ -21,6 +21,10 @@ path = "src/bin/sim-host.rs"
 name = "wire-probe"
 path = "src/bin/wire-probe.rs"
 
+[[bin]]
+name = "send-input"
+path = "src/bin/send-input.rs"
+
 [dependencies]
 board-types = { workspace = true }
 hal = { workspace = true }

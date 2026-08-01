@@ -6,7 +6,7 @@
 //! produces it.
 //!
 //! ```text
-//! wire-probe [--seconds N] [--bind ADDR] [--host-stats PATH]
+//! wire-probe [--seconds N] [--bind ADDR] [--host-stats PATH] [--csv PATH]
 //! ```
 //! Binds `--bind` (default `127.0.0.1:9601`, the documented state-out
 //! address), listens for `--seconds` (default 10), and prints a plain-text
@@ -14,6 +14,12 @@
 //! missed-deadline count (read from `--host-stats`, best-effort -- issue
 //! #161's wire itself carries no room for that counter), pitch_rad
 //! min/max/final, and a magic+version parse confirmation.
+//!
+//! `--csv PATH` (issue #161 W2 / #169) additionally writes one row per
+//! received packet -- seq, sim_time_s, pos_x/y, pitch/yaw/roll_rad,
+//! wheel_rate_rad_s, motor_current_a -- because "the board balances" is no
+//! longer the claim W2 needs evidence for; "speed responds to lean" is, and
+//! that needs a real trace, not a min/max/final summary.
 
 use sim_host::wire::{StateOut, SCHEMA_VERSION, STATE_MAGIC};
 use std::net::UdpSocket;
@@ -24,6 +30,7 @@ struct Args {
     seconds: f64,
     bind: String,
     host_stats: PathBuf,
+    csv: Option<PathBuf>,
 }
 
 impl Default for Args {
@@ -32,6 +39,7 @@ impl Default for Args {
             seconds: 10.0,
             bind: sim_host::wire::STATE_OUT_ADDR.to_string(),
             host_stats: PathBuf::from(sim_host::host::DEFAULT_STATS_PATH),
+            csv: None,
         }
     }
 }
@@ -57,10 +65,26 @@ fn parse_args() -> Result<Args, String> {
                 a.host_stats = PathBuf::from(args.get(i + 1).ok_or("--host-stats needs a value")?);
                 i += 2;
             }
+            "--csv" => {
+                a.csv = Some(PathBuf::from(args.get(i + 1).ok_or("--csv needs a value")?));
+                i += 2;
+            }
             other => return Err(format!("unrecognized argument '{other}'")),
         }
     }
     Ok(a)
+}
+
+/// One `--csv` output row -- see the module doc comment.
+struct CsvRow {
+    seq: u64,
+    sim_time_s: f64,
+    pos_x_m: f32,
+    pos_y_m: f32,
+    pitch_rad: f32,
+    yaw_rad: f32,
+    wheel_rate_rad_s: f32,
+    motor_current_a: f32,
 }
 
 fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
@@ -126,6 +150,10 @@ fn main() {
     let mut pitch_final: f32 = f32::NAN;
     let mut first_seq: Option<u64> = None;
     let mut last_seq: Option<u64> = None;
+    // Buffered in memory and written once at the end, not appended live:
+    // this run is at most a few thousand packets, and a single write avoids
+    // interleaving I/O with the receive loop's own timing.
+    let mut csv_rows: Vec<CsvRow> = Vec::new();
 
     while Instant::now() < deadline {
         match socket.recv_from(&mut buf) {
@@ -140,6 +168,19 @@ fn main() {
                     let seq = state.seq;
                     first_seq.get_or_insert(seq);
                     last_seq = Some(seq);
+                    if args.csv.is_some() {
+                        let pos = state.pos;
+                        csv_rows.push(CsvRow {
+                            seq,
+                            sim_time_s: state.sim_time_s,
+                            pos_x_m: pos[0],
+                            pos_y_m: pos[1],
+                            pitch_rad: pitch,
+                            yaw_rad: state.yaw_rad,
+                            wheel_rate_rad_s: state.wheel_rate_rad_s,
+                            motor_current_a: state.motor_current_a,
+                        });
+                    }
                 }
                 Err(e) => {
                     invalid_count += 1;
@@ -233,5 +274,28 @@ fn main() {
             "confirmation: FAILED -- {invalid_count}/{total_received} received packets did not \
              parse (bad magic/version/size); {valid_count}/{total_received} were good"
         );
+    }
+
+    if let Some(path) = &args.csv {
+        let mut out = String::from(
+            "seq,sim_time_s,pos_x_m,pos_y_m,pitch_rad,yaw_rad,wheel_rate_rad_s,motor_current_a\n",
+        );
+        for r in &csv_rows {
+            out.push_str(&format!(
+                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+                r.seq,
+                r.sim_time_s,
+                r.pos_x_m,
+                r.pos_y_m,
+                r.pitch_rad,
+                r.yaw_rad,
+                r.wheel_rate_rad_s,
+                r.motor_current_a
+            ));
+        }
+        match std::fs::write(path, out) {
+            Ok(()) => println!("csv: wrote {} rows to {}", csv_rows.len(), path.display()),
+            Err(e) => println!("csv: FAILED to write {}: {e}", path.display()),
+        }
     }
 }
