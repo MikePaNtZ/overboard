@@ -5,6 +5,7 @@ covers:
   - scripts/analyse_control.py
   - scripts/analyse_delay_budget.py
   - scripts/reference_disturbance.py
+  - scripts/analyse_deadline_bursts.py
   - tests/test_delay_budget_stage0b.py
 -->
 
@@ -302,3 +303,102 @@ compliance that decides how much of caveat (1) survives.
 
 Until that lands, **20 N·s stays as the quoted reference with `inherited, underived` on its
 face** (§3), rather than being replaced by another undefended number.
+
+---
+
+## 5. Consecutive deadline misses (#130)
+
+§2's ceiling was measured against a **pure, fixed** delay, and §3's limits said so: this
+analysis "only speaks to the sustained shift". #130 asked for the other half — what a **burst**
+of consecutive missed deadlines costs — because `hal::Observation` already reports
+`missed_cycles` and nothing pre-registers an acceptable value.
+
+`scripts/analyse_deadline_bursts.py`.
+
+### Where it is modelled, and why not in `ImperfectionProfile` (AC1)
+
+#130 proposed putting burst structure on `ImperfectionProfile`. It is modelled at the
+**controller seam** instead, and not for turf convenience: `ImperfectionProfile` models the
+**plant and its hardware** — sensor noise, quantisation, actuator lag. A missed control deadline
+is none of those. It is a **compute/scheduling** failure — the task did not run, so no new
+command was produced and the actuator holds the last one. The plant is behaving perfectly; the
+computer is not. Putting it in the profile would place a scheduler property inside the physics
+contract Sr. Mechanical & Systems owns and `sim-backend` must conform to. **If they would rather
+it live there, that is their call** — flagged, not assumed.
+
+**Deterministic worst case, not a distribution** (AC1 asks which and why):
+
+1. **A distribution cannot be pre-registered honestly today.** There is no measured jitter
+   distribution — no hardware, no `cyclictest` run. Inventing one and deriving a threshold from
+   it would be exactly the failure #113 was filed about.
+2. **The bound wanted is a worst case**, and "no more than K consecutive misses" is checkable
+   per-cycle against `missed_cycles`. A distributional bound is not.
+
+### The boundary (AC2)
+
+Placement is swept before bisecting — a miss only matters while the loop has work to do. Worst
+placement is **+25 ms after the disturbance**, and there:
+
+| | |
+|---|---|
+| **Last surviving burst** | **114 cycles = 228 ms** |
+| First fatal burst | 115 cycles = 230 ms |
+
+**Monotonicity was verified, not assumed.** Bisection on a saturating nonlinear plant can return
+an arbitrary crossing dressed up as a boundary, so the script also scans linearly around the
+answer and reports the transition count: **exactly one transition**, so the boundary is real.
+
+### A burst is ~6× CHEAPER than the same duration of constant delay (AC4)
+
+This is the useful output, and it inverts the issue's expectation:
+
+| Failure mode | Last surviving |
+|---|---|
+| Constant delay | **37.8 ms** |
+| Held burst, worst placement | **228 ms** |
+| **Ratio** | **6.03×** |
+
+(The 37.8 ms constant-delay figure reproduces §2's independently — a free cross-check that this
+harness and §2's agree.)
+
+**So a burst of K cycles does NOT behave like K × 2 ms of fixed delay. It is far cheaper**,
+because a constant delay costs phase on *every* cycle forever, while a burst is a transient the
+loop recovers from once it ends. #130's premise — that consecutive misses are what threaten a
+balancer — is not supported: **the plant tolerates 114 consecutive misses at the worst instant.**
+
+### ⚠️ What this does NOT support: a pre-registered bound from these numbers (AC3, AC5)
+
+#130's AC3 asked for a bound at "roughly half the measured ceiling", i.e. ~57 consecutive
+misses. **That number should not be registered, for a reason the measurement itself surfaced.**
+
+A repeating burst holds a **superset** of the cycles a single burst of the same length holds, so
+it can never survive where the single one dies. It does anyway:
+
+| Pattern | Last surviving |
+|---|---|
+| Single burst | 114 cycles |
+| Repeating every 300 ms | **121 cycles** |
+| Repeating every 500 ms | **121 cycles** |
+| Repeating every 1000 ms | 93 cycles |
+
+Two mechanisms were ruled out directly rather than argued away. It is **not** the bisection cap
+(a first pass at 20/50/100 ms periods reported the cap, not the physics; these periods are all
+longer than the single-burst limit). It is **not** the stale-state resume either — re-running
+with the controller still executing each cycle and only its *output* held gives the same
+~114-cycle boundary, so a frozen estimator and a `dt` jump on resume are not what kills it.
+
+What is left is that the failure involves **what the controller does after a long hold** — which
+a subsequent hold then interrupts. That is a real finding and it means **the failure mode is not
+"too many consecutive misses"**, so a bound pre-registered off the single-burst number would be
+describing the wrong mechanism.
+
+**Per the honesty clause: the assumptions dominate the conclusion here, so this stops.** What is
+solid: bursts are ~6× cheaper than constant delay, and 114 consecutive misses survive at the
+worst instant. What is not solid enough to pre-register: any bound derived from those, until the
+post-burst mechanism is understood.
+
+**Interim position — bound it on schedulability, not on the plant.** AC-6a already requires the
+loop to complete within its period. A missed deadline is a violation of *that*, and the sane
+engineering bound (a small number of cycles) sits two orders of magnitude below what the plant
+tolerates. **Consecutive misses are not the binding constraint on this vehicle**, and the
+evidence says the effort belongs on disturbance rejection (§4) instead.
