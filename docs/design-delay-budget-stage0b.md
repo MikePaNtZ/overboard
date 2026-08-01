@@ -3,12 +3,18 @@
 <!--
 covers:
   - scripts/analyse_control.py
+  - scripts/analyse_delay_budget.py
+  - scripts/reference_disturbance.py
   - tests/test_delay_budget_stage0b.py
 -->
 
-- **Status:** Proposed — analysis, one AC-6 threshold amended. No implementation change.
+- **Status:** Analysis. **AC-6 is DEMOTED, not amended — it currently gates nothing** (§3).
+  The 20 ms figure is a measured capacity at a design point whose gains, `kt` and reference
+  disturbance are all scheduled to change. No implementation change.
 - **Owner:** Senior Controls.
-- **Closes:** [#113](https://github.com/MikePaNtZ/overboard/issues/113).
+- **Closes:** [#113](https://github.com/MikePaNtZ/overboard/issues/113),
+  [#138](https://github.com/MikePaNtZ/overboard/issues/138),
+  [#142](https://github.com/MikePaNtZ/overboard/issues/142).
 - **Amends:** [`design-pi-image-stage0b-reference.md`](./design-pi-image-stage0b-reference.md)
   §AC-6, per the parent design's own §4 admission — *"500 Hz is an ICD number, not
   physics"* — while a pre-registered hardware go/no-go was still expressed as fractions of
@@ -39,26 +45,43 @@ both come from the same `mj_forward` state:
 | CoM above axle | 633.5 mm | `plant_summary()`, MuJoCo subtree CoM |
 | `mgl` (destabilising stiffness) | 512.67 N·m/rad | `plant_summary()` |
 | `I` (pitch inertia about the axle) | 50.342 kg·m² | own-body `Iyy` + parallel axis, per body |
-| **Unstable pole `p = sqrt(mgl/I)`** | **3.191 rad/s** | this analysis |
+| `p = sqrt(mgl/I)`, fixed pivot — **superseded** | 3.191 rad/s | original derivation |
+| **Unstable pole `p`, identified from the model** | **5.238 rad/s** | `scripts/analyse_delay_budget.py` (#134) |
 
-**Validity range, stated rather than assumed:** this is the standard small-angle
-inverted-pendulum-on-a-pivot linearisation. It deliberately ignores the wheel's
-rolling/translation coupling — that is the outer loop's job (`VelocityLoop`), not this pole's,
-and is exactly why the inner-loop-only ridden test "rides away" (`test_closed_loop.py`) instead
-of falling over: the simple pendulum model does not capture that failure mode at all. This
-number is an order-of-magnitude tipping-mode estimate, not a full multi-body derivation.
+**Corrected in #134 — the fixed-pivot form understates this pole by 64%.** `sqrt(mgl/I)` is the
+pendulum on a *fixed* pivot. This axle is not fixed: it rides on a wheel free to roll, so as the
+board pitches the support runs **out from under** the mass instead of reacting against it. That
+makes the plant *faster*, not slower.
+
+Linearizing the actual model with `mjd_transitionFD` about the settled upright trim (contact
+included) gives **5.238 rad/s**. The closed form for a pendulum on a translating support of
+effective mass `M` (wheel mass plus spin inertia referred to the contact patch, `I_w/r²` =
+7.31 kg) —
+
+```
+p² = m·g·l·(M + m) / ( I·(M + m) − (m·l)² )
+```
+
+— gives 5.564 rad/s, agreeing to **5.9%**, the residual between a rigid two-body idealisation
+and a model with a compliant contact.
+
+The original note said the rolling coupling is "the outer loop's job, not this pole's." That is
+right about the **ride-away** mode. It is not right about the **pole**: support translation
+enters the tipping mode's own characteristic equation through the `(m·l)²` term above, whether
+or not any outer loop is closed.
+
+**Validity range:** small-angle, upright, flat ground, rigid ballast — and with a hard ceiling
+that is *not* the usual small-angle argument. Above **3.06°** of lean the plant saturates: the
+40 A clamp is 28 N·m and gravity alone asks `m·g·l·θ = 28 N·m` there. The impulse runs peak at
+5.95°, so they are deep in saturation, which is why §3 gates on the measured number.
 
 Two standard bounds follow from `p` alone, independent of gain choice:
 
-- **Fundamental delay-margin ceiling, `1/p ≈ 313 ms`** — the RHP-pole/delay theoretical limit;
-  no controller can stabilise this plant against a pure delay beyond this, regardless of tuning.
-- **Textbook robust-design target, `0.2/p ≈ 63 ms`** — the standard `τ·p ≲ 0.2` rule of thumb
-  for a comfortable margin.
+- **Fundamental delay-margin ceiling, `1/p` = 191 ms** (was quoted as 313 ms).
+- **Textbook robust-design target, `0.2/p` = 38.2 ms** (was quoted as 63 ms).
 
-**Both bounds turned out to be loose** — see §3. They bound what *any* controller could
-achieve; they say nothing about what the actual tuned, current-clamped, estimator-driven
-closed loop achieves. That gap is itself the reason to measure rather than stop at the
-analytic pole.
+**The second is not loose — it is accurate to 2%** against the measured 38–39 ms ceiling. See
+§3, where the original "over-predicted by 1.6×" reading is corrected.
 
 **Why this doesn't route through `kt`.** `KT_NM_PER_A = 0.7` (`sim/scenarios/plant.py`) is
 explicitly flagged in-repo as an **unfitted guess**. A crossover-frequency derivation from the
@@ -101,20 +124,65 @@ with roughly **6× headroom**, even before crediting the ~11 ms of unattributed 
 originally-proposed AC-6 (`p99.9 ≤ 1 ms, max ≤ 2 ms`) was not wrong about there being a real
 constraint — it was wrong about which quantity to gate on.
 
-**Also worth recording: the textbook 63 ms "robust target" (§1) over-predicted the achievable
-margin by roughly 1.6×** against the measured 38–39 ms. The point-mass linearisation ignores the
-current clamp (`max_current_a = 40 A`) and the estimator, both real. This is the concrete
-argument for gating on the measured, full-closed-loop number rather than the analytic bound —
-the analytic bound is a sanity check on the measurement's order of magnitude, not a substitute
-for it.
+**Correction (#134): the textbook target did not over-predict — the pole was wrong.** This
+section previously recorded the 63 ms robust target as over-predicting by ~1.6×, and blamed the
+current clamp and the estimator. With §1's corrected pole, `0.2/p` = **38.2 ms** against a
+measured **39 ms** ceiling: an agreement of **2%**. The clamp and estimator are real and do
+matter — the estimator demonstrably costs ~21 ms (§2) — but they are not what explained that
+gap, because with the right pole there is no gap to explain. Attributing an error to the
+nearest plausible physical effect, when the arithmetic upstream was simply wrong, is how a wrong
+number survives review.
+
+The conclusion is unchanged: **gate on the measured number.** What changes is that the analytic
+bound is a far sharper cross-check than it appeared — a future measurement drifting far from
+`0.2/p` should now read as a signal that something moved.
 
 **Recommendation — keep the 500 Hz schedule** (already independently justified by IMU
 anti-aliasing, `crates/control-core/src/lib.rs`, `crates/board-types/src/lib.rs`; lowering it
-was a FORBIDDEN outcome per the issue). **Replace AC-6** with a plant-informed threshold: total
-loop delay (sampling + transport + current-loop lag, everything upstream of `control-core`'s own
-compute) should stay **≤ 20 ms** — roughly half the measured 38–39 ms ceiling, leaving a real
-safety factor over both the known line items (~6.3 ms) and today's estimator cost (~21 ms
-already spent). See §4 in `design-pi-image-stage0b-reference.md` for the amended AC-6 row.
+was a FORBIDDEN outcome per the issue).
+
+### The 20 ms figure is a measured capacity at a design point, NOT a threshold (#138)
+
+**It is deliberately not written as a requirement, and it must not be cited as one.**
+
+> **Measured delay capacity at the stated design point is 38–39 ms; 20 ms is half of it.**
+> The binding hardware threshold is **re-derived after the `kt` fit (#132) and the reference
+> disturbance is settled (#142)** — it does not exist yet.
+
+All four conditions are part of the number, not context for it:
+
+| Condition | Value | Status |
+|---|---|---|
+| Inner gain `kp` | 200 A/rad *(now N·m/rad, #137)* | **about to change** — #132 retune |
+| Inner gain `kd` | 30 A/(rad/s) | **about to change** — #132 retune |
+| `kt` | 0.7 N·m/A | **UNFITTED placeholder** |
+| Reference disturbance | 20 N·s | **INHERITED, underived** — see §4 |
+
+**Re-open trigger, in the criterion itself:** *any* change to `kp`, `kd`, `kt`, the estimator's
+τ, or the reference disturbance **voids this number** and requires re-running
+`scripts/analyse_delay_budget.py`. Three of those five are already scheduled to change.
+
+**The 2× safety factor has moved from the delay axis to the disturbance axis.** §4's table is
+the reason: a 1.5× change in disturbance (20 → 30 N·s) collapses the ceiling from 38 ms to
+15 ms, which outweighs a 2× factor on delay entirely. **A safety factor on the wrong axis is
+worse than none, because it reads as covered.** The margin that matters is the one on how hard
+the board gets hit.
+
+#### Proposed AC-6 row — handoff to the COO
+
+`docs/design-pi-image-stage0b-reference.md` is COO turf (`CODEOWNERS`), so this is proposed,
+not applied. Replace AC-6's threshold sentence with:
+
+> **Not yet gateable.** Measured delay capacity is 38–39 ms at the design point
+> (`kp`=200, `kd`=30, `kt`=0.7 *unfitted*, reference disturbance 20 N·s *inherited*). A
+> binding p99.9 threshold is re-derived once #132 (gain retune, `kt` fit) and #142
+> (reference disturbance) land. Until then AC-6 gates **nothing**, and the 20 ms figure
+> may not be cited on its own to pass or fail a hardware decision.
+
+**The test for whether this demotion actually worked** (#138's own acceptance criterion): can
+anyone still cite "20 ms" alone to pass or fail a hardware decision? With the above, no — the
+sentence that contains the number also contains the four conditions and the words "gates
+nothing".
 
 ### What this simulator cannot yet answer
 
@@ -130,9 +198,107 @@ already spent). See §4 in `design-pi-image-stage0b-reference.md` for the amende
   AC-9 in the reference doc is the real measurement, still pending a Pi 5 + HAT + loopback.
 - **The VESC CAN frame size is unconfirmed** — the ~0.3 ms CAN line item is a generic protocol
   bound, not derived from the real `SET_CURRENT` byte layout (still an honest stub, issue #1).
-- **One disturbance magnitude, one disturbance shape.** All numbers above use
-  `NOMINAL_IMPULSE_NS`; the disturbance-rejection envelope (issue #24 AC2) maps a range of
-  impulse magnitudes but this delay-budget analysis was not re-run across that whole range.
+- **~~One disturbance magnitude.~~ Now swept (#134), and it is the sharpest limit here.** The
+  ceiling is saturation-driven, so it is a function of disturbance amplitude, not a plant
+  constant. Bisected to 1 ms, same harness as §2:
+
+  | Impulse | Truth ceiling | Estimator ceiling | Peak pitch at zero delay |
+  |---|---|---|---|
+  | 10 N·s | 71 ms | 48 ms | 2.94° |
+  | **20 N·s (`NOMINAL_IMPULSE_NS`)** | **60 ms** | **38 ms** | 5.95° |
+  | 30 N·s | 37 ms | **15 ms** | 8.98° |
+  | 40 N·s | — | — | **inverts at zero delay** |
+
+  At 30 N·s the estimator-in-loop ceiling is **15 ms, below the 20 ms figure itself**. The
+  ceiling falls faster than linearly (~1.0 ms/N·s from 10→20, ~2.3 ms/N·s from 20→30).
+  (The estimator's own cost is ~22 ms at *every* amplitude — 23/22/22 — which is what justifies
+  §2 charging it as a fixed line item.)
 - **If any of these assumptions turn out to dominate the conclusion, that supersedes this
   document** — per the issue's own instruction, this analysis is not asking to be trusted past
   what it actually checked.
+
+---
+
+## 4. The reference disturbance (#142)
+
+Everything above is quoted at `NOMINAL_IMPULSE_NS = 20 N·s`. **That figure was inherited from a
+scenario nominal, not derived.** Its own docstring gives the game away — *"On 12.5 kg it is a
+1.6 m/s delta-v — a firm shove."* 12.5 kg is the **driverless** board. On the 82.5 kg ridden
+vehicle every gate actually runs against, the same 20 N·s is **0.24 m/s**, and nothing
+establishes that a firm shove is the worst thing that happens to a board.
+
+The #132 retune needs a target, and "survive a firm shove" is not one.
+
+### The derivation
+
+`scripts/reference_disturbance.py`. A wheel of radius `r` rolling at `v` into a step of height
+`h < r`: at impact the contact point jumps to the step edge and the wheel must begin rotating
+about it, so the velocity component **along** the edge-to-centre line is destroyed and only the
+perpendicular component survives. The edge-to-centre vector has length `r` and vertical
+component `(r − h)`, so the surviving speed is `v(r − h)/r` and
+
+```
+Δv = v · h / r          J = M · Δv = M · v · h / r
+```
+
+No tuning constant, no fitted coefficient, no `kt` — only geometry, speed and mass. Note `h` and
+`v` enter identically: a 10 mm lip at 8 m/s is the same impulse as a 20 mm lip at 4 m/s.
+
+### What the current numbers mean as obstacles
+
+At `r` = 145.4 mm and `M` = 82.5 kg, read backwards from the measured thresholds:
+
+| Threshold | What it is | Equivalent obstacle at 4 m/s | at 8 m/s |
+|---|---|---|---|
+| 20 N·s | the current reference | **8.8 mm** | 4.4 mm |
+| 30 N·s | budget insolvent | 13.2 mm | 6.6 mm |
+| 40 N·s | **inverts at zero delay** | **17.6 mm** | 8.8 mm |
+
+**The current reference disturbance is a 9 mm pavement lip at 14 km/h.** The board inverts, with
+a perfect zero-delay controller, on **18 mm at the same speed** — a raised paving slab. A
+standard UK kerb face (100–125 mm) computes to **227–568 N·s**, six to fourteen times beyond
+inversion.
+
+### Does the current design point survive it? (#142 AC4)
+
+**No — not by a wide margin, on this model.** Stated plainly as the issue requires. Any obstacle
+a board would actually meet on a footpath exceeds the envelope the delay budget is quoted at.
+
+### Two caveats, pointing in OPPOSITE directions
+
+Quoting either alone would mislead, so both:
+
+1. **The wheel and step are rigid here; the real tyre is pneumatic.** A real tyre deforms over
+   the edge and spreads the impulse over a longer window, so this **overstates `J`** — by how
+   much is a tyre-compliance question this repo cannot answer, because there is no tyre model.
+   **This is an upper bound on a rigid-wheel strike, and the gap is probably large.**
+2. **A kerb acts at the contact patch; the sim's impulse acts through the CoM.**
+   `ImpulseParams.application_height_m` defaults to 0.0 so the disturbance is a pure *linear*
+   impulse. A real kerb force lands ~0.83 m **below** the CoM, adding an angular impulse and
+   decelerating the base — and decelerating the base of an inverted pendulum pitches it further
+   forward, the opposite of the recovery input. **So feeding a kerb-derived `J` in as a CoM
+   impulse understates its severity.**
+
+Neither is quantified. **The honest reading is therefore a magnitude with its assumptions
+attached, not a blessed number** — and the direction of the residual is genuinely unknown,
+because (1) and (2) fight each other.
+
+### What this changes, and what it does not
+
+- It does **not** justify lowering the envelope quietly. It says the envelope is currently
+  described by a number nobody derived, and that credible obstacles are outside it.
+- It **does** give #132 a target: the retune should be scoped against a defended disturbance,
+  not against 20 N·s.
+- **The tyre model is now on the critical path**, not a nice-to-have. Caveat (1) is the single
+  largest uncertainty, and it sits on Sr. Mechanical & Systems' surface.
+
+### Open, and owned elsewhere (#142 AC2)
+
+**What is a kerb strike worth, in N·s, for this vehicle?** That is a plant and duty-cycle
+question, not a control-law one. Controls has supplied the geometry-to-impulse mapping and the
+measured envelope; **Sr. Mechanical & Systems owns the obstacle spec** — realistic kerb/lip
+heights for the intended riding surface, realistic approach speeds, and above all the tyre
+compliance that decides how much of caveat (1) survives.
+
+Until that lands, **20 N·s stays as the quoted reference with `inherited, underived` on its
+face** (§3), rather than being replaced by another undefended number.
