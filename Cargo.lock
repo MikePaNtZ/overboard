@@ -383,6 +383,7 @@ dependencies = [
  "hal",
  "hal-actuate",
  "plant-mujoco",
+ "serde_json",
 ]
 
 [[package]]

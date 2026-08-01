@@ -27,11 +27,19 @@
 //! - **`apply()` does not echo the command back as measured current.** The
 //!   commanded value is buffered and only appears in a *later* observation,
 //!   because actuation delay is additive (ICD §5.2) and a backend that echoes
-//!   is explicitly non-conforming (§12). One whole control cycle here is a
-//!   placeholder for the real first-order current loop, which arrives with
-//!   the imperfection profile (Mechanical's territory, not this crate's).
+//!   is explicitly non-conforming (§12). That structural one-cycle defer is
+//!   protocol-level, not the imperfection profile's own delay -- see below.
 //! - **Cold start reports `Invalid`, not zeros.** A backend presenting zeros
 //!   as measurements before the drive has spoken is non-conforming (§12).
+//! - **The imperfection profile (issue #129) is real, not a placeholder.**
+//!   [`imperfections::ImperfectionState`] runs cutback -> saturate ->
+//!   transport delay -> current-loop lag on top of the structural delay
+//!   above, quantises + holds reported wheel rate, and noises the IMU --
+//!   checked bit-for-bit on its deterministic rows against
+//!   `sim/scenarios/imperfections.py`'s own generated vectors by
+//!   `tests/imperfection_conformance.rs`. The default profile is
+//!   [`imperfections::IDEAL`] (a no-op chain), so every pre-#129 caller's
+//!   behaviour is unchanged; [`SimBackend::with_profile`] opts in.
 //!
 //! [`SimBackend`] implements both [`hal::BoardObserve`] and
 //! [`hal_actuate::BoardActuate`], which makes this crate **driverless-only**:
@@ -45,8 +53,11 @@ use board_types::{
 };
 use hal::{BoardObserve, CallSequence};
 use hal_actuate::{BoardActuate, Disarm};
+use imperfections::{ImperfectionProfile, ImperfectionState};
 use plant_mujoco::Plant;
 use std::path::{Path, PathBuf};
+
+pub mod imperfections;
 
 /// Nanoseconds per control cycle. 500 Hz, per ICD §11.2. Sourced the same way
 /// the stub sourced it -- a fixed constant, not read from the model -- per
@@ -152,8 +163,29 @@ pub struct SimBackend {
     /// Commanded current awaiting its actuation delay. Never reported as
     /// measured in the same cycle it was applied.
     pending_current_a: Option<f32>,
-    /// The current now actually flowing, as far as the plant is concerned.
+    /// The command as it stands after the structural one-cycle delay
+    /// (protocol-level: `apply()` at cycle N is visible starting cycle
+    /// N+1's `wait_observe()`). This is the imperfection chain's INPUT, not
+    /// what the plant sees -- see `applied_current_a` for that.
+    commanded_current_a: f32,
+    /// The current the plant is actually seeing, after the imperfection
+    /// profile's own cutback/delay/lag chain has run on top of
+    /// `commanded_current_a`. With `imperfections::IDEAL` this chain is a
+    /// same-cycle passthrough, so the two coincide and every pre-#129 test
+    /// keeps its exact prior behaviour.
     applied_current_a: f32,
+    /// Ground-truth wheel rate from the PREVIOUS cycle's sensor read, fed to
+    /// this cycle's cutback decision. Real wheel rate for the CURRENT cycle
+    /// is only known after `Plant::step`, which runs after the chain needs
+    /// it -- unlike the Python scenarios, which read truth and act on it
+    /// within the same synchronous step. Using last cycle's truth is the
+    /// real-time-loop-shaped choice, one control period stale, and is
+    /// flagged rather than hidden: see this crate's module doc.
+    last_wheel_rate_rad_s: f64,
+    imperfection_profile: ImperfectionProfile,
+    /// Built once `dt_s` is known, in `open()` -- same pattern as
+    /// `steps_per_cycle`.
+    imperfections: Option<ImperfectionState>,
     params: Params,
     /// Overrides `model_path()`'s default when `Some` (issue #161 W2). See
     /// [`SimBackend::with_model_path`].
@@ -235,7 +267,22 @@ impl SimBackend {
         self.incline_deg = incline_deg;
     }
 
-    /// The current the plant is seeing. Exposed for tests.
+    /// As [`SimBackend::with_params`], but with a non-default imperfection
+    /// profile (issue #129). Without this constructor the profile is
+    /// [`imperfections::IDEAL`], preserving every pre-#129 backend's exact
+    /// behaviour -- `test_rust_hosted_impulse_response.py`'s `profile=IDEAL`
+    /// seam check needs no changes because of it.
+    pub fn with_profile(params: Params, profile: ImperfectionProfile) -> Self {
+        SimBackend {
+            params,
+            imperfection_profile: profile,
+            ..SimBackend::default()
+        }
+    }
+
+    /// The current the plant is seeing, after the imperfection chain.
+    /// Exposed for tests.
+
     pub fn applied_current_a(&self) -> f32 {
         self.applied_current_a
     }
@@ -596,12 +643,23 @@ impl BoardObserve for SimBackend {
         self.frame_free_qposadr = plant.joint_qposadr("frame_free");
         self.frame_free_dofadr = plant.joint_dofadr("frame_free");
 
+        // Built once dt_s is known, same reasoning as steps_per_cycle above:
+        // a fresh ImperfectionState per open() so repeat-run bit-identity
+        // (AC5, issue #74) is not contaminated by carrying noise-stream
+        // state across runs.
+        self.imperfections = Some(ImperfectionState::new(
+            self.imperfection_profile,
+            plant.timestep(),
+        ));
+
         self.plant = Some(plant);
         self.cycle = 0;
         self.pending_current_a = None;
+        self.commanded_current_a = 0.0;
         self.applied_current_a = 0.0;
         self.ballast_fa_target_m = 0.0;
         self.ballast_lateral_target_m = 0.0;
+        self.last_wheel_rate_rad_s = 0.0;
         self.open = true;
         self.seq.reset();
         Ok(())
@@ -632,14 +690,35 @@ impl BoardObserve for SimBackend {
         self.cycle += 1;
 
         // Whatever was commanded last cycle becomes effective now -- the
-        // additive actuation delay, in its crudest possible form.
+        // STRUCTURAL one-cycle delay inherent to the apply()/wait_observe()
+        // protocol (ICD §5.2's "additive" loop delay), not the imperfection
+        // profile's own actuation_delay_s. That row is layered on top,
+        // below, via `imperfections.apply_current` (issue #129).
         if let Some(pending) = self.pending_current_a.take() {
-            self.applied_current_a = pending;
+            self.commanded_current_a = pending;
         }
+        // Cutback -> saturate -> transport delay -> current-loop lag
+        // (sim/scenarios/imperfections.py's own chain_order). Fed last
+        // cycle's truth wheel rate (see `last_wheel_rate_rad_s`'s field
+        // doc): this cycle's truth is not known until after `Plant::step`
+        // below, which is one line too late for a cutback decision this
+        // same cycle.
+        let imperfections = self
+            .imperfections
+            .as_mut()
+            .expect("self.open is only true while self.imperfections is Some");
+        self.applied_current_a = imperfections.apply_current(
+            self.commanded_current_a as f64,
+            Some(self.last_wheel_rate_rad_s),
+        ) as f32;
+
         // Built by resolved actuator index, not a fixed-length array (issue
         // #161 W2): the driverless model has one actuator, the ridden rider
         // model has three. Ballast channels stay at MuJoCo's zero-init
-        // default (0.0) on a model that does not declare them.
+        // default (0.0) on a model that does not declare them. The
+        // imperfection chain above (issue #129) applies to the wheel motor
+        // channel only -- the ballast actuators are position-controlled
+        // weight-shift targets, not the hub motor, and are untouched by it.
         let mut ctrl = vec![0.0f64; plant.nu()];
         ctrl[self.wheel_motor_actuator] = self.applied_current_a as f64 * KT_NM_PER_A;
         if let Some(idx) = self.ballast_fa_actuator {
@@ -671,20 +750,33 @@ impl BoardObserve for SimBackend {
         let accel = plant.read_sensor(self.accel_sensor.0, self.accel_sensor.1);
         let gyro_icd = [-gyro[0] as f32, gyro[1] as f32, -gyro[2] as f32];
         let accel_icd = [-accel[0] as f32, accel[1] as f32, -accel[2] as f32];
+        // Gyro/accel noise+bias, per the imperfection profile (issue #129).
+        // A no-op under `imperfections::IDEAL`, which is why the pre-#129
+        // tests below still hold with no changes.
+        let [gx, gy, gz] =
+            imperfections.gyro_vec([gyro_icd[0] as f64, gyro_icd[1] as f64, gyro_icd[2] as f64]);
+        let [ax, ay, az] = imperfections.accel_vec([
+            accel_icd[0] as f64,
+            accel_icd[1] as f64,
+            accel_icd[2] as f64,
+        ]);
+        let gyro_icd = [gx as f32, gy as f32, gz as f32];
+        let accel_icd = [ax as f32, ay as f32, az as f32];
 
         // Wheel rate (issue #121): same `wheel_hinge` joint and sign
         // convention `ctrl` uses, read via the model's existing `wheel_vel`
         // jointvel sensor -- read AFTER stepping, same ordering rule as the
-        // IMU sensors above. Converted to ERPM through the single
-        // ICD-sourced ratio (`RAD_S_PER_ERPM`), not quantised to the nearest
-        // integer ERPM: this backend has no imperfection-profile plumbing
-        // yet (see this crate's own header on the actuation-delay stub), so
-        // like `motor_current_a` this is the idealised, noiseless reading --
-        // integer ERPM quantisation is `imperfections.py`'s
-        // `wheel_rate_quantum_rad_s` row, which has no Rust-side home yet.
-        let wheel_rate_rad_s =
+        // IMU sensors above.
+        let wheel_true_rad_s =
             plant.read_sensor(self.wheel_vel_sensor.0, self.wheel_vel_sensor.1)[0];
-        let erpm = (wheel_rate_rad_s / RAD_S_PER_ERPM as f64) as f32;
+        // Reported ERPM goes through the profile's quantisation + hold
+        // (issue #129) -- a no-op under IDEAL, same reasoning as above.
+        let wheel_reported_rad_s = imperfections.wheel_rate(wheel_true_rad_s, t_s);
+        let erpm = (wheel_reported_rad_s / RAD_S_PER_ERPM as f64) as f32;
+        // Truth, not the reported/quantised value, feeds NEXT cycle's
+        // cutback decision -- mirrors the Python scenarios' own
+        // `apply_current(proposed, wheel_true)`, not `sensed_wheel`.
+        self.last_wheel_rate_rad_s = wheel_true_rad_s;
 
         let mut obs = Observation::COLD_START;
         obs.cycle = self.cycle;
@@ -724,12 +816,38 @@ impl BoardObserve for SimBackend {
             params: self.params,
             imu_mounting_rotation: [1.0, 0.0, 0.0, 0.0],
             r_eff_m: DEFAULT_R_EFF_M,
-            imperfection_profile_id: None,
+            // None only when the profile genuinely models nothing (issue
+            // #129 AC): a run cannot be read without knowing what was
+            // modelled (ICD §6.2), so IDEAL is the one profile allowed to
+            // leave this blank.
+            imperfection_profile_id: if self.imperfection_profile.is_ideal() {
+                None
+            } else {
+                Some(profile_id_bytes(self.imperfection_profile.profile_id))
+            },
             schema_hash: [0; 32],
             binary_hash: [0; 32],
             git_sha: [0; 20],
         }
     }
+}
+
+/// Encodes a profile id as its UTF-8 bytes, zero-padded to 32 bytes -- not
+/// hashed. A hash would need this crate to reproduce whatever Python-side
+/// serialisation it was taken over, which is exactly the kind of derived
+/// semantics the conformance vectors exist to avoid re-deriving. Every id in
+/// `imperfections::` fits comfortably; a longer one is a naming mistake and
+/// panics loudly rather than truncating silently.
+fn profile_id_bytes(id: &str) -> [u8; 32] {
+    let bytes = id.as_bytes();
+    assert!(
+        bytes.len() <= 32,
+        "profile_id {id:?} is {} bytes, longer than the 32-byte field it must fit in",
+        bytes.len()
+    );
+    let mut out = [0u8; 32];
+    out[..bytes.len()].copy_from_slice(bytes);
+    out
 }
 
 impl BoardActuate for SimBackend {
@@ -1231,6 +1349,95 @@ mod tests {
             dy < -0.1 && dy.abs() > dx.abs() * 5.0,
             "after a 90 deg injection the board should travel along -Y, not -X \
              (moved dx={dx:.4} m, dy={dy:.4} m)"
+        );
+    }
+
+    // --- new for issue #129: imperfection-profile wiring ------------------
+
+    #[test]
+    fn ideal_profile_is_the_default_and_reports_no_profile_id() {
+        let b = opened();
+        assert_eq!(b.run_metadata().imperfection_profile_id, None);
+    }
+
+    #[test]
+    fn non_ideal_profile_stamps_its_id() {
+        let mut b = SimBackend::with_profile(
+            Params {
+                max_current_a: 40.0,
+                ..Params::default()
+            },
+            imperfections::STAGE0_PLACEHOLDER,
+        );
+        b.open().unwrap();
+        let stamped = b
+            .run_metadata()
+            .imperfection_profile_id
+            .expect("a non-ideal profile must stamp Some(_)");
+        let mut want = [0u8; 32];
+        want[..21].copy_from_slice(b"stage0-placeholder-v1");
+        assert_eq!(stamped, want);
+    }
+
+    #[test]
+    fn stage0_profile_delays_and_lags_the_current_the_plant_sees() {
+        // With IDEAL, one apply() is visible, at full magnitude, exactly one
+        // cycle later (see measured_current_is_not_an_echo_of_the_command).
+        // STAGE0_PLACEHOLDER adds its own actuation_delay_s/current_loop_tau_s
+        // on top of that structural cycle: the same command must NOT reach
+        // full magnitude one cycle later, because the current-loop lag alone
+        // guarantees a first-order approach, never a step.
+        let mut b = SimBackend::with_profile(
+            Params {
+                max_current_a: 40.0,
+                ..Params::default()
+            },
+            imperfections::STAGE0_PLACEHOLDER,
+        );
+        b.open().unwrap();
+        b.arm().unwrap();
+        b.wait_observe().unwrap();
+        b.apply(&Command::MotorCurrent { amps: 10.0 }).unwrap();
+        let next = b.wait_observe().unwrap();
+        assert!(
+            next.motor_current_a > 0.0 && next.motor_current_a < 10.0,
+            "expected a partial, lagged response, got {}",
+            next.motor_current_a
+        );
+    }
+
+    #[test]
+    fn stage0_cutback_profile_does_not_cap_current_at_rest() {
+        // At the board's resting wheel speed (~0 rad/s), well below
+        // derate_onset_rad_s (27), cutback must not bind -- the command
+        // should reach the plant once the current-loop lag settles, same as
+        // a profile with no cutback modelled at all. This proves
+        // `last_wheel_rate_rad_s` is wired into the cutback decision with a
+        // real (not a dummy always-triggering or always-clear) reading; the
+        // cutback MATH itself -- does it cap correctly once the wheel really
+        // is spinning fast -- is exercised directly, without needing the
+        // plant to physically spin up, by `imperfections::tests` and
+        // `tests/imperfection_conformance.rs`.
+        let mut b = SimBackend::with_profile(
+            Params {
+                max_current_a: 40.0,
+                ..Params::default()
+            },
+            imperfections::STAGE0_CUTBACK,
+        );
+        b.open().unwrap();
+        b.arm().unwrap();
+        b.wait_observe().unwrap();
+        let mut last = b.wait_observe().unwrap();
+        for _ in 0..30 {
+            b.apply(&Command::MotorCurrent { amps: 10.0 }).unwrap();
+            last = b.wait_observe().unwrap();
+        }
+        assert!(
+            last.motor_current_a > 9.0,
+            "expected the lag to have settled near the uncapped 10A command \
+             at rest, got {}",
+            last.motor_current_a
         );
     }
 }
