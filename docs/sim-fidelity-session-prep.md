@@ -1,9 +1,17 @@
 # Sim fidelity — prep for the working session (#33)
 
 <!--
-covers:
-  - sim/scenarios/plant.py
-  - sim/scenarios/imperfections.py
+NO `covers:` MANIFEST, deliberately. ADR-0008 has two tiers: implementation-tier
+docs carry a manifest so doc-drift can force them to move when the code they
+describe moves. This is NOT one of those -- it is a dated snapshot prepared for
+one session, and it cites code the way a meeting agenda cites a report.
+
+It briefly had a manifest over plant.py and imperfections.py, and within the
+hour that blocked Sr. Mechanical & Systems' PR #128: their change to
+imperfections.py dragged this prep doc along and red-built work that had
+nothing to do with it. A manifest on a snapshot taxes everyone who touches the
+covered files, forever, to keep a document current that is meant to go stale
+the day after the session.
 -->
 
 **Requirement: `SR-SIM-3`** (no ideal-only mode in CI) and **`SR-SIM-5`** (one control loop, two
