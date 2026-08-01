@@ -142,25 +142,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # The closed-loop gate loads the REAL control law over the C ABI, so the
-      # cdylib has to exist before pytest runs. If it is missing those tests
-      # FAIL rather than skip -- a closed-loop test that passes because the
-      # controller was absent would be worse than no test at all.
-      - name: Build the control library
-        run: cargo build --release -p control-ffi
-
-      # I1b (issue #106): tests/test_rust_python_plant_replay_equivalence.py shells out to this
-      # binary to compare the Rust-hosted plant against the Python-hosted one
-      # it runs in-process. Same "fail rather than skip" rule as above.
-      - name: Build the plant-mujoco replay binary
-        run: cargo build --release -p plant-mujoco --bin plant-replay
-
-      # I1c (issue #107, AC6): tests/test_rust_hosted_impulse_response.py
-      # shells out to this binary to compare the Rust-hosted closed loop
-      # (hal + sim-backend's real plant) against the Python-hosted one. Same
-      # "fail rather than skip" rule as above.
-      - name: Build the Rust-hosted impulse-response binary
-        run: cargo build --release -p board-app-driverless --bin impulse-response-rust
+      # The pytest suite shells out to these binaries and FAILS rather than
+      # skips if one is missing (I1b/I1c) -- a closed-loop gate that passes
+      # because the controller was silently absent would be worse than no
+      # test at all. `publish-sim-artifact` needs the identical set for the
+      # same reason; scripts/build_sim_binaries.py is the one place that
+      # lists them, so the two jobs cannot drift apart the way they did
+      # three times in one day (#124).
+      - name: Build sim binaries
+        run: python scripts/build_sim_binaries.py
 
       - name: Scenario acceptance gate
         run: pytest tests/ -v
@@ -257,30 +247,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # --compare films the SAME disturbance closed-loop as a second pane, and
-      # that pane runs the real control law over the C ABI -- so the cdylib has
-      # to exist. The script has no fallback here on purpose: publishing an
-      # "open vs closed" clip whose closed pane was quietly uncontrolled would
-      # be a lie in the most visible artifact the project produces.
-      - name: Build the control library
-        run: cargo build --release -p control-ffi
-
-      # I1b (issue #106): tests/test_rust_python_plant_replay_equivalence.py shells out to this
-      # binary, same as the `sim` job above. `Emit claims manifest` below also
-      # runs `pytest tests/`, so without this the equivalence gate's own
-      # "fail rather than pass vacuously" check (added by #117) correctly
-      # fails the suite here too.
-      - name: Build the plant-mujoco replay binary
-        run: cargo build --release -p plant-mujoco --bin plant-replay
-
-      # I1c (issue #107, AC6): tests/test_rust_hosted_impulse_response.py shells
-      # out to this binary, same as the `sim` job above. Missing here since
-      # #120 added the binary and its test without updating this job -- the
-      # same "fail rather than pass vacuously" check meant `Emit claims
-      # manifest` below has been failing on every push since, silently,
-      # because this job is not a required status check.
-      - name: Build the Rust-hosted impulse-response binary
-        run: cargo build --release -p board-app-driverless --bin impulse-response-rust
+      # Same set the `sim` job builds, via the same script (#124) -- this job
+      # needs it too: the --compare render's closed pane runs the real
+      # control law over the C ABI (publishing an "open vs closed" clip whose
+      # closed pane was quietly uncontrolled would be a lie in the most
+      # visible artifact the project produces), and `Emit claims manifest`
+      # below runs `pytest tests/`, which shells out to the other two exactly
+      # as the `sim` job's run does. This is the drift #124 was filed about:
+      # #120 added a binary to `sim` and not here, and the suite's own "fail
+      # rather than pass vacuously" check meant this step failed on every
+      # push for three runs, silently, because this job is not required.
+      - name: Build sim binaries
+        run: python scripts/build_sim_binaries.py
 
       # Only tests that PASS contribute a claim (docs/design-claims-manifest.md,
       # issue #61). A red run here still writes a manifest of whatever passed,
