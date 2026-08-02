@@ -2,10 +2,14 @@
 
 **For: the CEO.** Restart is the only broadcast primitive this org has (ADR-0001), so a
 decision only reaches a role when someone starts that role's session and hands it the news.
-ADR-0011 names five roles that must be told. This file is the thing to paste.
+ADR-0011 names five roles that must be told; a dead-date audit found a **sixth the ADR
+missed**. This file is the thing to paste.
 
-**Order matters.** Senior Digital Marketer first — its branch carries a date that no longer
-exists and publishing is a one-way door. Everything else can wait an hour; that cannot.
+**Order matters.** CMO and Senior Digital Marketer first, in that order. The CMO's own
+`CONTEXT.md` is merged on `master` still saying the launch ships Monday, so that role boots
+into stale orders on *any* restart — it is armed rather than merely uninformed. The SDM's
+branch carries the dead date, and publishing is a one-way door. Everything else can wait an
+hour; those two cannot.
 
 Each brief is self-contained on purpose. A restarted session has no memory of the day, and
 three of the day's findings are the **opposite** of what the older notes in this repo say. A
@@ -32,6 +36,61 @@ And the one-line version of the defect itself: **holding full forward stick from
 the board in ~6.5 s**, on the straight, at `steer = 0`, reachable in the playable build.
 
 ---
+
+## 0. CMO — ADR-0011 MISSED THIS ONE, and it is a live trap
+
+**ADR-0011's "who moves" list does not name the CMO.** That is a gap in the ADR, found by a
+dead-date audit rather than by reading it, and it matters more than the omission suggests:
+`roles/cmo/CONTEXT.md` is **merged on `master`** (PR #164, 2026-08-01 — the day *before*
+ADR-0011 was ratified) and its first sub-goal reads
+
+> **LAUNCH IS MONDAY 2026-08-03 MORNING**, readiness review Sunday night. Everything else is
+> subordinate until it ships.
+
+That file is the first thing a CMO session reads under the session-start protocol. So **any**
+CMO restart, for any reason at all, currently boots into stale launch orders and a
+Sunday-evening claims-gate deadline — for a launch that does not exist. It is not waiting to
+be told; it is armed.
+
+ADR-0011 says its own enforcement is `policy` for the public-claim half, and that *"the date
+itself is convention only and therefore relies on this file being read."* This is precisely
+the case where that reliance fails: the role reads its context file, and the context file is
+wrong.
+
+A superseding banner has been added to the top of that file under `TURF-OVERRIDE` — defusing
+it, not rewriting CMO's priorities, which remain CMO's to set. The brief:
+
+> You are the CMO. Read `CLAUDE.md`, then `docs/decisions/INDEX.md`, then
+> `roles/cmo/CONTEXT.md` — **noting the hold banner at the top of it.**
+>
+> **The 2026-08-03 launch is held.** The decision is
+> `docs/decisions/ADR-0011-hold-the-launch-until-the-board-stops-flipping.md`. Holding full
+> forward stick from rest inverts the board in ~6.5 s, on the straight, at `steer = 0`, and it
+> is reachable in the playable build. The CEO hit it on first contact and held the launch.
+>
+> **Your `CONTEXT.md` sub-goals are stale and I could not fix them for you** — that file is
+> your turf and your priorities are yours to set. The COO added a banner marking the
+> supersession and nothing else. Everything dated to Monday or to Sunday night in that file
+> needs re-basing by you: the claims gate "due Sunday evening", "Monday's footage", the
+> "Monday launch content" doc, and the post-launch portfolio work.
+>
+> **There is no new date.** The hold is gated on a control fix, not a calendar, and it is
+> open-ended. Do not set one, do not let one be inferred, and do not run a readiness review.
+>
+> **The stability claim is withdrawn**, not softened: "the board never became unstable at any
+> aggression level tested" is false. The measurements behind it were taken through a harness
+> silently delivering stick input at 7–13 Hz against a 100 ms staleness cutoff, so the board
+> was being commanded at roughly 0.62 of the lean the tests believed. They support nothing and
+> may not be cited in any form.
+>
+> Your Senior Digital Marketer is being restarted in parallel and owns the `overboard-web`
+> page status under the `SR-WEB-4` lock-step. Coordinate rather than duplicating — the SDM
+> brief is section 1 of this file.
+>
+> Report back: whether anything went out, and your re-based sub-goals.
+
+**Good news from the same audit:** the live public `overboard-web` site is **clean** — no
+2026-08-03, no Monday launch date, no stability claim. Nothing wrong is currently published.
 
 ## 1. Senior Digital Marketer — URGENT, do this one first
 

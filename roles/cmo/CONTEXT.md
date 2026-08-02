@@ -1,5 +1,27 @@
 # CMO — working context
 
+> ## ⛔ STOP — THE LAUNCH IS HELD. The sub-goals below are STALE.
+>
+> **Added by the COO on 2026-08-02 under `TURF-OVERRIDE`.** This file is CMO turf and the COO
+> has changed nothing else in it — your priorities are yours to set. This banner exists only
+> because the file was merged on 2026-08-01, the day *before*
+> [ADR-0011](../../docs/decisions/ADR-0011-hold-the-launch-until-the-board-stops-flipping.md)
+> was ratified, so it still issues launch orders for a launch that is not happening.
+>
+> - **The 2026-08-03 launch is HELD.** There is **no new date** — the hold is gated on a
+>   control fix, not a calendar. Do not set a date, do not let one be inferred, do not run a
+>   readiness review. Everything below dated to Monday or Sunday night needs re-basing by you.
+> - **Why:** holding full forward stick from rest inverts the board in ~6.5 s. On the
+>   straight, at `steer = 0`, reachable in the playable build. The CEO hit it on first contact.
+> - **The stability claim is WITHDRAWN, not softened.** "The board never became unstable at
+>   any aggression level tested" is false and may not be restated in any form. The
+>   measurements behind it were taken through a harness delivering stick input at 7–13 Hz
+>   against a 100 ms staleness cutoff — the board was commanded at ~0.62 of the lean the tests
+>   believed. They support nothing and may not be cited.
+> - **Full brief:** [`roles/coo/restart-briefs-2026-08-02-launch-hold.md`](../coo/restart-briefs-2026-08-02-launch-hold.md), section 0.
+>
+> Delete this banner once you have re-based the sub-goals below it.
+
 - **Worktree:** `~/projects/overboard-cmo` (ADR-0006). Marketing work happens in
   `overboard-web`, `overboard-viz` and `overboard-metrics`.
 - **Read first:** [`docs/decisions/INDEX.md`](../../docs/decisions/INDEX.md) · [`ROLES.md`](../../docs/decisions/ROLES.md)
