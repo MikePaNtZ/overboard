@@ -1,0 +1,42 @@
+[package]
+name = "loop-profiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Library plus a thin binary, the same shape as `sim-host` (SR-GAME-15): the
+# statistics and the RT setup are worth unit-testing, and a binary-only crate
+# would make that impossible without shelling out.
+[lib]
+name = "loop_profiler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "overboard-loop-profile"
+path = "src/bin/overboard-loop-profile.rs"
+
+# Deliberately NOT `hal-actuate`, and deliberately NOT `sim-backend`.
+#
+# This crate has no actuation path at all: it cannot open a backend, cannot
+# arm one, and has no `apply()` to call. That is the point. The reference doc
+# §6 ("Who must be present") lists `cyclictest` and dry runs among the things
+# that do NOT need the CEO stood over the deadman, and this tool is only in
+# that category if it is structurally incapable of turning a motor -- not if
+# it merely happens not to. Depending on `hal-actuate` would also pull this
+# crate into `xtask gate`'s motion-authority set for no gain.
+#
+# `sim-backend` is excluded for a second, independent reason: it links
+# MuJoCo, and stepping a physics plant inside the measured window would
+# dominate the very number this tool exists to report. On the Pi the plant is
+# real hardware; the compute this profiles is the control law and nothing
+# else.
+[dependencies]
+board-types = { workspace = true }
+control-core = { workspace = true }
+safety = { workspace = true }
+
+# Linux-only: `mlockall` and `sched_setscheduler` have no portable equivalent,
+# and the profiler is expected to run (with a loud caveat) on the developer's
+# macOS laptop as well as on the Pi.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
