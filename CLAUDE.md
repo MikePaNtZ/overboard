@@ -78,12 +78,13 @@ finished, which has now happened three times in two days.
 Keep docs clean: prune resolved threads; keep the roadmap synced to reality.
 
 ## Model routing (project override of global)
-- **Oracle = `opus5-oracle` (Opus 5), NOT fable-oracle.** Escalate judgment here (epic scoping/sequencing, acceptance criteria, "right problem?" gate, thorny architecture/root-cause/adjudication, adversarial pre-commit review). Distill first; one call; adjudicate-not-author; read-only.
+- **Oracle = `fable-oracle` (Fable 5).** Escalate judgment here (epic scoping/sequencing, acceptance criteria, "right problem?" gate, thorny architecture/root-cause/adjudication, adversarial pre-commit review). Distill first; one call; adjudicate-not-author; read-only. `opus5-oracle` remains available and is the fallback if Fable is unreachable.
+- **Reach for the oracle a notch sooner than feels necessary.** It is the lowest-volume call in the system — one distilled question, read-only, no fan-out — so its cost is dominated by the *decisions it prevents rebuilding*, not by its tokens. The bar is still "model IQ changes the outcome", but resolve borderline cases toward escalating rather than away. Difficulty alone is still not a trigger; irreversibility is.
 - **Opus 4.8 drives; Sonnet executes** well-scoped work (`sonnet-executor`; `general-purpose`/`Explore` at `model: sonnet`). Opus reviews every hand-back.
 - **Effort is a lever:** `low`/`medium` for Sonnet + simple driver tasks, `high`/`xhigh` for oracle-grade judgment; prefer lowering effort over adding scaffolding. Opus-5 self-verifies — don't add verify passes; cap delegation and constrain scope on narrow tasks. (See global CLAUDE.md → Opus-5-era refinements, and `[[context-engineering-anthropic]]`.)
 
 ## Agent skills (Addy Osmani suite)
-Use the `agent-skills:*` suite. Judgment steps (`idea-refine`/`spec`, `plan`, `doubt-driven-development`, `code-review`, `debugging-and-error-recovery`) escalate to `opus5-oracle`; execution steps (`build`, `incremental-implementation`, `test`, `code-simplify`) delegate to Sonnet; Opus orchestrates.
+Use the `agent-skills:*` suite. Judgment steps (`idea-refine`/`spec`, `plan`, `doubt-driven-development`, `code-review`, `debugging-and-error-recovery`) escalate to `fable-oracle`; execution steps (`build`, `incremental-implementation`, `test`, `code-simplify`) delegate to Sonnet; Opus orchestrates.
 
 ## Engineering conventions
 - **Sim-in-the-loop from day one, TDD-style:** every change runs against a sim; build meaningful automated integration tests + Rust unit tests from the start. A rough visual 3D sim POC comes early (full UE5 later).
