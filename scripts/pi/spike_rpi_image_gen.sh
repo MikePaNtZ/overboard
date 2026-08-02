@@ -83,10 +83,12 @@ done
 section "candidate entrypoints (executables, any name)"
 find . -maxdepth 2 -type f -perm -u+x -not -path './.git/*' | sort | head -40
 
-section "example / stock configurations"
-find . -maxdepth 3 \( -path ./.git -prune \) -o \
-  \( -type d -name '*config*' -o -type d -name '*example*' -o -type f -name '*.cfg' \) -print \
-  2>/dev/null | grep -v '^./.git' | sort | head -40
+# Run 3 listed DIRECTORIES named *config* and passed one to -c, which earned
+# "Unsupported config file format '' -- only .yaml and .yml are supported".
+# The tool wants a FILE. List the files.
+section "stock configurations (.yaml/.yml)"
+find . -path ./.git -prune -o \( -name '*.yaml' -o -name '*.yml' \) -print \
+  2>/dev/null | sort | head -40
 
 section "documented dependencies"
 for f in install_deps.sh depends requirements.txt; do
@@ -113,35 +115,38 @@ section "entrypoint usage"
 # exactly why the discovery above now matches on the executable bit.
 GEN="./rpi-image-gen"
 if [ -x "$GEN" ]; then
-  for flag in --help -h help; do
-    echo "$ $GEN $flag"
-    "$GEN" "$flag" 2>&1 | head -70 && break
-  done
+  # Run 3 established the shape: `rpi-image-gen build [options]`, and `-c`
+  # takes a config FILE. Ask the subcommand directly rather than the top
+  # level -- the top-level help does not list build's own options.
+  echo "$ $GEN build -h"
+  "$GEN" build -h 2>&1 | head -50
 else
   echo "MISSING: $GEN - the layout changed again; re-read the sections above"
 fi
 
 section "BUILD ATTEMPT"
 build_rc=1
-# `slim` is the smallest stock config, so this asks the narrowest possible
-# version of the question -- does the toolchain run here at all -- rather than
-# also testing whatever a fat example happens to pull in.
-CONFIG="examples/slim/config"
-[ -e "$CONFIG" ] || CONFIG="test/configurations/config"
 
-if [ -x "$GEN" ]; then
-  # Several plausible invocations rather than one. Still guesses, and the
-  # usage dump above is what makes the next correction cheap if all of them
-  # are wrong -- but each costs seconds, so trying the obvious spellings
-  # beats spending another CI round to learn the flag name.
-  for attempt in "build -c $CONFIG" "-c $CONFIG" "build -D $CONFIG"; do
-    echo "$ $GEN $attempt"
-    # shellcheck disable=SC2086
-    "$GEN" $attempt 2>&1 | tail -80
-    build_rc="${PIPESTATUS[0]}"
-    echo "  -> exit $build_rc"
-    [ "$build_rc" -eq 0 ] && break
-  done
+# `slim` preferred: the smallest stock config, so this asks the narrowest
+# version of the question -- does the toolchain run here at all -- rather than
+# also testing whatever a fat example happens to pull in. Resolved by GLOB
+# rather than hardcoded, because the one thing every run of this spike has
+# proved is that guessing a path from convention does not work.
+CONFIG="$(find examples/slim -name '*.yaml' -o -name '*.yml' 2>/dev/null | sort | head -1)"
+[ -n "$CONFIG" ] || CONFIG="$(find examples -name '*.yaml' -o -name '*.yml' 2>/dev/null | sort | head -1)"
+[ -n "$CONFIG" ] || CONFIG="$(find . -path ./.git -prune -o \( -name '*.yaml' -o -name '*.yml' \) -print 2>/dev/null | sort | head -1)"
+
+echo "config: ${CONFIG:-<none found>}"
+
+if [ -x "$GEN" ] && [ -n "$CONFIG" ]; then
+  # One invocation now, not a spread of guesses: run 3 confirmed the command
+  # (`build`) and the flag (`-c`), and the only thing that was wrong was
+  # passing a directory where a .yaml file was wanted.
+  echo "$ $GEN build -c $CONFIG"
+  "$GEN" build -c "$CONFIG" 2>&1 | tail -100
+  build_rc="${PIPESTATUS[0]}"
+elif [ -z "$CONFIG" ]; then
+  echo "no .yaml/.yml config found anywhere - see the listing above"
 else
   echo "no runnable entrypoint found."
 fi
