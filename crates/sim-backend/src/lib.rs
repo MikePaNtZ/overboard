@@ -318,6 +318,53 @@ impl SimBackend {
         (fore_aft, lateral)
     }
 
+    /// Ground-truth BODY-frame pitch rate of the `frame` body, rad/s, nose-up
+    /// positive -- the exact time derivative of the pitch angle
+    /// `sim-host::body_pitch_roll_rad` reads out of
+    /// [`SimBackend::truth_frame_xmat`], with no filter, no differencing and
+    /// no estimator in the path.
+    ///
+    /// Same non-`hal`, harness-only status as every other `truth_*` accessor
+    /// here (DR-OBS-1: `control-core` never sees this on a real board). It
+    /// exists for ADR-0011 criterion (f) -- "every pass must hold with the
+    /// estimator bias removed", which means an acceptance run has to be able
+    /// to feed the regulator MuJoCo truth instead of the complementary
+    /// filter's belief, and the regulator's D term needs a truth pitch RATE
+    /// as much as its P term needs a truth pitch.
+    ///
+    /// # Why `qvel[dof + 4]` is the pitch rate, and not something needing a
+    /// # de-yaw
+    ///
+    /// MuJoCo stores a free joint's velocity as 3D linear velocity in GLOBAL
+    /// coordinates followed by 3D angular velocity in the BODY frame -- the
+    /// same fact [`SimBackend::inject_kinematic_yaw`] relies on when it
+    /// rotates the linear half and deliberately leaves the angular half
+    /// alone. Body-frame angular velocity is therefore already heading-free:
+    /// unlike `xmat`, it needs no `Rz(-yaw)` applied to it.
+    ///
+    /// Component `+1` of that angular triple is rotation about the body's
+    /// **+Y**, and pitch (`atan2(xmat[2], xmat[8])`, ICD 10.1, nose-up
+    /// positive) is exactly the angle about that axis: for `R_y(theta)`,
+    /// `xmat[2] = sin(theta)` and `xmat[8] = cos(theta)`, so pitch `== theta`
+    /// and pitch rate `== omega_y`. No sign flip.
+    ///
+    /// `0.0` on a model that declares no `frame_free` joint -- the same
+    /// tolerance [`SimBackend::truth_ballast_positions`] has, for the same
+    /// reason.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_body_pitch_rate_rad_s(&self) -> f32 {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("truth_body_pitch_rate_rad_s: backend is not open");
+        match self.frame_free_dofadr {
+            Some(vadr) => plant.qvel()[vadr + 4] as f32,
+            None => 0.0,
+        }
+    }
+
     /// Rotates the board's free joint about the WORLD vertical axis through
     /// its own current x/y by `dyaw_rad`, so that the next
     /// [`BoardObserve::wait_observe`] integrates the board's translation along
@@ -721,6 +768,81 @@ mod tests {
         let mut b = opened();
         b.arm().unwrap();
         b
+    }
+
+    /// `truth_body_pitch_rate_rad_s` must be the actual time derivative of
+    /// the pitch angle every other consumer reads out of `truth_frame_xmat`,
+    /// in both magnitude AND sign -- it is the regulator's D-term input on an
+    /// ADR-0011 criterion (f) acceptance run, and a sign error there would
+    /// invert the damping term and be indistinguishable from a physics
+    /// finding.
+    ///
+    /// Checked by differencing, which needs no knowledge of MuJoCo's free
+    /// joint layout and therefore cannot make the same mistake the accessor
+    /// might: kick the board over with an external torque, then compare the
+    /// reported rate against `(pitch[n] - pitch[n-1]) / dt` over the swing.
+    #[test]
+    fn the_truth_pitch_rate_is_the_derivative_of_the_truth_pitch_angle() {
+        let mut b = armed();
+        let dt = CYCLE_NS as f64 * 1e-9;
+        let pitch = |b: &SimBackend| {
+            let m = b.truth_frame_xmat();
+            (m[2]).atan2(m[8])
+        };
+        // A torque big enough to produce a rate worth differencing, small
+        // enough that the board stays in the small-angle regime where
+        // `atan2(xmat[2], xmat[8])` IS the body rotation about +Y. Drive it
+        // to a full tumble instead and the two quantities stop being the same
+        // thing, which would make this a test of large-angle Euler
+        // bookkeeping rather than of the accessor.
+        b.apply_external_force([0.0; 3], [0.0, 20.0, 0.0]);
+        let mut prev = pitch(&b);
+        let mut prev_reported = b.truth_body_pitch_rate_rad_s() as f64;
+        let mut checked = 0;
+        let mut peak = 0.0f64;
+        for _ in 0..40 {
+            b.apply_external_force([0.0; 3], [0.0, 20.0, 0.0]);
+            b.wait_observe().unwrap();
+            let now = pitch(&b);
+            let numeric = (now - prev) / dt;
+            let reported = b.truth_body_pitch_rate_rad_s() as f64;
+            peak = peak.max(numeric.abs());
+            // Compared against the MEAN of the two endpoint rates, not
+            // against either one: a difference quotient is the average rate
+            // over the interval, and under a steady torque the instantaneous
+            // rate at the far end is twice the average at the very first step
+            // (from rest). Trapezoid removes that first-order term, so the
+            // tolerance can be tight enough for a sign or scale error to have
+            // nowhere to hide.
+            let trapezoid = 0.5 * (prev_reported + reported);
+            assert!(
+                (numeric - trapezoid).abs() < 1e-3 + 0.01 * numeric.abs(),
+                "reported pitch rate {reported} does not match the differenced \
+                 {numeric} rad/s (a sign error would show here first)"
+            );
+            prev = now;
+            prev_reported = reported;
+            checked += 1;
+        }
+        assert_eq!(checked, 40);
+        assert!(
+            peak > 0.1,
+            "this test proves nothing unless the board actually rotated; peak \
+             differenced rate was only {peak} rad/s"
+        );
+    }
+
+    /// A model with no free joint reports zero rather than panicking or
+    /// indexing out of bounds -- the same tolerance every other `truth_*`
+    /// accessor here has for a channel a model does not declare.
+    #[test]
+    fn the_truth_pitch_rate_is_zero_before_the_board_is_disturbed() {
+        let mut b = armed();
+        b.wait_observe().unwrap();
+        assert!(
+            b.truth_body_pitch_rate_rad_s().abs() < 1e-6,
+            "a settled board is not rotating"
+        );
     }
 
     #[test]

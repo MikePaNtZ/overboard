@@ -98,9 +98,39 @@
 //! already tumbling and diverge chaotically. That flip is issue #190's, and
 //! nothing here moves it.
 
+//! # ADR-0011: the command-envelope reserve, and the warning that was being
+//! # thrown away
+//!
+//! Holding full forward stick from rest inverts this board (issue #190).
+//! [`CMD_ENVELOPE_RESERVE`] is the fix ADR-0011 specifies -- one multiply on
+//! the fore/aft stick, upstream of everything, derived from the actuator
+//! envelope rather than tuned to the measured cliff. [`AUTHORITY_
+//! UTILISATION_WARN`] is criterion (c): this file used to compute the safety
+//! envelope's saturation bit every cycle and discard it at the binding, while
+//! `FALLEN` -- which trips about a second after the outcome is decided -- was
+//! the only thing anyone was told.
+//!
+//! **Two of the ADR's criteria are NOT met and no value of the constant would
+//! meet them.** Fed MuJoCo truth (criterion (f)) the board inverts at every
+//! stick fraction down to 0.05; the reserve buys time-to-inversion, not
+//! survival. And during a full-stick hold the board cannot ride out much more
+//! than a 1 mm pavement lip (criterion (a), kerb entry). Both are measured in
+//! `tests/test_cmd_envelope_reserve.py` and recorded there as strict
+//! `xfail`s. Read [`CMD_ENVELOPE_RESERVE`] and [`PitchSource`] before quoting
+//! any margin out of this file.
+//!
+//! Everything under "verification only" on [`HostConfig`] exists to take
+//! those measurements -- free running, a trace CSV, a pitch source, a static
+//! pitch bias, a scheduled disturbance, and a reserve override. None of it is
+//! reachable on a deployed run, and all of it is on the command line rather
+//! than in a test fixture, because an acceptance number nobody else can
+//! re-take is not a measurement.
+
 use crate::pacer::Pacer;
 use crate::wire::{self, InputIn, StateOut};
-use board_types::{Command, Faults, ImuSample, Params, DEFAULT_R_EFF_M, RAD_S_PER_ERPM};
+use board_types::{
+    Command, Faults, ImuSample, Params, Saturation, DEFAULT_R_EFF_M, RAD_S_PER_ERPM,
+};
 use control_core::{CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator};
 use hal::BoardObserve;
 use hal_actuate::BoardActuate;
@@ -244,6 +274,221 @@ const MAX_GROUND_SPEED_M_S: f32 = 9.34;
 /// tighter cap is wanted; a smaller margin trades a harder-edged feel for
 /// less overshoot.
 const SPEED_CAP_MARGIN_M_S: f32 = 1.0;
+
+/// The speed at which [`SPEED_CAP_MARGIN_M_S`]'s authority ramp starts
+/// withdrawing accelerating fore/aft authority -- 8.34 m/s. Named because
+/// ADR-0011's loss-of-authority warning discriminates on it (see
+/// [`AUTHORITY_UTILISATION_WARN`]), not merely because the speed cap
+/// arithmetic uses it.
+const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
+
+/// Fraction of full fore/aft stick the command map actually delivers --
+/// ADR-0011 exit criterion (b), "cap commanded lean, changing nothing else".
+/// Applied to `weight_shift_fore_aft` UPSTREAM of the estimator, the
+/// regulator and the safety envelope, so it is pure input shaping: no gain
+/// moves, `MAX_CURRENT_A` does not move (that would be a claim about
+/// hardware), `MAX_GROUND_SPEED_M_S` does not move (rejected as dominated --
+/// it costs top speed and this does not).
+///
+/// # DERIVED, NOT TUNED -- and specifically NOT tuned to the measured cliff
+///
+/// Holding full forward stick from rest inverts this board in ~6.5 s
+/// (issue #190). The flip boundary was measured between 0.95 and 0.97 of
+/// full stick, and **tuning to that boundary is forbidden**: it rests
+/// partly on an accidental ~1 deg nose-down estimator bias that happens to
+/// act as nose-up trim, and partly on `wheel_hinge`'s undocumented
+/// `damping="0.08"`. A constant sitting on either is a constant that moves
+/// when somebody fixes a bug.
+///
+/// The derivation instead runs off the actuator envelope, per the
+/// command-map rule ADR-0011 propagates to the hardware spec -- *the
+/// stick->setpoint map SHALL be derived from the actuator envelope minus a
+/// stated disturbance reserve*:
+///
+/// 1. **Measured** -- peak fore/aft current demand is linear in stick at
+///    [`PEAK_DEMAND_A_PER_UNIT_STICK`] = **42.03 A per unit**. Full stick
+///    therefore demands 42.03 A against a 40 A envelope: the present map
+///    **over-commands by 5%**, which is a normalisation defect, not a sizing
+///    gap.
+/// 2. **Stated reserve** -- hold peak demand to
+///    [`STATED_ENVELOPE_RESERVE_FRACTION`] = 84% of [`MAX_CURRENT_A`], a
+///    policy input rather than a measurement, and labelled as one.
+/// 3. **Derived:** `0.84 * 40 A / 42.03 A per unit = 0.799`, to two figures
+///    **0.80**. Pinned as executable arithmetic by
+///    `the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_
+///    measured_slope`, not merely written down here.
+///
+/// # What it buys, measured
+///
+/// Against the highest stick fraction that survived unshaped (0.95 -- 1.00
+/// inverts, so it cannot be the baseline), over a 60 s full-stick hold on the
+/// deployed estimator path:
+///
+/// | | 0.95 (unshaped baseline) | 0.80 (shipped) |
+/// |---|---|---|
+/// | peak demand | 40.25 A -- envelope reached | **33.41 A (83.5%)** |
+/// | peak lean | 9.94 deg | **7.96 deg** |
+/// | pitch reserve vs the 11.46 deg ceiling | 13% | **31%** |
+///
+/// The ceiling is `MAX_CURRENT_A * KT / KP` = 28/140 = 0.2 rad = 11.46 deg.
+///
+/// # What it costs, measured
+///
+/// Top speed is **unchanged**: the board settles at 9.150 m/s against the
+/// baseline's 9.176 m/s (-0.3%), because `MAX_GROUND_SPEED_M_S` governs it
+/// and a shaped full stick still reaches the cap. Time to 8 m/s from rest
+/// rises 5.910 s -> 6.832 s (**+0.92 s**) and distance over the first 15 s
+/// falls 108.83 m -> 100.23 m (**-7.9%**).
+///
+/// # What it does NOT buy -- read this before quoting the numbers above
+///
+/// The reserve satisfies criterion (b) and two of criterion (a)'s three
+/// matrix entries **on the deployed estimator path**. It does not satisfy
+/// the other two, and no value of it would:
+///
+/// - **Criterion (f) -- fed MuJoCo truth -- fails at every value.** Sweeping
+///   this constant from 1.00 down to 0.05 moves time-to-inversion from 4.42 s
+///   to 28.67 s and never removes it; only exactly zero stick survives. With
+///   the estimator bias removed a sustained forward lean has no equilibrium,
+///   so the reserve buys TIME, not survival.
+/// - **Criterion (a)'s kerb-strike entry fails** above roughly a 1 mm lip
+///   struck at the worst point of a full-stick hold.
+///
+/// Both are measured in `tests/test_cmd_envelope_reserve.py`, which records
+/// them as strict `xfail`s -- the criteria are written there as they should
+/// read, and they will turn red the day somebody fixes the underlying
+/// problem, which is the only way a known failure stays known.
+const CMD_ENVELOPE_RESERVE: f32 = 0.80;
+
+/// The measurement [`CMD_ENVELOPE_RESERVE`] is derived FROM, in amps of peak
+/// fore/aft current demand per unit of fore/aft stick.
+///
+/// A named constant rather than a number in a sentence, so the derivation is
+/// arithmetic a test can check rather than prose a reader has to trust --
+/// see `the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_
+/// measured_slope`.
+///
+/// **Re-measured for ADR-0011, not inherited.** Nine runs of
+/// `--scripted-scenario full-stick --pitch-source estimator` at stick
+/// fractions 0.20 through 0.95, peak `|proposed_amps|` taken PRE-envelope
+/// (the clamp cannot hide demand); least squares through the origin gives
+/// 42.03 A/unit at R^2 = 0.99936, and the per-point ratio never leaves
+/// 41.6-43.5 A/unit. The ADR quoted 42 A/unit from an independent
+/// measurement; these agree to 0.1%.
+///
+/// Measured on the ESTIMATOR path deliberately, even though ADR-0011
+/// criterion (f) runs acceptance against MuJoCo truth. A command map is a
+/// property of the command path, and the estimator is the only signal path a
+/// real board has; more decisively, the truth-fed runs have no steady state
+/// to take a peak demand FROM (see the criterion (f) results in
+/// `tests/test_cmd_envelope_reserve.py`), so the slope is not measurable
+/// there at all.
+const PEAK_DEMAND_A_PER_UNIT_STICK: f32 = 42.03;
+
+/// The stated disturbance reserve [`CMD_ENVELOPE_RESERVE`] is derived
+/// against: peak fore/aft demand is held to this fraction of
+/// [`MAX_CURRENT_A`], leaving the rest for disturbance rejection.
+///
+/// **A stated policy input, not a measurement** -- inherited from ADR-0011,
+/// and labelled as such rather than dressed up as derived. What is derived
+/// is the stick scale that delivers it. 0.84 leaves 16% (6.4 A) of the
+/// envelope.
+///
+/// It is worth saying plainly what 6.4 A does and does not cover: it is
+/// about 0.2 rad/s of pitch-rate rejection through `KD`, which is a small
+/// disturbance. The reserve is sized against the envelope because that is
+/// the number this repo can defend; it is NOT sized against the repo's own
+/// reference disturbance, which is far larger than the envelope can answer
+/// at any stick setting (issue #142, and criterion (a)'s kerb-strike entry).
+const STATED_ENVELOPE_RESERVE_FRACTION: f32 = 0.84;
+
+/// The derivation, enforced by the COMPILER rather than by a reader.
+///
+/// [`CMD_ENVELOPE_RESERVE`] is not an independent number: it is the stated
+/// reserve fraction times the envelope, divided by the measured slope,
+/// rounded to two figures. Editing any one of those four in isolation is a
+/// build error, which is the point -- ADR-0011 forbids moving the constant to
+/// make a scenario pass, and a rule enforced at compile time cannot be
+/// forgotten by a session that never read the ADR.
+///
+/// The tolerance is half a rounding step. Two figures is what the
+/// measurement supports; see [`PEAK_DEMAND_A_PER_UNIT_STICK`]'s spread.
+const _: () = {
+    let derived = STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK;
+    let err = CMD_ENVELOPE_RESERVE - derived;
+    assert!(
+        err < 0.005 && err > -0.005,
+        "CMD_ENVELOPE_RESERVE is no longer STATED_ENVELOPE_RESERVE_FRACTION * \
+         MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK rounded to two figures. \
+         Re-derive the constant from the measurement; do not adjust the \
+         measurement to fit the constant."
+    );
+};
+
+/// Time constant of the low-pass filter on authority utilisation, seconds --
+/// the loss-of-authority warning's detector (ADR-0011 exit criterion (c)).
+///
+/// Not bench-tuned, and bounded rather than picked: it has to be long
+/// relative to the 2 ms control period (or the warning chatters on a single
+/// noisy cycle) and short relative to the lead time it exists to preserve
+/// (or the filter eats the warning it is supposed to give). 0.1 s is 50
+/// control cycles and 4% of the measured lead -- comfortably inside both
+/// bounds, which is the whole requirement on it.
+const AUTHORITY_UTILISATION_TAU_S: f32 = 0.1;
+
+/// Filtered `|proposed current| / MAX_CURRENT_A` above which the host warns
+/// that it is running out of pitch authority -- ADR-0011 exit criterion (c).
+///
+/// # The discriminator is the SPEED, not the saturation
+///
+/// Saturation alone is not a fault on this board. ADR-0011's measured
+/// finding: **every run that saturated above [`SPEED_CAP_ONSET_M_S`]
+/// survived, and every run that saturated below it flipped.** Once torque
+/// is clamped `tau = -kp*theta` no longer holds and pitch is open-loop
+/// unstable, so saturation is survivable if and only if something is
+/// already unloading the board when it happens -- above the onset the speed
+/// cap is doing exactly that. A warning that fired on saturation above the
+/// onset would be noise, and noise is how a warning gets ignored.
+///
+/// # Why filtered utilisation rather than the raw saturation bit
+///
+/// The raw bit (`Saturation::Yes` out of `safety::Envelope::apply`, which
+/// this host used to discard at the `let (bounded_cmd, _sat)` binding) fires
+/// only once the envelope has ALREADY bound. Filtered utilisation crosses
+/// 0.85 while the controller still has authority left, which is the
+/// difference between a warning and a post-mortem.
+///
+/// # Measured lead, against the reference ADR-0011 uses
+///
+/// `--scripted-scenario full-stick --cmd-reserve 1.0`, estimator path. The
+/// reference event is the FIRST ENVELOPE SATURATION -- the ADR's table puts
+/// it at 4.92 s and quotes `FALLEN` at -0.95 s, which is exactly `FALLEN`
+/// minus that:
+///
+/// | event | sim time | lead over the committed point |
+/// |---|---|---|
+/// | this warning | 3.000 s | **+1.92 s** |
+/// | first saturation (the reference) | 4.920 s | 0 |
+/// | `FALLEN` (20 deg) | 5.868 s | **-0.95 s** |
+/// | inverted past 90 deg | 6.142 s | -1.22 s |
+///
+/// So the warning leads `FALLEN` by **2.87 s**. ADR-0011 predicted 2.69 s of
+/// lead over the committed point; the measurement is **1.92 s** with this
+/// filter and threshold, and 2.02 s unfiltered. Recorded as measured rather
+/// than reconciled -- the ADR's figure is not reproducible from the
+/// definition it states, and quoting it anyway would be exactly the habit
+/// that ADR exists to break.
+///
+/// # What this warning is NOT
+///
+/// It is a diagnostic, not a safety control. The board it warns about cannot
+/// ride out a 2 mm pavement lip during a full-stick hold (criterion (a)'s
+/// kerb entry, `tests/test_cmd_envelope_reserve.py`), and 1.92 s of notice
+/// does not change that. It also does not reach the game: the state-out wire
+/// is fixed by ADR-0010 until it expires, so this goes to the host's log and
+/// to the acceptance trace and nowhere else. Putting it on the wire is a
+/// schema change and needs that ADR's expiry or the COO's sign-off.
+const AUTHORITY_UTILISATION_WARN: f32 = 0.85;
 
 /// Roll magnitude, radians, at which the roll-shaped yaw limiter reaches
 /// full authority (issue #161 W2 item 4).
@@ -494,6 +739,119 @@ pub struct HostConfig {
     /// `send-input`: the UDP path is the one Unreal actually uses, and only
     /// `send-input` exercises it.
     pub scripted_scenario: Option<crate::scenario::Schedule>,
+
+    /// **Verification only.** Stops the run after this much SIMULATED time,
+    /// independently of `duration`'s wall clock. A free-running acceptance
+    /// sweep has no wall clock worth bounding, and a scripted run's own
+    /// schedule length is not always the window a measurement wants.
+    pub max_sim_time_s: Option<f64>,
+
+    /// **Verification only.** Where the regulator's pitch and pitch rate come
+    /// from. See [`PitchSource`]; ADR-0011 exit criterion (f) is why this
+    /// exists.
+    pub pitch_source: PitchSource,
+
+    /// **Verification only.** A static pitch offset, DEGREES, added to
+    /// whatever [`HostConfig::pitch_source`] hands the regulator. Positive is
+    /// nose-up, matching ICD 10.1.
+    ///
+    /// This is the robustness test ADR-0011 criterion (f) was reaching for.
+    /// The ADR asks for acceptance "with the estimator bias removed" and
+    /// implements that as "feed the regulator MuJoCo truth" -- but the
+    /// measured `est - truth` residual is not a static bias at all: it
+    /// regresses on unaided specific force at 5.7-6.1 deg per m/s^2, which is
+    /// 1 radian per g, i.e. it is the complementary filter reading the
+    /// APPARENT VERTICAL. Replacing it with truth therefore does not remove
+    /// an error, it deletes an acceleration reference and leaves a
+    /// pitch-only regulator (see `PitchSource::PlantTruth`).
+    ///
+    /// Injecting a worst-case STATIC bias on top of the real signal path is
+    /// the test that actually asks "does this margin survive an estimator
+    /// that is wrong?" without silently changing which controller is under
+    /// test. Both are run and both are reported;
+    /// `tests/test_cmd_envelope_reserve.py` has the results.
+    pub pitch_bias_deg: f32,
+
+    /// **Verification only.** Runs the loop as fast as the CPU allows,
+    /// skipping the [`Pacer`] entirely.
+    ///
+    /// The plant is a fixed-timestep RK4 integrator with no stochastic terms
+    /// and the scripted schedule is indexed on simulated time, so a scripted
+    /// free run produces bit-identically the same trajectory as a paced one
+    /// -- it just produces it in a fraction of a second instead of in real
+    /// time, which is what makes an acceptance SWEEP (stick fraction x
+    /// scenario x pitch source) a thing that fits in a test rather than in an
+    /// afternoon. Missed deadlines are not counted in this mode: there are no
+    /// deadlines.
+    ///
+    /// NOT how a deployed host runs. The UDP state-out is still sent every
+    /// tick, so a listener would see the whole run arrive at once.
+    pub free_run: bool,
+
+    /// **Verification only.** Fraction of full fore/aft stick to deliver,
+    /// overriding [`CMD_ENVELOPE_RESERVE`].
+    ///
+    /// Exists so that constant's own provenance is re-measurable rather than
+    /// merely asserted: sweeping this IS the "peak demand is linear at N amps
+    /// per unit stick" measurement its doc comment cites. `None` uses the
+    /// shipped constant.
+    pub cmd_envelope_reserve: Option<f32>,
+
+    /// **Verification only.** A scheduled external disturbance -- see
+    /// [`Disturbance`]. `None` applies none, which is the deployed
+    /// behaviour.
+    pub disturbance: Option<Disturbance>,
+
+    /// **Verification only.** Writes one CSV row per control cycle to this
+    /// path when the run ends. Buffered in memory and written once, never
+    /// during the loop: a 500 Hz control thread does not do file I/O per
+    /// tick, and the trace exists to measure the loop, not to perturb it.
+    pub trace_path: Option<PathBuf>,
+}
+
+/// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
+///
+/// The default is the only one a deployed host may use. `PlantTruth` exists
+/// because the ADR requires every acceptance pass to hold **with the
+/// estimator bias removed**, and on this plant that is the measured-WORSE
+/// case, not the better one: the complementary filter's ~1 deg nose-down
+/// error acts as nose-up trim, so feeding the controller MuJoCo truth makes
+/// the board flip EARLIER. That is accidental model error, not a designed
+/// safety property, and criterion (f) exists precisely so no acceptance
+/// number is allowed to rest on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PitchSource {
+    /// The `ComplementaryFilter`, fed raw IMU through `hal` -- the real
+    /// signal path, and the only one a real board has.
+    #[default]
+    Estimator,
+    /// MuJoCo's own body-frame pitch and pitch rate, straight from the
+    /// plant. Physically unavailable on hardware; an acceptance-run
+    /// instrument only.
+    PlantTruth,
+}
+
+/// A scheduled external force/torque disturbance, world frame, applied to the
+/// `frame` body over a fixed window of SIMULATED time.
+///
+/// Generic on purpose. The disturbance ADR-0011's test matrix needs is a kerb
+/// strike, and the kerb derivation this repo trusts lives in ONE place --
+/// `sim/scenarios/plant.py::kerb_strike_impulse` (issue #142/#147, Sr.
+/// Mechanical & Systems' call, not Controls'). Re-implementing that geometry
+/// in Rust would give this repo two kerb models that could disagree, so this
+/// host takes the derived impulse as a parameter and stays dumb about where
+/// it came from; `tests/test_cmd_envelope_reserve.py` calls the Python
+/// derivation and passes the result in.
+#[derive(Debug, Clone, Copy)]
+pub struct Disturbance {
+    /// Simulated time the force window opens, seconds.
+    pub t0_s: f64,
+    /// How long it stays open, seconds. Impulse delivered is `force * this`.
+    pub duration_s: f64,
+    /// World-frame force, newtons.
+    pub force_n: [f64; 3],
+    /// World-frame torque about the frame body's own origin, N*m.
+    pub torque_nm: [f64; 3],
 }
 
 impl Default for HostConfig {
@@ -505,8 +863,58 @@ impl Default for HostConfig {
             stats_path: Some(PathBuf::from(DEFAULT_STATS_PATH)),
             startup_kick: false,
             scripted_scenario: None,
+            max_sim_time_s: None,
+            pitch_source: PitchSource::Estimator,
+            pitch_bias_deg: 0.0,
+            free_run: false,
+            cmd_envelope_reserve: None,
+            disturbance: None,
+            trace_path: None,
         }
     }
+}
+
+/// One control cycle's worth of acceptance-run instrumentation. See
+/// [`HostConfig::trace_path`]; the column list and its order are the CSV
+/// header written by [`write_trace`].
+#[derive(Debug, Clone, Copy)]
+struct TraceRow {
+    seq: u64,
+    sim_time_s: f64,
+    /// Fore/aft stick as the schedule (or the socket) supplied it, before
+    /// [`CMD_ENVELOPE_RESERVE`].
+    stick_fore_aft: f32,
+    /// After the reserve, before the speed cap and the corridor brake.
+    shaped_fore_aft: f32,
+    /// What actually reached `set_ballast_targets`, after everything.
+    applied_fore_aft: f32,
+    /// MuJoCo truth, de-yawed, degrees, nose-up positive.
+    truth_pitch_deg: f32,
+    /// The complementary filter's belief, degrees -- recorded even on a
+    /// `PitchSource::PlantTruth` run (the estimator still runs; it is simply
+    /// not the regulator's input) so the bias itself stays visible.
+    est_pitch_deg: f32,
+    /// ... and the rate it believes, which is the regulator's D-term input on
+    /// a deployed run. Recorded alongside the truth rate because the two are
+    /// the pair criterion (f) swaps, and a swap nobody can see the size of is
+    /// not a measurement.
+    est_pitch_rate_deg_s: f32,
+    truth_pitch_rate_deg_s: f32,
+    forward_speed_m_s: f32,
+    /// PRE-envelope demand, amps. The number the reserve is derived from.
+    proposed_amps: f32,
+    /// POST-envelope command, amps.
+    applied_amps: f32,
+    /// `safety::Envelope` reported the clamp bound this cycle.
+    saturated: bool,
+    /// `|proposed_amps| / MAX_CURRENT_A`, unfiltered.
+    utilisation: f32,
+    /// ... and low-passed at [`AUTHORITY_UTILISATION_TAU_S`].
+    utilisation_filtered: f32,
+    /// The loss-of-authority warning is asserted this cycle.
+    authority_warning: bool,
+    /// The wire's `FALLEN` bit, for the lead-time comparison.
+    fallen: bool,
 }
 
 /// What a finished (or interrupted-by-error) run produced.
@@ -605,6 +1013,52 @@ fn body_pitch_roll_rad(xmat: &[f64; 9], yaw_rad: f32) -> (f32, f32) {
         deyawed_02.atan2(xmat[8] as f32),
         deyawed_12.atan2(xmat[8] as f32),
     )
+}
+
+/// The command-envelope reserve, as a function (ADR-0011 criterion (b)).
+///
+/// One multiply, extracted from the loop body only so the property that
+/// matters can be stated as a test rather than as a comment: this is a
+/// LINEAR scaling of the stick, symmetric about zero, and it changes nothing
+/// else. In particular it is not a clamp -- a clamp would leave full stick
+/// untouched right up to a limit and then bite, which is a different feel and
+/// a different failure mode.
+fn shape_fore_aft_command(stick: f32, reserve: f32) -> f32 {
+    stick * reserve
+}
+
+/// The speed cap's authority ramp, as a function -- unchanged in behaviour,
+/// extracted so ADR-0011 criterion (a)'s reversal entry can be stated as a
+/// unit test as well as a sim run.
+///
+/// The property worth pinning: a REVERSAL is never attenuated. The cap only
+/// withdraws authority when the stick and the current motion share a sign,
+/// so a stick slammed from one rail to the other at speed passes through at
+/// FULL authority, at any speed, including above the onset where the cap is
+/// the only thing unloading the board. That is why the reversal is the
+/// matrix's worst case and not merely another entry in it.
+fn speed_capped_fore_aft(stick: f32, last_forward_speed_m_s: f32) -> f32 {
+    let speed_headroom_m_s = MAX_GROUND_SPEED_M_S - last_forward_speed_m_s.abs();
+    let accel_authority = (speed_headroom_m_s / SPEED_CAP_MARGIN_M_S).clamp(0.0, 1.0);
+    if stick * last_forward_speed_m_s >= 0.0 {
+        stick * accel_authority
+    } else {
+        stick
+    }
+}
+
+/// The loss-of-authority warning's trigger (ADR-0011 criterion (c)):
+/// filtered authority utilisation over threshold, AND below the speed cap's
+/// onset.
+///
+/// Both halves are load-bearing and the second is the one that is easy to
+/// drop. Saturation above [`SPEED_CAP_ONSET_M_S`] is survivable -- the cap is
+/// already unloading the board when it happens -- and every run in ADR-0011's
+/// data that saturated above the onset survived. A warning without the speed
+/// term would fire on all of those, which is a warning nobody reads.
+fn authority_warning_active(utilisation_filtered: f32, forward_speed_m_s: f32) -> bool {
+    utilisation_filtered > AUTHORITY_UTILISATION_WARN
+        && forward_speed_m_s.abs() < SPEED_CAP_ONSET_M_S
 }
 
 pub fn spawn(cfg: HostConfig) -> std::thread::JoinHandle<Result<RunSummary, HostError>> {
@@ -708,6 +1162,30 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut truth_pos_x_m: f64 = 0.0;
     let mut truth_pos_y_m: f64 = 0.0;
 
+    // --- ADR-0011 (b) and (c) state ------------------------------------
+    // The fore/aft command scale actually in force this run. Normally the
+    // shipped constant; a verification sweep overrides it (see
+    // HostConfig::cmd_envelope_reserve, which is how the constant's own
+    // provenance measurement is taken).
+    let cmd_envelope_reserve = cfg.cmd_envelope_reserve.unwrap_or(CMD_ENVELOPE_RESERVE);
+    let pitch_bias_rad = cfg.pitch_bias_deg.to_radians();
+    // Low-passed |proposed current| / MAX_CURRENT_A. Starts at zero, which is
+    // true: an unarmed board at rest is asking for nothing.
+    let mut utilisation_filtered: f32 = 0.0;
+    // One-pole coefficient for AUTHORITY_UTILISATION_TAU_S at this cycle
+    // rate, precomputed rather than recomputed 500 times a second.
+    let utilisation_alpha = DT_S as f32 / (AUTHORITY_UTILISATION_TAU_S + DT_S as f32);
+    // Edge state for the loss-of-authority warning, so it announces itself
+    // once per episode rather than 500 times a second -- the same
+    // rising-edge discipline the corridor warning above uses.
+    let mut prev_authority_warning = false;
+    let mut trace: Vec<TraceRow> = Vec::new();
+    if cfg.trace_path.is_some() {
+        // A 30 s scripted run at 500 Hz is 15,000 rows; reserving avoids
+        // reallocating inside the control loop.
+        trace.reserve(16_384);
+    }
+
     let start = Instant::now();
     let mut pacer = Pacer::new(Duration::from_nanos(CYCLE_NS), start);
     // Headroom over InputIn::WIRE_SIZE so an oversized datagram is caught as
@@ -735,6 +1213,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // wall-clock backstop.
         if let Some(sched) = cfg.scripted_scenario {
             if t_known_s > crate::scenario::total_duration_s(sched) + SCRIPTED_RUN_TAIL_S {
+                break;
+            }
+        }
+        if let Some(limit) = cfg.max_sim_time_s {
+            if t_known_s > limit {
                 break;
             }
         }
@@ -779,7 +1262,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // SIMULATED time and the socket's stick values are ignored entirely.
         // The flag bits (arm/reset/kick) still come from the wire either way,
         // so an on-demand kick can still be injected into a scripted run.
-        let (steer, weight_shift_fore_aft, weight_shift_lateral) = match cfg.scripted_scenario {
+        let (steer, stick_fore_aft, weight_shift_lateral) = match cfg.scripted_scenario {
             Some(sched) => {
                 let (fa, lat, st, label) = crate::scenario::value_at(sched, t_known_s);
                 if label != scripted_label {
@@ -798,6 +1281,24 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 latest_input.weight_shift_lateral,
             ),
         };
+
+        // --- COMMAND-ENVELOPE RESERVE (ADR-0011 exit criterion (b)) ------
+        //
+        // The whole fix, in one multiply. Deliberately placed HERE, at the
+        // point where a stick value enters the host and before anything else
+        // touches it: upstream of the speed cap, the corridor brake, the
+        // ballast actuator, the plant, the estimator, the regulator and the
+        // safety envelope. That ordering is the reason this is a zero-risk
+        // change rather than a retune -- every downstream block sees a
+        // smaller stick and is otherwise bit-identical, no gain moves, and
+        // nothing in the control law learns that a limit exists.
+        //
+        // Fore/aft only. The failure ADR-0011 is about is a fore/aft pitch
+        // authority failure; lateral stick moves `ballast_lat`, whose
+        // measured full-stick effect on this geometry is 0.03 deg of roll
+        // (see ROLL_FULL_YAW_AUTHORITY_RAD) and which consumes no wheel
+        // torque at all. Scaling it would cost steering feel to buy nothing.
+        let weight_shift_fore_aft = shape_fore_aft_command(stick_fore_aft, cmd_envelope_reserve);
 
         // `arm`/`reset` bits: accepted and tracked, logged on change rather
         // than every tick. Neither gates anything yet -- the host self-arms
@@ -839,14 +1340,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // reversing (opposite sign to current motion) is never touched.
         // Gated on last_forward_speed_m_s -- one cycle old, since this
         // tick's fresh speed is not known until wait_observe() below.
-        let speed_headroom_m_s = MAX_GROUND_SPEED_M_S - last_forward_speed_m_s.abs();
-        let accel_authority = (speed_headroom_m_s / SPEED_CAP_MARGIN_M_S).clamp(0.0, 1.0);
-        let accelerating_same_direction = weight_shift_fore_aft * last_forward_speed_m_s >= 0.0;
-        let capped_weight_shift_fore_aft = if accelerating_same_direction {
-            weight_shift_fore_aft * accel_authority
-        } else {
-            weight_shift_fore_aft
-        };
+        let capped_weight_shift_fore_aft =
+            speed_capped_fore_aft(weight_shift_fore_aft, last_forward_speed_m_s);
 
         // Corridor boundary (issue #161 follow-up, item 4) -- see
         // CORRIDOR_X_MIN_M's doc comment for the bounds and for why this is a
@@ -913,14 +1408,27 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 fall_kick_window_start_s = None;
             }
         }
-        let force = if in_kick_window {
-            STARTUP_KICK_FORCE_N
+        // A scheduled acceptance-run disturbance (ADR-0011 criterion (a),
+        // "full stick during a kerb strike"), on the same pre-step-time
+        // window rule as the two kicks above. Unlike them it carries a
+        // TORQUE as well as a force: a kerb acts at the wheel, well below the
+        // CoM, and the angular channel is the one that topples the board --
+        // see `Disturbance` and issue #142's finding that quoting a kerb in
+        // N*s alone understates it silently.
+        let in_disturbance_window = cfg
+            .disturbance
+            .is_some_and(|d| (d.t0_s..d.t0_s + d.duration_s).contains(&t_known_s));
+        let (force, torque) = if in_disturbance_window {
+            let d = cfg.disturbance.expect("checked by is_some_and above");
+            (d.force_n, d.torque_nm)
+        } else if in_kick_window {
+            (STARTUP_KICK_FORCE_N, [0.0; 3])
         } else if in_fall_kick_window {
-            FALL_KICK_FORCE_N
+            (FALL_KICK_FORCE_N, [0.0; 3])
         } else {
-            [0.0; 3]
+            ([0.0; 3], [0.0; 3])
         };
-        backend.apply_external_force(force, [0.0; 3]);
+        backend.apply_external_force(force, torque);
 
         let obs = backend.wait_observe().map_err(HostError::Backend)?;
         t_known_s = obs.t_recv_ns as f64 * 1e-9;
@@ -940,39 +1448,27 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let forward_speed_m_s = wheel_rate_rad_s * DEFAULT_R_EFF_M;
         last_forward_speed_m_s = forward_speed_m_s;
         let aiding = accel_ff.predict(last_amps);
+        // The estimator runs on EVERY run, including a `PitchSource::
+        // PlantTruth` acceptance run where the regulator is not listening to
+        // it -- it is the only signal path a real board has, and an
+        // acceptance trace that stopped recording it would stop being able to
+        // show how big the bias criterion (f) is neutralising actually is.
         let attitude = estimator.update(std::slice::from_ref(&sample), aiding);
-        let proposed_torque_nm =
-            regulator.update(attitude.pitch_rad, attitude.pitch_rate_rad_s, 0.0);
-        // The single kt division -- the actuation boundary (issue #137).
-        let proposed_amps = proposed_torque_nm / KT_NM_PER_A;
-        let (bounded_cmd, _sat) = envelope.apply(
-            Command::MotorCurrent {
-                amps: proposed_amps,
-            },
-            Faults::NONE,
-        );
-        backend.apply(&bounded_cmd).map_err(HostError::Backend)?;
-        // POST-envelope current, not the proposal -- the plant only ever
-        // sees the clamped value (same reasoning `control-ffi`'s own
-        // `ctl.last_amps` update carries).
-        last_amps = match bounded_cmd {
-            Command::MotorCurrent { amps } => amps,
-            Command::RemoteSpeed { .. } => 0.0,
-        };
 
-        // wheel_angle_rad: there is no absolute wheel-angle channel on `hal`
-        // (ICD carries ERPM/tacho, the same as real VESC telemetry) -- this
-        // dead-reckons it from the rate `hal` already reports, exactly the
-        // way a real host would have to. Not a fabricated value: it is an
-        // honest integral of an actually-measured rate.
-        wheel_angle_rad += wheel_rate_rad_s * DT_S as f32;
-
-        // Ground truth, never fed to the controller above (DR-OBS-1) --
-        // reported because "the board is actually up" is what the state-out
-        // wire needs to prove, and truth proves it more directly than the
-        // controller's own (estimator-mediated) belief. Same formula
-        // `impulse-response-rust` / `sim/scenarios/impulse_response.py::
-        // frame_pitch_rad` use, against the same underlying xmat.
+        // Ground truth, never fed to the controller on a DEPLOYED run
+        // (DR-OBS-1) -- reported because "the board is actually up" is what
+        // the state-out wire needs to prove, and truth proves it more
+        // directly than the controller's own (estimator-mediated) belief.
+        // Same formula `impulse-response-rust` / `sim/scenarios/
+        // impulse_response.py::frame_pitch_rad` use, against the same
+        // underlying xmat.
+        //
+        // **Read here rather than after the wire block, where it used to
+        // live** (ADR-0011 criterion (f)): a `PitchSource::PlantTruth`
+        // acceptance run needs it BEFORE the regulator, not after. Nothing
+        // between the old and new positions touched the plant or `yaw_rad`
+        // -- `backend.apply` only buffers a current for the next step -- so
+        // the values are bit-identical to the ones the old ordering read.
         let xmat = backend.truth_frame_xmat();
         // ATTITUDE MUST BE DE-YAWED BEFORE PITCH/ROLL COME OUT OF IT (issue
         // #163). Both readings below are `atan2` on the frame's world z-axis,
@@ -992,6 +1488,87 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // reduces to `1.0 * xmat[k] + 0.0 * xmat[j]`, i.e. bit-identically the
         // pre-#163 expressions.
         let (pitch_rad, roll_rad) = body_pitch_roll_rad(&xmat, yaw_rad);
+        let truth_pitch_rate_rad_s = backend.truth_body_pitch_rate_rad_s();
+
+        // --- ADR-0011 criterion (f): the estimator bias, removed ---------
+        //
+        // On a deployed run this is the `Estimator` arm and the regulator
+        // sees exactly what it always saw. On an acceptance run it is
+        // `PlantTruth`, and the regulator sees MuJoCo -- which on this plant
+        // is the measured-WORSE case, because the filter's ~1 deg nose-down
+        // error acts as nose-up trim. See `PitchSource`.
+        let (source_pitch_rad, regulated_pitch_rate_rad_s) = match cfg.pitch_source {
+            PitchSource::Estimator => (attitude.pitch_rad, attitude.pitch_rate_rad_s),
+            PitchSource::PlantTruth => (pitch_rad, truth_pitch_rate_rad_s),
+        };
+        // Zero on any deployed run, so this whole line is a no-op there --
+        // see HostConfig::pitch_bias_deg.
+        let regulated_pitch_rad = source_pitch_rad + pitch_bias_rad;
+        let proposed_torque_nm =
+            regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, 0.0);
+        // The single kt division -- the actuation boundary (issue #137).
+        let proposed_amps = proposed_torque_nm / KT_NM_PER_A;
+        // --- ADR-0011 criterion (c): the saturation bit STOPS being thrown
+        // --- away here ---------------------------------------------------
+        //
+        // This binding used to read `let (bounded_cmd, _sat) = ...`. The
+        // ADR names that discard by line number: the board's own "I have run
+        // out of authority" signal existed, was computed every cycle, and was
+        // dropped on the floor, while `FALLEN` -- which trips about a second
+        // AFTER the outcome is decided -- was the only thing anyone was told.
+        let (bounded_cmd, saturation) = envelope.apply(
+            Command::MotorCurrent {
+                amps: proposed_amps,
+            },
+            Faults::NONE,
+        );
+        let saturated = saturation == Saturation::Yes;
+        backend.apply(&bounded_cmd).map_err(HostError::Backend)?;
+        // POST-envelope current, not the proposal -- the plant only ever
+        // sees the clamped value (same reasoning `control-ffi`'s own
+        // `ctl.last_amps` update carries).
+        last_amps = match bounded_cmd {
+            Command::MotorCurrent { amps } => amps,
+            Command::RemoteSpeed { .. } => 0.0,
+        };
+
+        // Authority utilisation: how much of the actuator envelope the
+        // controller is ASKING for, which is the pre-envelope demand and not
+        // the post-envelope command -- the clamped value can never exceed
+        // 1.0 and so can never warn about anything. Low-passed at
+        // AUTHORITY_UTILISATION_TAU_S.
+        let utilisation = proposed_amps.abs() / MAX_CURRENT_A;
+        utilisation_filtered += (utilisation - utilisation_filtered) * utilisation_alpha;
+        // The discriminator is the SPEED (see AUTHORITY_UTILISATION_WARN):
+        // saturation above the speed cap's onset is survivable, because the
+        // cap is already unloading the board when it happens. Below it,
+        // nothing is.
+        let authority_warning = authority_warning_active(utilisation_filtered, forward_speed_m_s);
+        if authority_warning && !prev_authority_warning {
+            eprintln!(
+                "sim-host: LOSS OF PITCH AUTHORITY IMMINENT at sim_t={t_known_s:.3}s -- \
+                 filtered authority utilisation {:.0}% (demand {proposed_amps:+.1} A of \
+                 {MAX_CURRENT_A:.0} A) at {forward_speed_m_s:+.2} m/s, below the \
+                 {SPEED_CAP_ONSET_M_S:.2} m/s speed-cap onset. Pitch {:+.1} deg.",
+                utilisation_filtered * 100.0,
+                pitch_rad.to_degrees(),
+            );
+        } else if prev_authority_warning && !authority_warning {
+            eprintln!(
+                "sim-host: pitch authority recovered at sim_t={t_known_s:.3}s \
+                 (filtered utilisation {:.0}%)",
+                utilisation_filtered * 100.0,
+            );
+        }
+        prev_authority_warning = authority_warning;
+
+        // wheel_angle_rad: there is no absolute wheel-angle channel on `hal`
+        // (ICD carries ERPM/tacho, the same as real VESC telemetry) -- this
+        // dead-reckons it from the rate `hal` already reports, exactly the
+        // way a real host would have to. Not a fabricated value: it is an
+        // honest integral of an actually-measured rate.
+        wheel_angle_rad += wheel_rate_rad_s * DT_S as f32;
+
         let pos_f64 = backend.truth_frame_xpos();
         truth_pos_x_m = pos_f64[0];
         truth_pos_y_m = pos_f64[1];
@@ -1033,8 +1610,31 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let (rider_fore_aft_m, rider_lateral_m) = backend.truth_ballast_positions();
 
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
-        if pitch_rad.abs() > FALLEN_PITCH_RAD {
+        let fallen = pitch_rad.abs() > FALLEN_PITCH_RAD;
+        if fallen {
             flags |= wire::STATE_FLAG_FALLEN;
+        }
+
+        if cfg.trace_path.is_some() {
+            trace.push(TraceRow {
+                seq: ticks,
+                sim_time_s: t_known_s,
+                stick_fore_aft,
+                shaped_fore_aft: weight_shift_fore_aft,
+                applied_fore_aft: corridor_enforced_fore_aft,
+                truth_pitch_deg: pitch_rad.to_degrees(),
+                est_pitch_deg: attitude.pitch_rad.to_degrees(),
+                est_pitch_rate_deg_s: attitude.pitch_rate_rad_s.to_degrees(),
+                truth_pitch_rate_deg_s: truth_pitch_rate_rad_s.to_degrees(),
+                forward_speed_m_s,
+                proposed_amps,
+                applied_amps: last_amps,
+                saturated,
+                utilisation,
+                utilisation_filtered,
+                authority_warning,
+                fallen,
+            });
         }
 
         let state = StateOut {
@@ -1158,14 +1758,21 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             }
         }
 
-        let sleep_for = pacer.wait_for_next(Instant::now());
-        if sleep_for.is_zero() {
-            eprintln!(
-                "sim-host: missed deadline at tick {ticks} (total missed so far: {})",
-                pacer.missed_deadlines()
-            );
-        } else {
-            std::thread::sleep(sleep_for);
+        // A free run has no deadlines to miss: the pacer is skipped entirely
+        // rather than consulted and ignored, so its missed-deadline counter
+        // stays at the truthful zero instead of reporting one miss per tick
+        // for a mode in which "late" is not defined. See
+        // `HostConfig::free_run`.
+        if !cfg.free_run {
+            let sleep_for = pacer.wait_for_next(Instant::now());
+            if sleep_for.is_zero() {
+                eprintln!(
+                    "sim-host: missed deadline at tick {ticks} (total missed so far: {})",
+                    pacer.missed_deadlines()
+                );
+            } else {
+                std::thread::sleep(sleep_for);
+            }
         }
     }
 
@@ -1179,12 +1786,68 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         );
     }
 
+    if let Some(path) = &cfg.trace_path {
+        write_trace(path, &trace)?;
+        eprintln!(
+            "sim-host: wrote {} trace rows to {}",
+            trace.len(),
+            path.display()
+        );
+    }
+
     let _ = backend.close();
 
     Ok(RunSummary {
         ticks,
         missed_deadlines: pacer.missed_deadlines(),
     })
+}
+
+/// Writes the acceptance-run trace ([`HostConfig::trace_path`]) as CSV, once,
+/// after the loop has stopped.
+///
+/// Unlike [`write_stats`] this one is NOT best-effort: a trace is the
+/// evidence an ADR-0011 acceptance number is quoted from, and a measurement
+/// whose output silently failed to be written is worse than no measurement.
+/// The error propagates.
+///
+/// Full `f32` precision (`{:?}`) on every physical column on purpose:
+/// `wire-probe --csv`'s 6-decimal rounding is enough to draw a graph and not
+/// enough to demonstrate that two runs are bit-identical, and this crate has
+/// already been caught out once by exactly that difference (issue #163's own
+/// equivalence work).
+fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostError> {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(rows.len() * 160 + 256);
+    out.push_str(
+        "seq,sim_time_s,stick_fore_aft,shaped_fore_aft,applied_fore_aft,truth_pitch_deg,\
+         est_pitch_deg,est_pitch_rate_deg_s,truth_pitch_rate_deg_s,forward_speed_m_s,proposed_amps,applied_amps,\
+         saturated,utilisation,utilisation_filtered,authority_warning,fallen\n",
+    );
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{}",
+            r.seq,
+            r.sim_time_s,
+            r.stick_fore_aft,
+            r.shaped_fore_aft,
+            r.applied_fore_aft,
+            r.truth_pitch_deg,
+            r.est_pitch_deg,
+            r.est_pitch_rate_deg_s,
+            r.truth_pitch_rate_deg_s,
+            r.forward_speed_m_s,
+            r.proposed_amps,
+            r.applied_amps,
+            r.saturated as u8,
+            r.utilisation,
+            r.utilisation_filtered,
+            r.authority_warning as u8,
+            r.fallen as u8,
+        );
+    }
+    std::fs::write(path, out).map_err(HostError::Io)
 }
 
 /// Best-effort, atomic (write-then-rename) write of the host's own counters
@@ -1303,6 +1966,214 @@ mod tests {
                 "yaw={yaw}: recovered ({p}, {r}), wanted ({pitch}, {roll})"
             );
         }
+    }
+
+    // --- ADR-0011 criterion (b): the command-envelope reserve -----------
+
+    /// The constant is DERIVED. This test is the derivation, executable:
+    /// stated reserve fraction x envelope / measured slope. If somebody
+    /// re-measures the slope and forgets to move the constant -- or moves the
+    /// constant to make a scenario pass, which is the failure ADR-0011
+    /// explicitly forbids -- this goes red.
+    ///
+    /// The shipped constant is the derived value rounded to two figures, and
+    /// the tolerance here is half a rounding step. Two figures is not
+    /// laziness: the measured slope's own per-run spread is 41.6-43.5 A/unit
+    /// (see [`PEAK_DEMAND_A_PER_UNIT_STICK`]), so a constant quoted to three
+    /// figures would be claiming a precision the measurement does not have.
+    #[test]
+    fn the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_measured_slope() {
+        let derived =
+            STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK;
+        assert!(
+            (CMD_ENVELOPE_RESERVE - derived).abs() <= 0.005,
+            "the shipped constant ({CMD_ENVELOPE_RESERVE}) is not the derived value \
+             ({derived}) rounded to two figures. It is DERIVED -- \
+             {STATED_ENVELOPE_RESERVE_FRACTION} x {MAX_CURRENT_A} A / \
+             {PEAK_DEMAND_A_PER_UNIT_STICK} A-per-unit -- and ADR-0011 forbids moving it \
+             to make a scenario pass. Re-measure the slope and the constant follows; \
+             the reverse is not allowed."
+        );
+    }
+
+    /// The defect the reserve exists to remove, stated as arithmetic: at full
+    /// stick the UNSHAPED command map asks for more current than the actuator
+    /// has. ADR-0011 calls this a normalisation defect rather than a sizing
+    /// gap, and this is what that sentence means numerically.
+    #[test]
+    fn full_stick_over_commands_the_envelope_without_the_reserve_and_fits_inside_it_with() {
+        let unshaped = shape_fore_aft_command(1.0, 1.0) * PEAK_DEMAND_A_PER_UNIT_STICK;
+        assert!(
+            unshaped > MAX_CURRENT_A,
+            "the premise of this whole change is that full stick over-commands: \
+             {unshaped} A demanded of a {MAX_CURRENT_A} A envelope"
+        );
+
+        let shaped =
+            shape_fore_aft_command(1.0, CMD_ENVELOPE_RESERVE) * PEAK_DEMAND_A_PER_UNIT_STICK;
+        // The stated reserve plus the two-figure rounding step the constant
+        // carries -- 33.62 A predicted here, 33.41 A actually measured in
+        // sim. Asserting against the exact stated fraction would be asserting
+        // that a rounded constant is unrounded.
+        let bound = (STATED_ENVELOPE_RESERVE_FRACTION + 0.01) * MAX_CURRENT_A;
+        assert!(
+            shaped <= bound,
+            "shaped full-stick demand {shaped} A exceeds the stated \
+             {STATED_ENVELOPE_RESERVE_FRACTION} of the {MAX_CURRENT_A} A envelope \
+             by more than the rounding step"
+        );
+        assert!(
+            shaped < MAX_CURRENT_A,
+            "the reserve has to leave SOME headroom at full stick, or it is not a reserve"
+        );
+    }
+
+    /// The reserve is a linear scaling and NOT a clamp. A clamp would leave
+    /// small stick inputs untouched and bite only near the rails, which is a
+    /// different control feel and a different failure mode -- and it is the
+    /// shape somebody reaches for when "cap the lean" is read casually.
+    #[test]
+    fn the_reserve_scales_the_whole_stick_range_and_is_symmetric() {
+        for &u in &[0.0f32, 0.1, 0.25, 0.5, 0.75, 1.0] {
+            let shaped = shape_fore_aft_command(u, CMD_ENVELOPE_RESERVE);
+            assert_eq!(
+                shaped,
+                u * CMD_ENVELOPE_RESERVE,
+                "u={u} is not scaled linearly"
+            );
+            assert_eq!(
+                shape_fore_aft_command(-u, CMD_ENVELOPE_RESERVE),
+                -shaped,
+                "u={u}: braking authority must be shaped exactly like driving authority; \
+                 a one-sided cap is an asymmetric-authority bug that only shows up under a \
+                 hard recovery in one direction"
+            );
+        }
+    }
+
+    /// Full stick still reaches the speed cap, so the reserve costs no top
+    /// speed -- which is the entire reason ADR-0011 rejected lowering
+    /// `MAX_GROUND_SPEED_M_S` as dominated. Stated here as the property that
+    /// makes it true: a shaped full stick is still far enough above zero that
+    /// the cap, not the command map, is what stops the board.
+    #[test]
+    fn a_shaped_full_stick_is_still_governed_by_the_speed_cap_not_by_the_command_map() {
+        let shaped = shape_fore_aft_command(1.0, CMD_ENVELOPE_RESERVE);
+        // Well below the cap, the cap does not touch it: the command map is
+        // the only thing acting.
+        assert_eq!(speed_capped_fore_aft(shaped, 0.0), shaped);
+        // At the cap, the cap takes all of it, whatever the command map left.
+        assert_eq!(speed_capped_fore_aft(shaped, MAX_GROUND_SPEED_M_S), 0.0);
+    }
+
+    // --- ADR-0011 criterion (a): why the reversal is the worst case ------
+
+    /// The reversal entry of the matrix, as a property rather than a run:
+    /// the speed cap NEVER attenuates a reversal, at any speed. This is what
+    /// makes "full reverse-to-forward stick reversal at speed" the worst
+    /// case -- the board is above the onset, where every surviving run in
+    /// ADR-0011's data was being unloaded by the cap, and the cap is not
+    /// acting.
+    #[test]
+    fn the_speed_cap_never_attenuates_a_stick_reversal() {
+        for &v in &[1.0f32, 5.0, 8.34, 9.34, 12.0] {
+            // Travelling forward, stick slammed back: full authority.
+            assert_eq!(
+                speed_capped_fore_aft(-1.0, v),
+                -1.0,
+                "braking from +{v} m/s was attenuated"
+            );
+            // ... and the mirror image.
+            assert_eq!(
+                speed_capped_fore_aft(1.0, -v),
+                1.0,
+                "braking from -{v} m/s was attenuated"
+            );
+        }
+    }
+
+    /// ... whereas an input that would accelerate the board further IS
+    /// attenuated, all the way to zero at the cap. Pinned alongside the test
+    /// above so the pair reads as the asymmetry it is.
+    #[test]
+    fn the_speed_cap_withdraws_accelerating_authority_over_the_last_margin() {
+        assert_eq!(speed_capped_fore_aft(1.0, 0.0), 1.0);
+        assert_eq!(speed_capped_fore_aft(1.0, SPEED_CAP_ONSET_M_S), 1.0);
+        let half = speed_capped_fore_aft(1.0, SPEED_CAP_ONSET_M_S + 0.5 * SPEED_CAP_MARGIN_M_S);
+        assert!(
+            (half - 0.5).abs() < 1e-6,
+            "the ramp should be linear across the margin, got {half}"
+        );
+        assert_eq!(speed_capped_fore_aft(1.0, MAX_GROUND_SPEED_M_S), 0.0);
+        assert_eq!(speed_capped_fore_aft(1.0, MAX_GROUND_SPEED_M_S + 5.0), 0.0);
+    }
+
+    // --- ADR-0011 criterion (c): the loss-of-authority warning -----------
+
+    /// The discriminator, both halves. Utilisation alone is not the trigger
+    /// and speed alone is not the trigger; the warning is the conjunction,
+    /// and dropping the speed half turns it into noise on every survivable
+    /// high-speed saturation.
+    #[test]
+    fn the_authority_warning_fires_only_on_high_utilisation_below_the_speed_cap_onset() {
+        let hot = AUTHORITY_UTILISATION_WARN + 0.05;
+        let cold = AUTHORITY_UTILISATION_WARN - 0.05;
+        assert!(authority_warning_active(hot, 2.0), "hot and slow must warn");
+        assert!(
+            authority_warning_active(hot, -2.0),
+            "the discriminator is speed MAGNITUDE -- a board reversing at 2 m/s is as \
+             unloaded as one driving at 2 m/s, which is to say not at all"
+        );
+        assert!(
+            !authority_warning_active(hot, SPEED_CAP_ONSET_M_S + 0.1),
+            "saturation above the onset is survivable and warning on it is noise"
+        );
+        assert!(
+            !authority_warning_active(cold, 2.0),
+            "utilisation below the threshold must not warn"
+        );
+        assert!(
+            !authority_warning_active(AUTHORITY_UTILISATION_WARN, 2.0),
+            "the trigger is strictly greater than the threshold"
+        );
+    }
+
+    /// The filter has to be fast enough to preserve the lead time it exists
+    /// to give and slow enough not to chatter on one noisy cycle. Both bounds
+    /// asserted, because the constant is chosen by them rather than tuned.
+    #[test]
+    fn the_authority_filter_is_bounded_by_the_cycle_below_and_the_lead_time_above() {
+        let cycle_s = DT_S as f32;
+        assert!(
+            AUTHORITY_UTILISATION_TAU_S > 10.0 * cycle_s,
+            "a filter shorter than ~10 control cycles is not a filter"
+        );
+        // The lead this warning is quoted at, measured on the estimator path
+        // with the reserve disabled -- see AUTHORITY_UTILISATION_WARN's doc
+        // comment and `tests/test_cmd_envelope_reserve.py`.
+        let measured_lead_s = 1.92_f32;
+        assert!(
+            AUTHORITY_UTILISATION_TAU_S < 0.2 * measured_lead_s,
+            "a filter comparable to the lead time eats the warning it is meant to give"
+        );
+    }
+
+    /// A first-order filter cannot overshoot its input, so the warning can
+    /// never fire on a utilisation the controller never asked for. Cheap, and
+    /// it is the property that makes the filtered signal safe to quote.
+    #[test]
+    fn the_filtered_utilisation_never_exceeds_a_constant_input() {
+        let alpha = DT_S as f32 / (AUTHORITY_UTILISATION_TAU_S + DT_S as f32);
+        let input = 0.9_f32;
+        let mut y = 0.0_f32;
+        for _ in 0..10_000 {
+            y += (input - y) * alpha;
+            assert!(y <= input, "filter overshot: {y} > {input}");
+        }
+        assert!(
+            (y - input).abs() < 1e-3,
+            "the filter must actually converge to its input, got {y}"
+        );
     }
 
     /// The steering law's standstill property, which the speed-proportional
