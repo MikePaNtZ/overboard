@@ -37,6 +37,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # NOTE: the I4 credential guard deliberately does NOT live here. It must run
+  # on every pull request -- a credential can be committed by any change, not
+  # only by one touching scripts/pi/ -- and this workflow is `paths:`-filtered.
+  # It runs in ci.yml instead.
+
   # -------------------------------------------------------------------------
   # AC-1. Cheap, fast, and the single highest-value no-Pi check in the design:
   # this is the shape of check that caught the `rpi-2712-rt` assumption before
