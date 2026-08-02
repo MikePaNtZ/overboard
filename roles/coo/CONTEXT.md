@@ -11,6 +11,13 @@ layer landed and proved (#38), and the usage gate is live and verified to refuse
 here in the same pass, per Mechanical's rule — a stale priority list is read as the current one
 by the next session.
 
+- **THE LAUNCH IS HELD** ([ADR-0011](../../docs/decisions/ADR-0011-hold-the-launch-until-the-board-stops-flipping.md)).
+  Four roles are owed a restart and the briefs are written and paste-ready:
+  [`restart-briefs-2026-08-02-launch-hold.md`](restart-briefs-2026-08-02-launch-hold.md).
+  **Senior Digital Marketer first** — its branch carries the dead date and publishing is a
+  one-way door. Delivering these is the COO's part of closing the decision, not a follow-up
+  to it. **Do not restart Senior Controls** without checking what is already in flight on
+  `feat/controls/cmd-envelope-reserve` — same files, and a second session there collides.
 - **[#33](https://github.com/MikePaNtZ/overboard/issues/33) sim-fidelity session.** Prep is
   WRITTEN (`docs/sim-fidelity-session-prep.md`, #143) — this is now genuinely waiting on the
   CEO's time, which it was not before. Mechanical asked to attend (#128) and should.
