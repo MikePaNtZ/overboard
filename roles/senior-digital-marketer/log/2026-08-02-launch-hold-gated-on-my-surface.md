@@ -76,7 +76,15 @@ Recorded the decision in `overboard-web/CLAUDE.md` beside the lock-step rule, pe
 own convention. **When the hold lifts this gets narrowed, not deleted** — in the same pass as
 the superseding ADR, with a measured number in place of the word "stable" (exit criterion 2).
 
-## Open — raised to the CEO, deliberately not acted on
+## Raised to the CEO — RESOLVED same session: the heading stays
+
+> **Ruling (CEO, 2026-08-02): "audit is fine."** The audit's scope was correct; the `#now`
+> heading is not a hold problem and no copy change is required. It still moves under its own
+> standing rule when the frontier moves — ordinary lock-step once the control fix lands, not
+> claim remediation. Closed, not parked. The original reasoning is kept below because the
+> distinction it turns on — the withdrawn claim vs. the ADR's broader stability sentence — is
+> the thing a future session will re-derive if it is not written down.
+
 
 The `#now` heading reads **"Right now: it stays up, and it goes where it's told — as long as
 it's carrying a rider's weight."**
@@ -91,9 +99,9 @@ on 08-02: full forward stick from rest inverts the board.
 Not acted on, for three reasons that all point the same way: it is live page prose, so the copy
 gate applies and I am the author (CMO clears, never me); the brief was explicit that nothing
 publishes; and where the frontier line sits is positioning, which is the CEO's and the CMO's
-call, not a safety-net edit. **Raised in the session report for a decision.** It is not urgent
-in the sense that anything false is live under the audit's scope — it is a question of whether
-that scope was the right one.
+call, not a safety-net edit. **Raised in the session report for a decision** rather than acted
+on. Nothing false was live under the audit's scope; the only question was whether that scope was
+the right one — and the ruling above says it was.
 
 The three clips the heading sits above are shove-rejection and a scripted shuttle route, both
 still true of what they show. The exposure is the general present-tense framing, not the
@@ -106,4 +114,8 @@ captions.
 - The gate is the durable artefact. A session that never reads ADR-0011 now cannot put the
   claim or the date on the page — which was the whole failure mode ADR-0011 warns about when
   it says the date "binds only sessions that read it".
-- The `#now` heading question is the one live thread. Nothing else is parked on me.
+- **Nothing is parked on me and nothing is parked on anyone else by me.** The `#now` heading was
+  the session's one open thread and the CEO closed it the same session — the audit's scope was
+  right, the heading stays, and it re-bases under ordinary lock-step when the control fix lands.
+- The next thing this desk owes is the L1 announcement, which goes out on ADR-0011's exit
+  criteria and not on a date.

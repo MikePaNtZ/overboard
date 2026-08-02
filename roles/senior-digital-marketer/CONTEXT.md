@@ -26,11 +26,8 @@ Owns nothing in the `overboard` repo except `roles/senior-digital-marketer/**`; 
 ## Current sub-goals
 - The L1 announcement is drafted and deliberately held on two engineering conditions, plus the
   ADR-0011 hold. It does not go out on a date — it goes out on the exit criteria.
-- **Open question with the CEO:** the `#now` heading, "Right now: it stays up, and it goes where
-  it's told." ADR-0011 bars any public artifact asserting stability of the balance controller;
-  the 08-02 audit cleared the site of *the withdrawn claim*, which this is not. Whether the
-  frontier line needs re-basing is a positioning call, and the copy gate puts it with the CMO,
-  not me. Raised 2026-08-02, not acted on.
+- **The `#now` heading is settled — do not reopen it.** See "Decisions made" below. It moves when
+  the frontier moves, not because of the hold.
 
 ## Rules
 - Lead with the measured surprise, not the ambition. Tag every link so we can tell which
@@ -40,6 +37,14 @@ Owns nothing in the `overboard` repo except `roles/senior-digital-marketer/**`; 
 
 ## Decisions made (edit in place — completed work goes in log/, not here)
 
+- **2026-08-02 — the `#now` heading stays as written. CEO ruling, "audit is fine."** I raised
+  that "Right now: it stays up, and it goes where it's told" might fall under ADR-0011's broader
+  bar on asserting balance-controller stability, even though it is not the withdrawn claim and
+  the 08-02 audit cleared it. **The CEO ruled the audit's scope is correct.** The heading is not
+  a hold problem. It still moves under its own standing rule — it names the *current* failure
+  mode and gets rewritten when the frontier moves — so it will be re-based when the control fix
+  lands, as ordinary lock-step, not as claim remediation. Do not re-litigate this against the
+  hold; it was asked and answered.
 - **2026-08-02 — did not touch `feat/marketing/board-0801-relaunch`.** ADR-0011 assigned it to
   me, but it is the CMO's branch (`feat/marketing/`, `roles/cmo/**`, checked out in
   `~/projects/overboard-cmo`), it **merged as #164 on 08-01**, and the dead date it carried was
