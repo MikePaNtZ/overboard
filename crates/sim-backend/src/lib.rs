@@ -158,6 +158,12 @@ pub struct SimBackend {
     /// Overrides `model_path()`'s default when `Some` (issue #161 W2). See
     /// [`SimBackend::with_model_path`].
     model_path_override: Option<PathBuf>,
+    /// **Verification only.** Ground incline, degrees, applied at `open()` by
+    /// tilting gravity. See [`SimBackend::set_incline_deg`]. Zero leaves
+    /// `mjModel::opt.gravity` untouched -- not merely set back to its own
+    /// value, so a run with no incline is bit-identical to one built before
+    /// this knob existed.
+    incline_deg: f64,
 }
 
 impl SimBackend {
@@ -199,6 +205,34 @@ impl SimBackend {
     pub fn set_ballast_targets(&mut self, fore_aft_m: f32, lateral_m: f32) {
         self.ballast_fa_target_m = fore_aft_m;
         self.ballast_lateral_target_m = lateral_m;
+    }
+
+    /// **Verification only.** Puts the plant on a constant slope of
+    /// `incline_deg`, taking effect at the next `open()`.
+    ///
+    /// Positive is UPHILL in the board's forward direction (forward is `-X`,
+    /// so gravity acquires a `+X` component that opposes forward travel).
+    ///
+    /// Implemented by rotating `mjModel::opt.gravity` about `Y`, not by
+    /// tilting the ground geom: a flat plane under tilted gravity and a
+    /// tilted plane under vertical gravity are the same rigid-body problem
+    /// expressed in two frames, and only the gravity form applies the
+    /// along-slope component to every body's own mass. The magnitude is taken
+    /// from whatever the open model declares rather than from a constant here,
+    /// so this rotates the model's gravity instead of replacing it.
+    ///
+    /// ADR-0011's second ratification makes the authored world a condition of
+    /// the launch hold ("the authored world is constrained to what the
+    /// controller survives, and the constraint is encoded as a checkable asset
+    /// rule"). That rule needs a MEASURED incline tolerance, which needs this.
+    ///
+    /// Note what this changes about `truth` pitch: MuJoCo reports attitude
+    /// against model `Z`, which under this transform is the SLOPE NORMAL,
+    /// while the IMU still measures true gravity. On an incline the two
+    /// references genuinely differ by `incline_deg`, and that is physics, not
+    /// an estimator fault.
+    pub fn set_incline_deg(&mut self, incline_deg: f64) {
+        self.incline_deg = incline_deg;
     }
 
     /// The current the plant is seeing. Exposed for tests.
@@ -509,6 +543,16 @@ impl BoardObserve for SimBackend {
             plant.timestep(),
         );
         self.steps_per_cycle = CYCLE_NS / dt_ns;
+
+        // The incline, if any, goes on BEFORE `forward()`: that call primes
+        // `sensordata`, and the accelerometer's very first sample has to see
+        // the slope or the estimator starts from a vertical it never had.
+        if self.incline_deg != 0.0 {
+            let g = plant.gravity();
+            let mag = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+            let (s, c) = self.incline_deg.to_radians().sin_cos();
+            plant.set_gravity([mag * s, 0.0, -mag * c]);
+        }
 
         // AC8 (issue #107, carried forward from I1b/#106): the CONTROLLED
         // Python scenarios call mj_forward once, before their first
