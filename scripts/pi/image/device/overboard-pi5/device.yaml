@@ -5,7 +5,13 @@
 #  MCP2518FD CAN HAT wired in and one core isolated for the control loop.
 # X-Env-Layer-Version: 1.0.0
 # X-Env-Layer-Requires: rpi-device-base,overboard-linux-v8-rt
-# X-Env-Layer-Provides: device,rpi-device
+# Provides `rpi-device` ONLY, matching the stock rpi5 layer this mirrors.
+# An earlier revision also declared `device` -- copied from the slim EXAMPLE's
+# device layer, which requires plain `device-base` -- and the build stopped
+# with "Provider conflict: 'device' is declared by multiple layers:
+# rpi-device-base, overboard-pi5". `rpi-device-base` already provides
+# `device`; re-declaring it claims a capability the base owns.
+# X-Env-Layer-Provides: rpi-device
 #
 # X-Env-VarPrefix: device
 #
