@@ -1,0 +1,159 @@
+name: pi-image
+
+# Stage-0B image pipeline (issue #182). Its own workflow file, not jobs bolted
+# into ci.yml, for the reason ci.yml's own header gives when it explains why
+# the policy job moved out: the job's owner owns its file. It also keeps a
+# slow arm64 image job off the critical path of every Rust PR.
+#
+# NONE of these are required status checks, and that is deliberate:
+#
+#   - `spike` is an EXPERIMENT. Its red is a finding (take the fallback), not
+#     a broken build, and an experiment must never be able to block a merge.
+#   - the verify jobs reach the LIVE Raspberry Pi archive, which has no
+#     snapshot service. A mirror outage would otherwise wedge every PR in the
+#     repo on a network condition nobody in this project controls.
+#
+# `paths:` filtering is safe HERE where it was not safe in ci.yml. That file
+# cannot use it because a SKIPPED required check never reports and branch
+# protection waits on it forever. Nothing here is required, so skipping is
+# just skipping.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'scripts/pi/**'
+      - '.github/workflows/pi-image.yml'
+  pull_request:
+    paths:
+      - 'scripts/pi/**'
+      - '.github/workflows/pi-image.yml'
+  # The spike is expected to need several attempts before its entrypoint guess
+  # is right, and I1 will want rebuilds that no commit triggered.
+  workflow_dispatch:
+
+concurrency:
+  group: pi-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # NOTE: the I4 credential guard deliberately does NOT live here. It must run
+  # on every pull request -- a credential can be committed by any change, not
+  # only by one touching scripts/pi/ -- and this workflow is `paths:`-filtered.
+  # It runs in ci.yml instead.
+
+  # -------------------------------------------------------------------------
+  # AC-1. Cheap, fast, and the single highest-value no-Pi check in the design:
+  # this is the shape of check that caught the `rpi-2712-rt` assumption before
+  # it became a pin.
+  # -------------------------------------------------------------------------
+  verify-pins:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    container:
+      image: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the Raspberry Pi archive
+        run: bash scripts/pi/add_rpi_archive.sh
+
+      - name: Every pin resolves to the exact version named
+        run: bash scripts/pi/verify_pins.sh
+
+  # -------------------------------------------------------------------------
+  # AC-2 evidence. Automates what the verification log did by hand on
+  # 2026-07-27 -- the design says in as many words that this is what the
+  # implementation must automate.
+  #
+  # Separate job from verify-pins, not a step in it: this one downloads ~100 MB
+  # and the other takes seconds. Folded together, a slow kernel download would
+  # hide behind a fast pin check and nobody would notice it doubling.
+  # -------------------------------------------------------------------------
+  verify-kernel:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    container:
+      image: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the Raspberry Pi archive
+        run: bash scripts/pi/add_rpi_archive.sh
+
+      - name: The pinned kernel ships what the design assumes
+        run: bash scripts/pi/verify_kernel.sh
+
+  # -------------------------------------------------------------------------
+  # I0 -- the D3 spike. Gates the builder choice for everything after it.
+  #
+  # Native arm64, no QEMU: `ubuntu-24.04-arm` hosted runners are GA and free
+  # for public repositories, which is what made rpi-image-gen's arm64-host
+  # requirement affordable at all. `--privileged` supplies the CAP_SYS_ADMIN
+  # the tool needs; hosted runners are full VMs, so loop devices work.
+  # -------------------------------------------------------------------------
+  spike:
+    runs-on: ubuntu-24.04-arm
+    # Design section 3 timeboxes this at half a day of ENGINEER time. 60
+    # minutes of runner time is the CI translation: long enough for a full
+    # image build, short enough that a hung job is not discovered tomorrow.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # The job must report what the script reported. TWICE now it has not:
+      #
+      #   run 1: `continue-on-error: true` -- job green, script printed RED.
+      #   run 2: continue-on-error removed, job STILL green, because
+      #          `docker ... | tee` returns TEE's exit status, and Actions
+      #          runs steps under `bash -e`, not `-o pipefail`. The docker
+      #          failure was discarded by the pipe.
+      #
+      # `set -o pipefail` is the actual fix. A check that reports the opposite
+      # of what happened is worse than no check, and this one managed it two
+      # different ways -- worth the explicit shell rather than a third guess.
+      - name: Build rpi-image-gen's stock config in our CI shape
+        id: spike
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --privileged --rm \
+            -v "$PWD:/work" -w /work \
+            debian:trixie \
+            bash scripts/pi/spike_rpi_image_gen.sh 2>&1 | tee /tmp/spike.log
+
+      # Runs whether the spike passed or failed -- the log IS the deliverable,
+      # and a red experiment whose output nobody can read has cost the time
+      # and bought nothing.
+      - name: Publish the spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-log-${{ github.run_id }}
+          path: /tmp/spike.log
+          retention-days: 30
+
+      - name: Summarise the result
+        if: always()
+        run: |
+          {
+            echo "## I0 — rpi-image-gen spike"
+            echo
+            if [ "${{ steps.spike.outcome }}" = "success" ]; then
+              echo "**GREEN** — rpi-image-gen produced an image in a privileged"
+              echo "\`debian:trixie\` container on \`ubuntu-24.04-arm\`."
+              echo "Design §3's primary choice stands. Proceed to I1."
+            else
+              echo "**RED** — no image produced."
+              echo
+              echo "This is a finding, not a broken build. Before concluding anything,"
+              echo "read the log: if the entrypoint guess was wrong that is not evidence"
+              echo "against the tool, it is a one-line fix. Only a genuine"
+              echo "cannot-build-in-a-container result triggers the fallback —"
+              echo "**derive-from-stock** (reference doc §2), explicitly *not* \`pi-gen\`."
+            fi
+            echo
+            echo '```'
+            tail -60 /tmp/spike.log 2>/dev/null || echo "<no log captured>"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

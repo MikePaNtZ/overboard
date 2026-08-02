@@ -130,6 +130,19 @@ jobs:
             assert d['ac5']['verdict'] is None, 'a non-RT runner must not return a verdict'; \
             print('harness ok:', d['platform'])"
 
+      # I4 (issue #182): no credential may enter a public repository. Runs in
+      # THIS workflow rather than pi-image.yml because that one is
+      # `paths:`-filtered to scripts/pi/, and a Wi-Fi passphrase or a private
+      # key can be committed by any change at all -- most likely by one that
+      # has nothing to do with the Pi.
+      #
+      # Seconds, no network. Deliberately narrow rather than an entropy
+      # scanner: Cargo.lock alone carries hundreds of 64-hex SHA256s, and a
+      # check that cries wolf earns an allowlist, then `|| true`, then
+      # nothing. See the script's header for the full argument.
+      - name: Secret guard - no credential in a public repo
+        run: python3 scripts/pi/check_no_secrets.py
+
       # ICD §6.3 / DR-MODE-1: board-app-ridden must have zero motion
       # authority, proven by the dependency graph rather than asserted by a
       # reviewer. canary-ridden is the positive control -- the gate has to

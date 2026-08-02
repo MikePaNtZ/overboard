@@ -15,3 +15,14 @@ __pycache__/
 # Local plan-meter observations. Machine- and plan-specific, and a fabricated
 # value here would be silently trusted as a real reading. Never commit one.
 ops/usage-calibration.json
+
+# Pi credentials (issue #182, I4). The REAL secrets file lives outside the
+# repository at ~/.overboard/pi-secrets.env -- a file that was never in the
+# working tree cannot be committed by accident. These entries cover the
+# staging output of scripts/pi/mk_boot_config.py, which IS written inside a
+# temp dir that could be pointed here by mistake.
+# scripts/pi/check_no_secrets.py asserts these lines are present.
+pi-secrets.env
+*.nmconnection
+overboard-authorized_keys
+overboard-userconf
