@@ -64,12 +64,24 @@ echo "commit: $(git rev-parse --short HEAD)"
 section "repository layout"
 ls -la
 
-section "README (first 120 lines)"
-head -120 README.md 2>/dev/null || echo "<no README.md>"
+# Run 2 looked only for README.md and found nothing: this project ships
+# README.adoc and getting_started.adoc. Glob the stem, not the extension --
+# the point of a discovery dump is to be wrong about details and still
+# return the answer.
+section "documentation"
+for f in README.* getting_started.* INSTALL.* USAGE.*; do
+  [ -f "$f" ] || continue
+  echo "--- $f"
+  head -80 "$f"
+done
 
-section "candidate entrypoints"
-find . -maxdepth 2 -type f \( -name '*.sh' -o -name 'Makefile' -o -name 'meson.build' \) \
-  -not -path './.git/*' | sort | head -40
+# Run 2's other miss: this globbed '*.sh' and reported bin/idp.sh as the
+# entrypoint. idp.sh turned out to be a FASTBOOT PROVISIONER -- an unrelated
+# tool -- while the real entrypoint is `rpi-image-gen`, an extensionless
+# executable in the root. Match on the executable BIT, not on a naming
+# convention the project never promised to follow.
+section "candidate entrypoints (executables, any name)"
+find . -maxdepth 2 -type f -perm -u+x -not -path './.git/*' | sort | head -40
 
 section "example / stock configurations"
 find . -maxdepth 3 \( -path ./.git -prune \) -o \
@@ -94,15 +106,19 @@ else
 fi
 
 section "entrypoint usage"
-# Run 1 of this spike guessed `./build.sh` and found no such file. The
-# unconditional dump above is what turned that into a one-line fix rather than
-# another cycle: the real entrypoint is `bin/idp.sh` (image definition
-# processor) and stock configs live under `examples/*/config`.
-IDP="./bin/idp.sh"
-if [ -x "$IDP" ]; then
-  "$IDP" --help 2>&1 | head -60 || "$IDP" -h 2>&1 | head -60 || true
+# Entrypoint, third attempt. Run 1 guessed ./build.sh (does not exist). Run 2
+# guessed ./bin/idp.sh, which DOES exist and is a red herring -- it is a
+# fastboot provisioner for writing a finished image to a remote device, not a
+# builder. The real entrypoint is ./rpi-image-gen, extensionless, which is
+# exactly why the discovery above now matches on the executable bit.
+GEN="./rpi-image-gen"
+if [ -x "$GEN" ]; then
+  for flag in --help -h help; do
+    echo "$ $GEN $flag"
+    "$GEN" "$flag" 2>&1 | head -70 && break
+  done
 else
-  echo "MISSING: $IDP - the layout changed again; re-read the sections above"
+  echo "MISSING: $GEN - the layout changed again; re-read the sections above"
 fi
 
 section "BUILD ATTEMPT"
@@ -113,14 +129,15 @@ build_rc=1
 CONFIG="examples/slim/config"
 [ -e "$CONFIG" ] || CONFIG="test/configurations/config"
 
-if [ -x "$IDP" ]; then
-  # Two documented-looking invocations rather than one. Still a guess; the
-  # usage dump above is what makes the next correction cheap if both are
-  # wrong, and trying two costs seconds.
-  for attempt in "build -c $CONFIG" "-c $CONFIG"; do
-    echo "$ $IDP $attempt"
+if [ -x "$GEN" ]; then
+  # Several plausible invocations rather than one. Still guesses, and the
+  # usage dump above is what makes the next correction cheap if all of them
+  # are wrong -- but each costs seconds, so trying the obvious spellings
+  # beats spending another CI round to learn the flag name.
+  for attempt in "build -c $CONFIG" "-c $CONFIG" "build -D $CONFIG"; do
+    echo "$ $GEN $attempt"
     # shellcheck disable=SC2086
-    "$IDP" $attempt 2>&1 | tail -80
+    "$GEN" $attempt 2>&1 | tail -80
     build_rc="${PIPESTATUS[0]}"
     echo "  -> exit $build_rc"
     [ "$build_rc" -eq 0 ] && break

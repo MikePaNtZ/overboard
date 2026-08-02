@@ -46,7 +46,16 @@ for f in $KERNEL_REQUIRED_FILES; do
   # -name rather than an exact path: the module tree is versioned, and
   # hardcoding lib/modules/<version>/... would make every kernel bump a
   # two-place edit with one of them easy to miss.
-  if found="$(find ./root -name "$f" -print -quit)" && [ -n "$found" ]; then
+  #
+  # The suffix glob matters and its absence produced a FALSE ALARM on run 2:
+  # this kernel ships modules COMPRESSED (mcp251xfd.ko.xz), so an exact
+  # `-name mcp251xfd.ko` matched nothing and the script announced a
+  # "DESIGN-INVALIDATING result" about a kernel that ships exactly what the
+  # design says it does. The config flags were green in the same run, which
+  # is what gave the lie away -- CONFIG_CAN_MCP251XFD=m and no module file is
+  # not a state a real kernel package can be in.
+  if found="$(find ./root \( -name "$f" -o -name "$f.xz" -o -name "$f.zst" \
+                             -o -name "$f.gz" \) -print -quit)" && [ -n "$found" ]; then
     echo "    ok       $f  ->  ${found#./root}"
   else
     echo "    MISSING  $f"

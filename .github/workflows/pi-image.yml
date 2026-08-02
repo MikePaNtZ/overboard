@@ -101,14 +101,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # NOT `continue-on-error`. Run 1 had it, and the job reported GREEN while
-      # the script inside it printed "SPIKE RESULT: RED" -- a check saying the
-      # opposite of what happened, which is the one thing a check must never
-      # do. Nothing in this workflow is a required status check, so an honest
-      # red here blocks nothing and misleads nobody.
+      # The job must report what the script reported. TWICE now it has not:
+      #
+      #   run 1: `continue-on-error: true` -- job green, script printed RED.
+      #   run 2: continue-on-error removed, job STILL green, because
+      #          `docker ... | tee` returns TEE's exit status, and Actions
+      #          runs steps under `bash -e`, not `-o pipefail`. The docker
+      #          failure was discarded by the pipe.
+      #
+      # `set -o pipefail` is the actual fix. A check that reports the opposite
+      # of what happened is worse than no check, and this one managed it two
+      # different ways -- worth the explicit shell rather than a third guess.
       - name: Build rpi-image-gen's stock config in our CI shape
         id: spike
+        shell: bash
         run: |
+          set -o pipefail
           docker run --privileged --rm \
             -v "$PWD:/work" -w /work \
             debian:trixie \
