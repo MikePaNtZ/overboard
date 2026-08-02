@@ -136,14 +136,30 @@ CONFIG="$(find examples/slim -name '*.yaml' -o -name '*.yml' 2>/dev/null | sort 
 [ -n "$CONFIG" ] || CONFIG="$(find examples -name '*.yaml' -o -name '*.yml' 2>/dev/null | sort | head -1)"
 [ -n "$CONFIG" ] || CONFIG="$(find . -path ./.git -prune -o \( -name '*.yaml' -o -name '*.yml' \) -print 2>/dev/null | sort | head -1)"
 
+# Run 4 got all the way to collect_layers and stopped on:
+#
+#     Layer 'example-mydevice' not found
+#     SEARCH: ...IGdevice=/tmp/spike/device:IGimage=...:IGlayer=/tmp/spike/layer
+#
+# It was searching only the TOP-LEVEL device/image/layer directories, while
+# this example's layers ship beside its config under examples/slim/. That is
+# precisely what `-S <src dir>` is for, per the usage dump run 3 surfaced:
+# "Directory holding custom sources of config, profile, image layout and
+# layers."
+#
+# Derived from the config's own location (config file -> its dir -> its
+# parent) rather than named, for the reason every previous run of this spike
+# demonstrated: a hardcoded path is a guess waiting to be wrong.
+SRC="$(dirname "$(dirname "$CONFIG")")"
+
 echo "config: ${CONFIG:-<none found>}"
+echo "source: ${SRC:-<none>}"
 
 if [ -x "$GEN" ] && [ -n "$CONFIG" ]; then
-  # One invocation now, not a spread of guesses: run 3 confirmed the command
-  # (`build`) and the flag (`-c`), and the only thing that was wrong was
-  # passing a directory where a .yaml file was wanted.
-  echo "$ $GEN build -c $CONFIG"
-  "$GEN" build -c "$CONFIG" 2>&1 | tail -100
+  # One invocation, not a spread of guesses: runs 3 and 4 confirmed the
+  # entrypoint, the command, the flag and the config format between them.
+  echo "$ $GEN build -c $CONFIG -S $SRC"
+  "$GEN" build -c "$CONFIG" -S "$SRC" 2>&1 | tail -120
   build_rc="${PIPESTATUS[0]}"
 elif [ -z "$CONFIG" ]; then
   echo "no .yaml/.yml config found anywhere - see the listing above"
