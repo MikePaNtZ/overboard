@@ -80,14 +80,38 @@ CONTENT_RULES: list[tuple[str, re.Pattern[str], str]] = [
     ),
     (
         "wpa psk",
-        # A populated NetworkManager psk= field. The 8+ length bound keeps it
-        # off `psk=` in a template and off `psk={net["psk"]}` in a generator.
-        re.compile(r"^\s*psk\s*=\s*(?![\"'{$<])\S{8,}", re.M),
+        # A populated NetworkManager psk= field, in the keyfile form it
+        # actually takes: one literal value, alone, to end of line.
+        #
+        # Same tightening as the passphrase rule below and for the same
+        # reason -- the loose version matched `psk = wpa_psk(ssid,
+        # passphrase)`, which is a function call, not a key. Requiring the
+        # value to end the line and to contain only literal characters
+        # excludes every call and subscript expression without needing to
+        # know anything about the language it appears in.
+        re.compile(
+            r"""^[ \t]*psk[ \t]*=[ \t]*["']?([A-Za-z0-9._@#$%^&*+/!-]{8,})["']?[ \t]*$""",
+            re.M,
+        ),
         "a populated NetworkManager psk= field",
     ),
     (
         "wpa passphrase",
-        re.compile(r"^\s*(?:wpa_)?(?:passphrase|WIFI_\d+_PASSPHRASE)\s*=\s*(\S+)", re.M | re.I),
+        # Anchored to end of line, and the value may only contain characters a
+        # passphrase LITERAL contains -- no parentheses, commas, braces or
+        # dots-with-calls.
+        #
+        # The loose version of this (`=\s*(\S+)`) flagged
+        # `passphrase = secrets.get(f"WIFI_{i}_PASSPHRASE", "")` in this
+        # project's own generator: ordinary Python, no credential. That is
+        # precisely the false positive this whole module is built to avoid,
+        # and it came from the pattern reading an ASSIGNMENT rather than a
+        # config VALUE. 8 is the WPA minimum passphrase length.
+        re.compile(
+            r"""^[ \t]*(?:wpa_)?(?:passphrase|WIFI_\d+_PASSPHRASE)[ \t]*=[ \t]*"""
+            r"""["']?([A-Za-z0-9._@#$%^&*+/!-]{8,})["']?[ \t]*$""",
+            re.M | re.I,
+        ),
         "a filled-in Wi-Fi passphrase",
     ),
 ]

@@ -145,6 +145,35 @@ def test_a_psk_template_placeholder_does_not_fire(repo):
     assert check_content(repo, paths) == []
 
 
+def test_python_code_that_merely_mentions_a_passphrase_does_not_fire(repo):
+    """Regression: the guard flagged this project's own generator.
+
+    `passphrase = secrets.get(f"WIFI_{i}_PASSPHRASE", "")` is ordinary Python
+    with no credential in it, and the original pattern read the ASSIGNMENT
+    rather than a config VALUE. Exactly the false positive this module exists
+    to avoid, in the first file it was pointed at.
+    """
+    paths = plant(
+        repo,
+        "gen.py",
+        'passphrase = secrets.get(f"WIFI_{i}_PASSPHRASE", "")\n'
+        'if not passphrase:\n'
+        '    raise ConfigError("empty")\n'
+        'psk = wpa_psk(ssid, passphrase)\n',
+    )
+    assert check_content(repo, paths) == []
+
+
+def test_a_real_passphrase_still_fires_after_the_tightening(repo):
+    """The tightening must not have disarmed the rule it was narrowing."""
+    for line in (
+        'WIFI_1_PASSPHRASE="correct-horse-battery"',
+        "WIFI_2_PASSPHRASE=hunter2hunter2",
+        'wpa_passphrase="s3cret-workshop-key"',
+    ):
+        assert check_content(repo, plant(repo, "leak.env", line + "\n")), line
+
+
 def test_a_binary_file_is_skipped_rather_than_guessed_at(repo):
     p = repo / "blob.bin"
     p.write_bytes(bytes(range(256)))
