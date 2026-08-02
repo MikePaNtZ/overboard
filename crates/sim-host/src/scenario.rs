@@ -262,12 +262,138 @@ pub const STICK_REVERSAL_SCHEDULE: Schedule = &[
     (30.5, 32.5, 0.0, 0.0, 0.0, "release"),
 ];
 
+// --- Braking authority: the CEO's report from driving the build ----------
+//
+// "I would say you should be able to stop faster by leaning back [...] but in
+// general I should be able to cut a tight turn by braking and turning at the
+// same time while keeping speed."
+//
+// Neither of those is measurable against the schedules above: `full-stick`
+// only accelerates, and `stick-reversal` slams through zero into a reverse
+// standing start, so the stop is over before it can be measured and is then
+// buried under a re-acceleration. These two isolate the stop.
+
+/// How long the two braking schedules build speed before braking. Long
+/// enough to settle at the speed cap on the shipped reserve (the board
+/// reaches ~9.15 m/s at ~12 s), so the brake starts from cruise rather than
+/// from the middle of an acceleration ramp.
+pub const BRAKE_BUILD_S: f64 = 12.0;
+
+/// How long the brake is held. Deliberately long enough to carry the board
+/// through zero and into reverse: the stop itself is the measurement, and
+/// cutting the schedule at the stop would hide anything that happens right
+/// after it.
+pub const BRAKE_HOLD_S: f64 = 8.0;
+
+/// **Stop from cruise.** Build to the speed cap at full stick, then full aft
+/// stick and hold. The reference for "how fast can this thing stop".
+pub const BRAKE_STOP_SCHEDULE: Schedule = &[
+    (0.0, ACCEPTANCE_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        ACCEPTANCE_SETTLE_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S,
+        1.0,
+        0.0,
+        0.0,
+        "build to the speed cap",
+    ),
+    (
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S,
+        -1.0,
+        0.0,
+        0.0,
+        "full aft stick (brake to a stop, then reverse)",
+    ),
+    (
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S + 2.0,
+        0.0,
+        0.0,
+        0.0,
+        "release",
+    ),
+];
+
+/// **Brake and turn together**, which is the manoeuvre the CEO reported as
+/// not working: identical to [`BRAKE_STOP_SCHEDULE`] except that full steer
+/// and full lateral lean go in at the same instant as the brake.
+///
+/// Carrying a yaw channel into a measurement is normally something this
+/// module refuses (see the acceptance-matrix note above), and the reason
+/// stands: yaw here is kinematically injected and declared non-physical. It
+/// is admitted HERE because the question being asked is explicitly about
+/// feel — does braking cost the turn, does turning cost the stop — and that
+/// question does not exist without the yaw channel. Nothing measured on this
+/// schedule may be cited as a stability result.
+pub const BRAKE_TURN_SCHEDULE: Schedule = &[
+    (0.0, ACCEPTANCE_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        ACCEPTANCE_SETTLE_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S,
+        1.0,
+        0.0,
+        0.0,
+        "build to the speed cap",
+    ),
+    (
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S,
+        -1.0,
+        1.0,
+        1.0,
+        "full aft stick AND full steer (brake into a turn)",
+    ),
+    (
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S + 2.0,
+        0.0,
+        0.0,
+        0.0,
+        "release",
+    ),
+];
+
+/// **Turn at cruise, no brake** — the control for [`BRAKE_TURN_SCHEDULE`].
+/// Without it, "the turn is tighter when braking" has nothing to be tighter
+/// than.
+pub const CRUISE_TURN_SCHEDULE: Schedule = &[
+    (0.0, ACCEPTANCE_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        ACCEPTANCE_SETTLE_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S,
+        1.0,
+        0.0,
+        0.0,
+        "build to the speed cap",
+    ),
+    (
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S,
+        1.0,
+        1.0,
+        1.0,
+        "hold speed AND full steer (turn at cruise)",
+    ),
+    (
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S,
+        ACCEPTANCE_SETTLE_S + BRAKE_BUILD_S + BRAKE_HOLD_S + 2.0,
+        0.0,
+        0.0,
+        0.0,
+        "release",
+    ),
+];
+
 /// Every schedule a `--scenario`/`--scripted-scenario` flag accepts, by name.
 pub const BY_NAME: &[(&str, Schedule)] = &[
     ("default", DEFAULT_SCHEDULE),
     ("s-curve", S_CURVE_SCHEDULE),
     ("full-stick", FULL_STICK_SCHEDULE),
     ("stick-reversal", STICK_REVERSAL_SCHEDULE),
+    ("brake-stop", BRAKE_STOP_SCHEDULE),
+    ("brake-turn", BRAKE_TURN_SCHEDULE),
+    ("cruise-turn", CRUISE_TURN_SCHEDULE),
 ];
 
 /// Looks up a schedule by its command-line name.

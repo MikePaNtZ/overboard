@@ -8,11 +8,13 @@
 //! ```text
 //! sim-host [--duration-secs SECONDS] [--startup-kick]
 //!          [--state-out-addr ADDR] [--input-in-addr ADDR]
-//!          [--scripted-scenario default|s-curve|full-stick|stick-reversal]
+//!          [--scripted-scenario default|s-curve|full-stick|stick-reversal|
+//!                              brake-stop|brake-turn|cruise-turn]
 //!          [--stats-path PATH|none]
 //!          [--free-run] [--max-sim-secs SECONDS]
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
-//!          [--cmd-reserve FRACTION] [--incline-deg DEGREES]
+//!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
+//!          [--incline-deg DEGREES]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -183,6 +185,25 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 cfg.cmd_envelope_reserve = Some(scale);
+                i += 2;
+            }
+            // Overrides CMD_ENVELOPE_RESERVE_BRAKING -- the reserve spent
+            // when the stick opposes the motion. Sweeping this measures what
+            // braking authority costs at ADR-0011's worst matrix point.
+            "--cmd-reserve-braking" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --cmd-reserve-braking needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(scale) = v.parse::<f32>() else {
+                    eprintln!("sim-host: --cmd-reserve-braking value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if !(0.0..=1.0).contains(&scale) {
+                    eprintln!("sim-host: --cmd-reserve-braking must be within [0, 1], got {scale}");
+                    return ExitCode::FAILURE;
+                }
+                cfg.cmd_envelope_reserve_braking = Some(scale);
                 i += 2;
             }
             // A constant ground slope, degrees, positive uphill. ADR-0011's
