@@ -93,10 +93,19 @@ pub struct StateOut {
     pub wheel_rate_rad_s: f32,
     /// Nose-up positive (ICD SS10.1).
     pub pitch_rad: f32,
-    /// NON-PHYSICAL game steering channel -- see [`crate::YAW_RATE_GAIN`].
-    /// The simulated wheel is a cylinder and cannot physically carve; this is
-    /// a simple integration of the `steer` input, present only so the game
-    /// side has a heading to render with in W1.
+    /// NON-PHYSICAL game steering channel -- see
+    /// `crate::host::YAW_CURVATURE_PER_STEER_RAD_PER_M`'s doc comment for
+    /// the current rate model. The simulated wheel is a cylinder and cannot
+    /// physically carve; this is an integration of the `steer` input,
+    /// present so the game side has a heading to render with.
+    ///
+    /// **Sign (issue #161 follow-up): positive `yaw_rad` turns the board
+    /// LEFT** (a positive rotation about MuJoCo's +Z, which is
+    /// counter-clockwise viewed from above in this Z-up right-handed
+    /// frame). See [`InputIn::steer`]'s doc comment for the wire-level
+    /// convention this implies for the INPUT side, which is the opposite
+    /// sign -- positive `steer` (stick-right) turns the board RIGHT, i.e.
+    /// DEcreases `yaw_rad`.
     pub yaw_rad: f32,
     pub motor_current_a: f32,
     /// **v2.** ACTUAL `ballast_fa` joint position, metres, signed -- NOT the
@@ -233,6 +242,16 @@ pub struct InputIn {
     /// Clamped to `[-1, 1]`.
     pub weight_shift_lateral: f32,
     /// Clamped to `[-1, 1]`. NON-PHYSICAL -- see [`StateOut::yaw_rad`].
+    ///
+    /// **Sign, established explicitly (issue #161 follow-up -- a semantic
+    /// clarification to ADR-0010's wire table, which did not state one):
+    /// positive `steer` means turn RIGHT, matching stick-right / D / →.**
+    /// This was found INVERTED in the field ("turns me left when I turn
+    /// right") -- the game side already maps stick-right to positive
+    /// `steer` correctly; the bug was entirely in how the host turned that
+    /// into `yaw_rad` (see `crate::host`'s yaw computation, fixed in the
+    /// same change). Do not re-derive this from first principles again --
+    /// state it here so the next person does not have to.
     pub steer: f32,
 }
 

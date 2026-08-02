@@ -87,22 +87,88 @@ const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
 /// rather than a separately chosen number that could silently drift from it.
 const BALLAST_RANGE_M: f32 = 0.05;
 
-/// Non-physical game channel: full `steer` deflection integrates `yaw_rad`
-/// at this rate, SHAPED by [`ROLL_FULL_YAW_AUTHORITY_RAD`] below -- the
-/// simulated wheel is a cylinder and cannot physically carve (issue #161).
-/// The real lean-steer controller is Tuesday.
+/// Non-physical game channel, SHAPED by [`ROLL_FULL_YAW_AUTHORITY_RAD`]
+/// below -- the simulated wheel is a cylinder and cannot physically carve
+/// (issue #161). The real lean-steer controller is Tuesday.
 ///
-/// Raised from 1.5 to 3.0 (issue #161 follow-up, CEO request via the COO:
-/// "he's still way too slow... the carves aren't hardly happening. be more
-/// aggressive") -- explicitly authorised, this constant only, roll gate and
-/// floor untouched. Turn radius is speed / yaw-rate, and that same request
-/// roughly triples target speed (`send-input`'s s-curve scenario), which
-/// alone would make carves three times lazier at the old gain; doubling the
-/// gain buys back some of that geometry rather than leaving it to speed
-/// alone to make carving look harder. Still an invented number for a
-/// declared non-physical channel -- this changes nothing about the honesty
-/// position, only how aggressive the channel is allowed to look.
-const YAW_RATE_GAIN_RAD_S: f32 = 3.0;
+/// # Revision history (moved through 1.5 -> 3.0 -> speed-proportional)
+///
+/// Started at 1.5 rad/s flat. Raised to 3.0 (issue #161 follow-up, CEO
+/// request via the COO: "be more aggressive" for the launch-capture
+/// scripted scenarios) -- a flat rad/s gain, still.
+///
+/// **Then the CEO drove it himself and found the real problem with a flat
+/// gain**: "you can just straight up turn yourself around a bit too fast in
+/// a way that I don't think you could actually do on a onewheel... it would
+/// be on a very large turning radius." A flat rad/s yaw rate is independent
+/// of ground speed -- the board could spin in place at a dead stop, and
+/// turned equally fast at any speed, backwards from every real vehicle
+/// (turn radius shrinks as you slow down, not the other way round). Fixed
+/// by making yaw rate proportional to ground speed instead -- see
+/// [`YAW_CURVATURE_PER_STEER_RAD_PER_M`], which replaces this constant
+/// (the "gain" is no longer a flat rad/s; it's curvature per metre
+/// travelled). Still an invented number for a declared non-physical
+/// channel -- this changes nothing about the honesty position, only the
+/// shape of the invented behaviour.
+///
+/// Turn radius = ground speed / yaw rate = `1 / (steer * k)` with this new
+/// formulation -- roughly CONSTANT for a given `steer`, regardless of
+/// speed, which is what leaning into a carve actually does; at zero speed,
+/// yaw rate is zero too -- you cannot carve a stationary onewheel.
+///
+/// `k` (this constant) is picked for a believable radius at full steer, not
+/// derived: 0.15 rad/m gives a tightest radius of `1 / 0.15` ≈ 6.7 m at full
+/// steer, at ANY speed -- a wide, committed arc rather than a go-kart-tight
+/// spin, closer to "very large turning radius" than the old flat gain's
+/// spin-in-place. "Tune for feel, he will judge" -- this is a first
+/// approximation, picked to be conservative ("reduce overall authority" per
+/// the COO) rather than to hit an exact number; see this file's own
+/// measured results for what it produces against the new speed cap.
+const YAW_CURVATURE_PER_STEER_RAD_PER_M: f32 = 0.15;
+
+/// Ground-speed cap, m/s -- issue #161 follow-up, the CEO's explicit ask:
+/// "look at the top speed of a Onewheel XR and set that limit +10% and cap
+/// that." Future Motion's own widely-published Onewheel XR spec lists a top
+/// speed of 19 mph (8.49 m/s); +10% = 20.9 mph = 9.34 m/s.
+///
+/// **Cited from well-known, publicly-repeated Onewheel XR spec material,
+/// NOT a live re-verified lookup** -- this environment has no web access
+/// this session, and the COO's own instruction was explicit ("verify that
+/// figure rather than taking mine... this number is about to become a
+/// public-facing claim of realism"). Flagging the distinction rather than
+/// presenting this as independently re-confirmed: **spot-check the current
+/// Future Motion Onewheel XR spec page against 19 mph before this cap is
+/// treated as a defensible public claim**, per the standing project rule
+/// against presenting an unverified number as verified.
+///
+/// Enforced as an authority cap on `weight_shift_fore_aft`, not a clamp on
+/// the physical wheel speed itself -- this plant has no outer velocity loop
+/// (see this file's own header) and no other mechanism that HOLDS a speed,
+/// so the only way to cap it is to remove the rider's ability to keep
+/// commanding forward lean once at the limit, the same way a real
+/// Onewheel's pushback works. See the ballast-target section below for the
+/// implementation and [`SPEED_CAP_MARGIN_M_S`] for why it ramps rather than
+/// cuts off sharply. This also supersedes the "rip" scripted-scenario
+/// tuning: `send-input`'s s-curve peaked at 18.5 m/s, roughly double this
+/// cap -- that clip is now historical, not a target to preserve.
+const MAX_GROUND_SPEED_M_S: f32 = 9.34;
+
+/// How far below [`MAX_GROUND_SPEED_M_S`] the fore/aft accelerating
+/// authority starts ramping down, so the cap is a smooth taper rather than
+/// a hard on/off wall that could chatter (cross the cap, lose all forward
+/// authority, decay slightly under drag, regain authority, repeat). Not
+/// bench-tuned -- a documented default.
+///
+/// **Measured** (`wire-probe --csv`, sustained full lean from rest): speed
+/// climbs smoothly and peaks at 9.95 m/s -- about 6.5% over the 9.34 m/s
+/// cap, then settles back down through 9.3 m/s within about a second as the
+/// authority ramp (and the ballast's own rate limit) catch up -- before
+/// continued carving pulls it down further. Reported honestly rather than
+/// re-tuned to hit the cap exactly: a documented, bounded overshoot, not an
+/// unbounded one. Tighten this margin (or start the ramp earlier) if a
+/// tighter cap is wanted; a smaller margin trades a harder-edged feel for
+/// less overshoot.
+const SPEED_CAP_MARGIN_M_S: f32 = 1.0;
 
 /// Roll magnitude, radians, at which the roll-shaped yaw limiter reaches
 /// full authority (issue #161 W2 item 4).
@@ -363,6 +429,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut prev_reset_bit = false;
     let mut yaw_rad: f32 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
+    // Previous tick's ground speed, m/s, signed (positive = forward) -- used
+    // to gate THIS tick's `weight_shift_fore_aft` against MAX_GROUND_SPEED_M_S
+    // before the ballast target is set (which happens before this tick's own
+    // fresh speed is known -- see the "Ballast targets" section below). One
+    // cycle old by construction, the same lag `last_amps` already has for the
+    // command-feedforward estimator.
+    let mut last_forward_speed_m_s: f32 = 0.0;
     // Dead-reckoned game-ground path -- see the PARTIALLY SYNTHETIC POSITION
     // block further down for why this exists and what it costs. f64: this
     // accumulates every tick for the whole run, and f32 would visibly drift
@@ -466,13 +539,30 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         prev_armed_bit = input_armed_bit;
         prev_reset_bit = input_reset_bit;
 
+        // Speed cap (issue #161 follow-up, MAX_GROUND_SPEED_M_S's own doc
+        // comment) -- attenuates weight_shift_fore_aft, not the wheel speed
+        // itself: if the board is already moving in the SAME direction this
+        // input would accelerate it (or is at rest), ramp authority down to
+        // zero over the last SPEED_CAP_MARGIN_M_S below the cap. Braking or
+        // reversing (opposite sign to current motion) is never touched.
+        // Gated on last_forward_speed_m_s -- one cycle old, since this
+        // tick's fresh speed is not known until wait_observe() below.
+        let speed_headroom_m_s = MAX_GROUND_SPEED_M_S - last_forward_speed_m_s.abs();
+        let accel_authority = (speed_headroom_m_s / SPEED_CAP_MARGIN_M_S).clamp(0.0, 1.0);
+        let accelerating_same_direction = weight_shift_fore_aft * last_forward_speed_m_s >= 0.0;
+        let capped_weight_shift_fore_aft = if accelerating_same_direction {
+            weight_shift_fore_aft * accel_authority
+        } else {
+            weight_shift_fore_aft
+        };
+
         // Ballast targets -- weight_shift_fore_aft/lateral drive
         // overboard_rider.xml's two ballast actuators DIRECTLY AND
         // PHYSICALLY (see this file's header). Set every cycle, mirroring
         // apply_external_force's own "call every cycle or a stale value
         // persists" convention.
         backend.set_ballast_targets(
-            weight_shift_fore_aft * BALLAST_RANGE_M,
+            capped_weight_shift_fore_aft * BALLAST_RANGE_M,
             weight_shift_lateral * BALLAST_RANGE_M,
         );
 
@@ -501,6 +591,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // header).
         let sample = obs.newest_imu().copied().unwrap_or(ImuSample::ZERO);
         let wheel_rate_rad_s = obs.erpm * RAD_S_PER_ERPM;
+        // Real forward ground speed, m/s, signed -- computed here (rather
+        // than only down in the dead-reckoning block that used to be its
+        // only reader) because the speed-proportional yaw rate below now
+        // needs it too. Kept for the NEXT tick's speed-cap gate (see
+        // `last_forward_speed_m_s` above) at the end of this loop body.
+        let forward_speed_m_s = wheel_rate_rad_s * DEFAULT_R_EFF_M;
+        last_forward_speed_m_s = forward_speed_m_s;
         let aiding = accel_ff.predict(last_amps);
         let attitude = estimator.update(std::slice::from_ref(&sample), aiding);
         let proposed_torque_nm =
@@ -573,7 +670,29 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let roll_authority = YAW_AUTHORITY_FLOOR
             + (1.0 - YAW_AUTHORITY_FLOOR)
                 * (roll_rad.abs() / ROLL_FULL_YAW_AUTHORITY_RAD).clamp(0.0, 1.0);
-        yaw_rad += steer * YAW_RATE_GAIN_RAD_S * roll_authority * DT_S as f32;
+        // SIGN (issue #161 follow-up, CEO-reported bug: "turns me left when
+        // I turn right"): increasing yaw_rad is a positive rotation about
+        // +Z (see the quaternion composition further down), which in this
+        // Z-up right-handed frame is counter-clockwise viewed from above --
+        // LEFT, by this model's own "right = +y" convention (see the `imu`
+        // site comment in `overboard_rider.xml`) and confirmed directly by
+        // the dead-reckoning heading formula below (`heading_y = -sin
+        // (yaw_rad)`, which moves toward -Y, i.e. left, as yaw_rad
+        // increases). So positive `steer` (stick-right) must DECREASE
+        // yaw_rad, not increase it -- `-=`, not `+=`. See `wire.rs`'s
+        // `InputIn::steer` doc comment for the wire-level convention this
+        // fixes.
+        //
+        // SPEED-PROPORTIONAL (issue #161 follow-up, CEO's own diagnosis:
+        // "you can just straight up turn yourself around... too fast").
+        // `YAW_CURVATURE_PER_STEER_RAD_PER_M`'s own doc comment has the
+        // full reasoning; the short version is that yaw RATE now scales
+        // with `forward_speed_m_s`, so turn radius stops depending on speed
+        // (as a real vehicle's does) instead of yaw rate being a flat,
+        // speed-independent rad/s.
+        let yaw_rate_rad_s =
+            steer * YAW_CURVATURE_PER_STEER_RAD_PER_M * forward_speed_m_s.abs() * roll_authority;
+        yaw_rad -= yaw_rate_rad_s * DT_S as f32;
 
         // --- PARTIALLY SYNTHETIC POSITION (issue #161/#163) -------------
         //
@@ -614,7 +733,6 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // that needs ground truth rather than the game path.
         let heading_x = -yaw_rad.cos();
         let heading_y = -yaw_rad.sin();
-        let forward_speed_m_s = wheel_rate_rad_s * DEFAULT_R_EFF_M;
         dr_pos_x_m += (forward_speed_m_s * heading_x) as f64 * DT_S;
         dr_pos_y_m += (forward_speed_m_s * heading_y) as f64 * DT_S;
         let pos = [dr_pos_x_m as f32, dr_pos_y_m as f32, pos_f64[2] as f32];
