@@ -91,7 +91,18 @@ const BALLAST_RANGE_M: f32 = 0.05;
 /// at this rate, SHAPED by [`ROLL_FULL_YAW_AUTHORITY_RAD`] below -- the
 /// simulated wheel is a cylinder and cannot physically carve (issue #161).
 /// The real lean-steer controller is Tuesday.
-const YAW_RATE_GAIN_RAD_S: f32 = 1.5;
+///
+/// Raised from 1.5 to 3.0 (issue #161 follow-up, CEO request via the COO:
+/// "he's still way too slow... the carves aren't hardly happening. be more
+/// aggressive") -- explicitly authorised, this constant only, roll gate and
+/// floor untouched. Turn radius is speed / yaw-rate, and that same request
+/// roughly triples target speed (`send-input`'s s-curve scenario), which
+/// alone would make carves three times lazier at the old gain; doubling the
+/// gain buys back some of that geometry rather than leaving it to speed
+/// alone to make carving look harder. Still an invented number for a
+/// declared non-physical channel -- this changes nothing about the honesty
+/// position, only how aggressive the channel is allowed to look.
+const YAW_RATE_GAIN_RAD_S: f32 = 3.0;
 
 /// Roll magnitude, radians, at which the roll-shaped yaw limiter reaches
 /// full authority (issue #161 W2 item 4).
