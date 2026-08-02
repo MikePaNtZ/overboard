@@ -15,10 +15,10 @@
 //! asks for ("drives forward, slows and reverses under lean, and turns").
 //!
 //! ```text
-//! send-input [--target ADDR] [--scenario default|s-curve]
+//! send-input [--target ADDR] [--scenario default|s-curve] [--kick-at SECONDS]
 //! ```
 
-use sim_host::wire::{InputIn, INPUT_MAGIC, INPUT_SCHEMA_VERSION};
+use sim_host::wire::{InputIn, INPUT_FLAG_KICK, INPUT_MAGIC, INPUT_SCHEMA_VERSION};
 
 type Schedule = &'static [(f64, f64, f32, f32, f32, &'static str)];
 use std::net::UdpSocket;
@@ -290,6 +290,7 @@ fn main() {
     let mut target = sim_host::wire::INPUT_IN_ADDR.to_string();
     let mut schedule: Schedule = SCHEDULE;
     let mut schedule_name = "default";
+    let mut kick_at: Option<f64> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -299,6 +300,22 @@ fn main() {
                     eprintln!("send-input: --target needs a value");
                     std::process::exit(1);
                 });
+                i += 2;
+            }
+            // Issue #161 follow-up, item 5: "make falls testable" --
+            // triggers `wire::INPUT_FLAG_KICK` (a rising edge; sim-host
+            // debounces retriggers itself) at the given schedule time, on
+            // top of whatever the running schedule is already sending.
+            // Verification tool only -- not part of the AC schedule.
+            "--kick-at" => {
+                let v = args.get(i + 1).cloned().unwrap_or_else(|| {
+                    eprintln!("send-input: --kick-at needs a value");
+                    std::process::exit(1);
+                });
+                kick_at = Some(v.parse::<f64>().unwrap_or_else(|_| {
+                    eprintln!("send-input: --kick-at value '{v}' is not a number");
+                    std::process::exit(1);
+                }));
                 i += 2;
             }
             "--scenario" => {
@@ -332,7 +349,12 @@ fn main() {
     }
 
     let socket = UdpSocket::bind("127.0.0.1:0").expect("send-input: bind failed");
-    let duration = total_duration_s(schedule);
+    // If --kick-at lands after the schedule would otherwise end, extend the
+    // run so there is time left afterward to watch the outcome rather than
+    // the process exiting mid-fall.
+    let duration = kick_at.map_or(total_duration_s(schedule), |ka| {
+        total_duration_s(schedule).max(ka + 3.0)
+    });
     eprintln!(
         "send-input: sending to {target} for {duration:.1}s per the '{schedule_name}' schedule"
     );
@@ -341,6 +363,7 @@ fn main() {
     let period = Duration::from_millis(20);
     let mut seq: u64 = 0;
     let mut last_label = "";
+    let mut kick_logged = false;
 
     loop {
         let t = start.elapsed().as_secs_f64();
@@ -354,10 +377,19 @@ fn main() {
             );
             last_label = label;
         }
+        // One-shot rising edge: held for a couple of packets (40 ms) so a
+        // single dropped UDP datagram cannot silently swallow the whole
+        // kick, but not held so long it would look like a second press.
+        let in_kick_window = kick_at.is_some_and(|ka| (ka..ka + 0.04).contains(&t));
+        if in_kick_window && !kick_logged {
+            eprintln!("send-input: t={t:6.2}s -> KICK");
+            kick_logged = true;
+        }
+        let flags = if in_kick_window { INPUT_FLAG_KICK } else { 0 };
         let pkt = InputIn {
             magic: INPUT_MAGIC,
             schema_version: INPUT_SCHEMA_VERSION,
-            flags: 0,
+            flags,
             seq,
             weight_shift_fore_aft: fore_aft,
             weight_shift_lateral: lateral,

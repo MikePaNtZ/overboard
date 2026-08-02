@@ -45,6 +45,17 @@ pub const STATE_FLAG_FALLEN: u16 = 1 << 2;
 pub const INPUT_FLAG_ARM: u16 = 1 << 0;
 /// `InputIn::flags` bit 1.
 pub const INPUT_FLAG_RESET: u16 = 1 << 1;
+/// `InputIn::flags` bit 2 -- issue #161 follow-up, item 5: an on-demand
+/// disturbance, rising-edge triggered (send it once, not held), for making
+/// falls testable rather than something you only ever get by accident. Same
+/// `apply_external_force` mechanism `crate::host`'s gated startup kick
+/// already uses, sized instead to reliably cross `crate::host`'s
+/// `FALLEN_PITCH_RAD` -- see that constant's own doc comment for the
+/// measured magnitude and why the startup kick's is not reused as-is.
+/// `InputIn::schema_version` is unchanged: this is a new bit within the
+/// existing `flags` field, not a wider wire, so it is backward compatible
+/// with any sender not yet setting it (reads as 0, no kick).
+pub const INPUT_FLAG_KICK: u16 = 1 << 2;
 
 /// Host SENDS state here.
 pub const STATE_OUT_ADDR: &str = "127.0.0.1:9601";

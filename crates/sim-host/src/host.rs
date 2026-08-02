@@ -325,6 +325,36 @@ const STARTUP_KICK_T0_S: f64 = 1.0;
 const STARTUP_KICK_DURATION_S: f64 = 0.05;
 const STARTUP_KICK_FORCE_N: [f64; 3] = [-(20.0 / STARTUP_KICK_DURATION_S), 0.0, 0.0];
 
+/// An ON-DEMAND disturbance (issue #161 follow-up, item 5): "make falls
+/// testable" -- a repeatable, rising-edge-triggered "knock the board over
+/// now" via [`wire::INPUT_FLAG_KICK`], reusing this same
+/// `apply_external_force` mechanism the startup kick above already gates.
+/// Deliberately a SEPARATE, much larger magnitude, not a reuse of
+/// `STARTUP_KICK_FORCE_N` -- that one is sized to be RECOVERABLE (its own
+/// doc comment: "a guaranteed disturbance to show recovery FROM"), and
+/// measurement confirmed it as such on this plant: `wire-probe --csv`
+/// against the 20 N*s/0.05 s startup kick alone never crossed
+/// `FALLEN_PITCH_RAD` -- pitch stayed within a few degrees and recovered.
+/// This one is sized to reliably NOT be recoverable. Measured
+/// (`wire-probe --csv`'s new `fallen` column, decoded off the actual wire
+/// bytes -- not re-derived from `pitch_rad` -- board at rest, zero
+/// weight-shift/steer throughout, the ONLY input the whole run): 400 N*s
+/// over 0.05 s (20x the startup kick) crossed `FALLEN_PITCH_RAD` (20 deg)
+/// ~0.056 s after the kick's own force-application window (measured against
+/// SIMULATED time, i.e. tick count * `DT_S` -- a verification run under this
+/// dev sandbox's CPU contention showed the sender's own wall clock and the
+/// host's simulated clock can drift apart by multiple real seconds, so this
+/// crate's other schedule-timed tools, e.g. `send-input`'s wall-clock
+/// `--kick-at`, should not be trusted for tight timing correlation here).
+/// The board then went past a full flip (+-180 deg) and stayed there for
+/// the rest of a 10 s run -- genuinely unrecoverable, not borderline. Same
+/// direction/torque convention as the startup kick (force along -X, zero
+/// applied torque -- the pitching moment comes from the wheel-ground
+/// contact being below the force's application point, not from any
+/// deliberately-applied torque).
+const FALL_KICK_DURATION_S: f64 = 0.05;
+const FALL_KICK_FORCE_N: [f64; 3] = [-(400.0 / FALL_KICK_DURATION_S), 0.0, 0.0];
+
 /// Default path for the host's own missed-deadline/tick counters -- internal
 /// tooling for `wire-probe`, NOT part of the Unreal wire (issue #161's wire
 /// table has no room for either, and must not grow one for our own
@@ -403,6 +433,7 @@ struct LatestInput {
     steer: f32,
     armed_bit: bool,
     reset_bit: bool,
+    kick_bit: bool,
 }
 
 impl From<InputIn> for LatestInput {
@@ -414,6 +445,7 @@ impl From<InputIn> for LatestInput {
             steer: p.steer,
             armed_bit: flags & wire::INPUT_FLAG_ARM != 0,
             reset_bit: flags & wire::INPUT_FLAG_RESET != 0,
+            kick_bit: flags & wire::INPUT_FLAG_KICK != 0,
         }
     }
 }
@@ -500,6 +532,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut latest_input_at: Option<Instant> = None;
     let mut prev_armed_bit = false;
     let mut prev_reset_bit = false;
+    let mut prev_kick_bit = false;
+    // `Some(t)` while an on-demand fall kick (issue #161 follow-up, item 5)
+    // is in its force-application window, `t` being the sim time it started
+    // -- mirrors `STARTUP_KICK_T0_S`'s fixed window but anchored to whenever
+    // the rising edge arrived rather than a fixed offset from run start.
+    // `None` both before the first trigger and again once a window has
+    // finished, so a later rising edge can retrigger it.
+    let mut fall_kick_window_start_s: Option<f64> = None;
     let mut prev_outside_corridor = false;
     let mut yaw_rad: f32 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
@@ -613,6 +653,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         prev_armed_bit = input_armed_bit;
         prev_reset_bit = input_reset_bit;
 
+        // On-demand fall kick (issue #161 follow-up, item 5): rising-edge
+        // triggered, like `reset` above, so holding the bit does not restart
+        // it every tick. Does not retrigger while a window is already in
+        // progress (`fall_kick_window_start_s` only goes back to `None`
+        // once that window's force-application section below has finished
+        // it) -- one kick per press.
+        let input_kick_bit = !stale && latest_input.kick_bit;
+        if input_kick_bit && !prev_kick_bit && fall_kick_window_start_s.is_none() {
+            eprintln!("sim-host: input kick bit set -- inducing a fall");
+            fall_kick_window_start_s = Some(t_known_s);
+        }
+        prev_kick_bit = input_kick_bit;
+
         // Speed cap (issue #161 follow-up, MAX_GROUND_SPEED_M_S's own doc
         // comment) -- attenuates weight_shift_fore_aft, not the wheel speed
         // itself: if the board is already moving in the SAME direction this
@@ -683,8 +736,23 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let in_kick_window = cfg.startup_kick
             && (STARTUP_KICK_T0_S..STARTUP_KICK_T0_S + STARTUP_KICK_DURATION_S)
                 .contains(&t_known_s);
+        // On-demand fall kick (issue #161 follow-up, item 5) -- same
+        // pre-step-time window check as the startup kick above, just
+        // anchored to `fall_kick_window_start_s` instead of a fixed
+        // `STARTUP_KICK_T0_S`. Cleared back to `None` once the window has
+        // elapsed so a later rising edge can retrigger it (see where it is
+        // set, above).
+        let in_fall_kick_window = fall_kick_window_start_s
+            .is_some_and(|t0| (t0..t0 + FALL_KICK_DURATION_S).contains(&t_known_s));
+        if let Some(t0) = fall_kick_window_start_s {
+            if t_known_s >= t0 + FALL_KICK_DURATION_S {
+                fall_kick_window_start_s = None;
+            }
+        }
         let force = if in_kick_window {
             STARTUP_KICK_FORCE_N
+        } else if in_fall_kick_window {
+            FALL_KICK_FORCE_N
         } else {
             [0.0; 3]
         };
