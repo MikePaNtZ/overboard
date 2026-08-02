@@ -1,0 +1,34 @@
+[
+  {
+    "date": "2026-08-02",
+    "order": 1,
+    "title": "It drives \u2014 City Park, real physics end to end",
+    "note": "First full-stack capture. MuJoCo, the real Rust control law at 500 Hz, over a socket into Unreal. Settle \u2192 accelerate \u2192 coast \u2192 reverse \u2192 one turn. Proves the stack; a correctness sequence, not yet a ride.",
+    "file": "demo-2026-08-02-correctness.mp4",
+    "poster": "thumb-2026-08-02.jpg"
+  },
+  {
+    "date": "2026-08-02",
+    "order": 2,
+    "title": "First S-curves \u2014 too slow to look like anything",
+    "note": "Weaving began at 0.71 m/s, walking pace. Turn radius is speed \u00f7 yaw-rate, so the lobes were geometrically tiny however hard it steered. Kept as the before-shot.",
+    "file": "demo-2026-08-02-scurve.mp4",
+    "poster": "thumb-scurve.jpg"
+  },
+  {
+    "date": "2026-08-02",
+    "order": 3,
+    "title": "Manny's first ride \u2014 getting a feel for it",
+    "note": "A rider on the deck, sideways in a real onewheel stance. Builds to 6.8 m/s (24 km/h) before the first lobe, peaks at 9.1 m/s. Same control law and same 500 Hz loop as clip 1 \u2014 only the scripted input and the costume changed. Tentative, and deliberately kept as the before-shot for what comes next.",
+    "file": "demo-2026-08-02-rider-scurve.mp4",
+    "poster": "thumb-rider-scurve.jpg"
+  },
+  {
+    "date": "2026-08-02",
+    "order": 4,
+    "title": "Manny rips \u2014 hard carves at speed",
+    "note": "Yaw gain doubled, steering and lean taken to their limits, two hard lobes instead of a cruise. Entry 10.3 m/s, peak 13.7 m/s, heading swing 162\u00b0 peak-to-peak \u2014 double the previous clip. 174 m travelled. CLAIM WITHDRAWN (2026-08-02): this note originally said the board never became unstable at any aggression level tested. That is false, and root cause is now known. At the full-stick lean this schedule specifies, the drive motor saturates at its 40 A / 28 N·m authority limit about 4.9 s into the straight-line build — before the speed cap can engage — and the board is inverted 1.55 s later. It is a sharp cliff, not a taper: stable through 0.95 of full stick, flips at 0.97 and above. This schedule sits at 1.00. Earlier runs measured as stable only because a harness defect was delivering stick input at 7-13 Hz instead of 50 Hz, so a varying fraction of every run was silently de-rated to roughly 0.62 lean. That defect is fixed. This clip is genuine footage of a genuine run with nothing staged, but its effective aggression was set by laptop load — unmeasured and unreproducible — so NO quantitative stability claim attaches to it. Superseded by a reproducible re-shoot at a margined lean.",
+    "file": "demo-2026-08-02-rip.mp4",
+    "poster": "thumb-rip.jpg"
+  }
+]
