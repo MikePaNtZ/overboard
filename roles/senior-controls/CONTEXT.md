@@ -6,6 +6,39 @@
 
 ## Current sub-goals
 
+> **Two Senior Controls sessions have been running in parallel** (Stage-0B Pi image, and the
+> ADR-0011 balance work). Both threads are below; they do not overlap in code.
+
+### ADR-0011 balance loop (issue #207) — the launch hold
+
+- **Read ADR-0011's SECOND RATIFICATION before touching anything in the balance loop.** It
+  replaced criterion (f) with freeze-and-pin, and the old "accidental ~1 deg nose-down
+  estimator bias" reading is superseded. The residual is `atan(a/g)`, one radian per g, which
+  is the *same number* as the ADR's geometric 5.84 °/(m/s²) because it is the same physics.
+  The estimator is implementing the textbook balance-vehicle lean. **Do not "fix" it.**
+- **(f1)/(f2) landed (PR #215).** The trim is pinned at **−2.501° ± 0.10°** and the reserve's
+  derivation is pinned to it. The band is NOT a tolerance — it is the trim movement at which
+  `CMD_ENVELOPE_RESERVE` stops being derived from anything true. **If a pin fails, re-derive;
+  never re-baseline.** ±0.25° is a measured characterisation and must never become a threshold
+  (ADR-0011 says so explicitly).
+- **Open and unowned: the world-authoring asset rule.** ADR-0011 condition 2 requires it, the
+  measured inputs now exist (`tests/test_incline_tolerance.py`), and **no role has picked up
+  writing it.** Not my turf. This will sit still until somebody claims it — flagged on the
+  2026-08-01 board.
+
+### Standing facts worth not rediscovering
+
+- **This sim is bit-identical across platforms.** Ubuntu CI and macOS/arm64 agreed to 16
+  significant figures on an 18.5 s closed-loop run (`−2.6896194189755955` vs `−2.6896`).
+  Tight pins here are safe; platform drift is not a reason to widen a band.
+- **`--incline-deg` exists now** (rotates `mjModel::opt.gravity` at plant open). It is the only
+  supported way to put the plant on a slope, and it keeps the change out of `sim/models/`.
+- **A slope is NOT an effective static pitch disturbance.** A static pitch *estimate error* is a
+  signal the controller cannot see; a slope is one it can. Anything reasoning from that
+  equivalence is wrong. The board inverts nowhere within ±12°.
+- **What binds on terrain is that there is no speed loop** — `MAX_GROUND_SPEED_M_S` shapes the
+  *stick*, and a stick cap cannot brake against gravity.
+
 ### Stage-0B Pi image (issue #182) — ACTIVE, this is the live thread
 Hardware (Pi 5 + Waveshare 2-CH CAN FD HAT, MCP2518FD) arrives 2026-08-03.
 
@@ -278,6 +311,25 @@ _Older entries collapsed above this line as the log grows; nothing predates the 
   First `continue-on-error: true`; then, after removing it, `docker … | tee` returning *tee's*
   exit status because Actions runs steps under `bash -e`, **not** `-o pipefail`.
   **Any step in this repo that pipes to `tee` has this bug.** Worth a sweep.
+- **The `est − truth` residual regressed across the acceleration ramp (2026-08-02).** Least
+  squares of residual against specific force over the ramp is a **badly conditioned
+  instrument**: the fitted slope moves 4.9 → 7.1 °/(m/s²) across reasonable fit windows on the
+  *same* run, because the filter's 2 s time constant makes the residual lag the specific force
+  throughout the ramp. Do not build a pin on it. Measure the identity in a **settled window**
+  instead (`_settled_trim`), where it holds to a few percent.
+- **Measuring anything on a board rolling BACKWARDS (2026-08-02).** It leaves the drivable
+  corridor after `CORRIDOR_X_MAX_M` = 50 m — about 17 s at 3° of slope — and the host then
+  applies `CORRIDOR_BRAKE_LEAN` = 0.6 for the rest of the run. This looked exactly like the
+  speed cap arresting a downhill roll, and was not. Check `applied_fore_aft` (it goes to exactly
+  0.60) before believing any run where the board decelerates on its own. Downhill-*forward* has
+  700 m of corridor and is the safe direction.
+- **`--max-sim-secs` does not EXTEND a scripted run (2026-08-02)**, only caps it. The
+  `full-stick` schedule ends at 18.5 s and that is the whole measurement window. Anything
+  needing longer — e.g. the steepest climbable grade, still unmeasured — needs a new schedule in
+  `scenario.rs`.
+- **`target/release/sim-host` cannot be run directly on macOS**; the linked libmujoco is only on
+  the loader path under `cargo run`. Every harness here shells out through `cargo run` for that
+  reason.
 
 - **Fetching vesc-project.com for the VESC 6 CAN Formats PDF (2026-07-28).**
   `WebFetch` returned HTTP 403 for every URL tried on that domain (the PDF

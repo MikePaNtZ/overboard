@@ -108,6 +108,33 @@ KERB_MOMENT_ARM_M = 0.77885 - 0.1454
 #: 1), so an impulse delivered over this window is exact.
 DISTURBANCE_WINDOW_S = 0.002
 
+#: Standard gravity, m/s^2. CODATA, not the model's own `9.81` -- this is the
+#: constant in the `1 radian per g` identity, which is a statement about
+#: physics rather than about `overboard_rider.xml`.
+G_M_S2 = 9.80665
+
+#: The window, in seconds of simulated time, over which the estimator trim is
+#: measured -- see `_settled_trim`. Late in the run on purpose, and stated as
+#: a constant so it is a fixed instrument rather than a fitting parameter.
+TRIM_WINDOW_S = (12.0, 18.0)
+
+#: Half-width of the central difference used to recover forward acceleration
+#: from the speed trace, in control cycles. 50 cycles is +-0.1 s.
+DIFF_HALF_CYCLES = 50
+
+#: ADR-0011 (f1). The estimator trim as it stands today, degrees of `est -
+#: truth` over `TRIM_WINDOW_S` of the shipped full-stick hold. A MEASURED
+#: value being frozen, not a target: see
+#: `test_f1_the_estimator_trim_is_pinned_so_a_retune_cannot_move_it_silently`
+#: for why this is a drift detector and may never be cited as a tolerance.
+PINNED_TRIM_DEG = -2.501
+
+#: How far `PINNED_TRIM_DEG` may move before the build goes red. Set from the
+#: trim movement that puts `CMD_ENVELOPE_RESERVE`'s own derivation out of
+#: tolerance (measured: 0.10 deg of trim moves the peak-demand slope 5.2%,
+#: against a 5% band) -- NOT from what happens to pass. See the same test.
+PINNED_TRIM_BAND_DEG = 0.10
+
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -187,6 +214,51 @@ def _peak_pitch_deg(rows):
     return max(abs(r["truth_pitch_deg"]) for r in _healthy(rows))
 
 
+def _settled_trim(rows, window=TRIM_WINDOW_S):
+    """The estimator trim, measured where the identity is actually testable.
+
+    Returns `(residual_deg, apparent_vertical_deg)`, both means over `window`:
+
+    * `residual_deg` -- mean `est - truth` pitch. This IS the trim: the lean
+      the estimator believes in that the plant does not have.
+    * `apparent_vertical_deg` -- mean `atan(a_unaided / g)`, the tilt an
+      accelerometer reports on a body under that specific force, where
+      `a_unaided = a_x - ACCEL_FF_GAIN * I` is the part the command
+      feedforward did not already remove.
+
+    **Why a settled window and not a regression over the whole run.** The
+    obvious instrument -- least squares of residual against specific force
+    across the acceleration ramp -- is badly conditioned here, and measuring
+    it says so: the fitted slope moves from 4.9 to 7.1 deg per m/s^2 across
+    reasonable choices of fit window on the SAME run, because the
+    complementary filter's 2 s time constant means the residual lags the
+    specific force throughout the ramp and the fit picks up whichever part of
+    that transient the window happens to contain. A band tight enough to be a
+    pin would chatter on the window choice; a band loose enough not to would
+    detect nothing. The identity is a STEADY-STATE statement, so it is
+    measured in steady state, where the ratio holds to a few percent.
+    """
+    t_lo, t_hi = window
+    half = DIFF_HALF_CYCLES
+    # Read from `host.rs`, not copied: the command feedforward already removes
+    # this much specific force per amp before the filter sees it, so a stale
+    # copy here would mis-state what the filter was left reading and the trim
+    # pin below would fire for the wrong reason -- or, worse, fail to.
+    accel_ff_gain = _rust_constant("ACCEL_FF_GAIN_M_S2_PER_A")
+    residual, apparent = [], []
+    for i in range(half, len(rows) - half):
+        if not t_lo <= rows[i]["sim_time_s"] <= t_hi:
+            continue
+        a_x = (rows[i + half]["forward_speed_m_s"] - rows[i - half]["forward_speed_m_s"]) / (
+            rows[i + half]["sim_time_s"] - rows[i - half]["sim_time_s"]
+        )
+        unaided = a_x - accel_ff_gain * rows[i]["applied_amps"]
+        residual.append(rows[i]["est_pitch_deg"] - rows[i]["truth_pitch_deg"])
+        apparent.append(math.degrees(math.atan(unaided / G_M_S2)))
+    assert residual, f"no rows in the trim window {window}"
+    return sum(residual) / len(residual), sum(apparent) / len(apparent)
+
+
 def _margin(rows) -> str:
     """The measured margin, in BOTH currencies ADR-0011 criterion (b) demands.
 
@@ -251,6 +323,78 @@ def test_peak_current_demand_is_linear_in_stick_at_the_documented_slope(tmp_path
         "the premise of the whole change is that full stick over-commands the "
         f"envelope; measured {slope:.2f} A/unit against {MAX_CURRENT_A} A"
     )
+
+
+def _peak_demand_slope(tmp_path, tag, **kw) -> float:
+    """Least squares through the origin of peak demand against stick."""
+    fractions = (0.30, 0.50, 0.70, 0.90)
+    peaks = [
+        _peak_demand_a(_run(tmp_path, f"{tag}{u}", "full-stick", cmd_reserve=u,
+                            pitch_source="estimator", **kw))
+        for u in fractions
+    ]
+    return sum(u * a for u, a in zip(fractions, peaks)) / sum(u * u for u in fractions)
+
+
+def test_f2_the_peak_demand_slope_is_trim_derived_not_geometry_derived(tmp_path):
+    """ADR-0011 (f2): pin the reserve's DERIVATION, not just its value.
+
+    `CMD_ENVELOPE_RESERVE` = 0.80 is
+    `STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK`,
+    and `host.rs` enforces that arithmetic at compile time. What no compiler
+    can enforce is the status of the divisor: **41.97 A per unit stick was
+    measured at the current operating trim.** Describing the constant as
+    derived from the actuator envelope, and stopping there, reads as though it
+    were a geometric property that travels with the vehicle. It is not, and
+    calling it one would be a rationalisation.
+
+    This test makes the dependence a measurement rather than a caveat: shift
+    the trim by one `PINNED_TRIM_BAND_DEG` and re-take the slope.
+
+    The result is why (f1) and (f2) are one pin and not two. A 0.10 deg trim
+    shift moves the slope by about 5.2%, and
+    `test_peak_current_demand_is_linear_in_stick_at_the_documented_slope`
+    grants the slope a 5% band -- so **one pinned band of trim drift is
+    already enough to put the reserve's own provenance check out of
+    tolerance.** That is the calibration behind `PINNED_TRIM_BAND_DEG`: it is
+    the trim movement at which `CMD_ENVELOPE_RESERVE` stops being derived from
+    anything true, which is a stronger reason for its width than any statement
+    about what the board survives.
+
+    The bar asserted is deliberately loose. A geometry-derived constant would
+    move by exactly 0%; 3% is low enough to be robust to platform
+    floating-point differences and far too high to be reached by rounding, so
+    clearing it refutes "geometry-derived" without pinning a derivative.
+
+    The trim is shifted with `--pitch-bias-deg` rather than by retuning the
+    filter, because the question is what a MOVED TRIM does to the slope, and
+    an injected offset moves the trim while changing nothing else -- a
+    retuned `ESTIMATOR_TAU_S` would move several things at once and the result
+    could not be attributed.
+    """
+    base = _peak_demand_slope(tmp_path, "f2base")
+    moved = {
+        sign * PINNED_TRIM_BAND_DEG: _peak_demand_slope(
+            tmp_path, f"f2{sign}", pitch_bias_deg=sign * PINNED_TRIM_BAND_DEG
+        )
+        for sign in (-1, 1)
+    }
+    print(f"\n(f2) peak-demand slope at the shipped trim: {base:.3f} A/unit")
+    for shift, slope in sorted(moved.items()):
+        print(
+            f"     trim shifted {shift:+.2f} deg: {slope:.3f} A/unit "
+            f"({100 * (slope - base) / base:+.2f}%)"
+        )
+
+    for shift, slope in moved.items():
+        moved_pct = 100 * abs(slope - base) / base
+        assert moved_pct > 3.0, (
+            f"shifting the trim {shift:+.2f} deg moved the peak-demand slope "
+            f"only {moved_pct:.2f}%. If the slope has genuinely stopped "
+            "depending on the trim then CMD_ENVELOPE_RESERVE is better founded "
+            "than ADR-0011 claims and the ADR should be amended to say so -- "
+            "but do not reach that conclusion by loosening this test."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -391,51 +535,135 @@ def test_the_truth_pitch_rate_is_the_derivative_of_the_truth_pitch(tmp_path):
 
 
 def test_the_estimator_residual_is_specific_force_not_a_static_bias(tmp_path):
-    """WHY CRITERION (f) IS MIS-SPECIFIED, as a measurement.
+    """WHY CRITERION (f) WAS MIS-SPECIFIED, as a measurement.
 
-    ADR-0011 describes the `est - truth` gap as a "~1 deg nose-down estimator
-    bias" and implements "remove the bias" as "feed the regulator truth". It
-    is not a bias. Regressed against the specific force the command feedforward
-    failed to remove (`a_x - ACCEL_FF_GAIN * I`), it comes out at ~5.8 deg per
-    m/s^2 -- and 1 radian per g is 57.2958/9.81 = 5.84 deg per m/s^2. That is
-    a complementary filter reporting the APPARENT VERTICAL, which is what an
-    accelerometer measures on a vehicle that accelerates.
+    ADR-0011's first ratification described the `est - truth` gap as a "~1 deg
+    nose-down estimator bias" and implemented "remove the bias" as "feed the
+    regulator truth". It is not a bias, and one identity settles it:
+
+        1 radian per g = 57.2958 / 9.80665 = 5.8425 deg per m/s^2
+
+    and ADR-0011's own geometric lean sensitivity -- how far this board must
+    lean to sustain acceleration `a` -- is 5.84 deg per m/s^2. **Those are the
+    same number because they are the same physics.** The lean an inverted
+    pendulum needs to sustain `a` is `atan(a/g)`, and `atan(a/g)` is exactly
+    the tilt of the apparent vertical a complementary filter reads off an
+    accelerometer. The estimator is not carrying an error that flatters the
+    controller; it is implementing the textbook balance-vehicle lean.
+
+    Asserted here as the identity itself rather than as a fitted slope: the
+    settled residual over `TRIM_WINDOW_S` against `atan(a_unaided/g)` over the
+    same window, whose ratio is 1 if and only if the estimate is the apparent
+    vertical. `_settled_trim` records why the fitted-slope form was the wrong
+    instrument.
 
     The consequence is structural, not cosmetic: the estimate carries an
     acceleration reference, so replacing it with truth does not correct an
-    error, it removes a feedback path and leaves a pitch-only regulator. That
+    error, it deletes a feedback path and leaves a pitch-only regulator. That
     is why the criterion (f) result below is a continuum in time-to-inversion
     rather than a threshold in stick.
     """
-    rows = _run(tmp_path, "resid", "full-stick", cmd_reserve=0.6, pitch_source="estimator")
-    accel_ff_gain = 0.0584  # ACCEL_FF_GAIN_M_S2_PER_A, host.rs
-    half = 50  # +-0.1 s central difference, to see through per-cycle noise
-    xs, ys = [], []
-    for i in range(half, len(rows) - half):
-        if not 1.0 <= rows[i]["sim_time_s"] <= 15.0:
-            continue
-        a_x = (rows[i + half]["forward_speed_m_s"] - rows[i - half]["forward_speed_m_s"]) / (
-            rows[i + half]["sim_time_s"] - rows[i - half]["sim_time_s"]
-        )
-        xs.append(a_x - accel_ff_gain * rows[i]["applied_amps"])
-        ys.append(rows[i]["est_pitch_deg"] - rows[i]["truth_pitch_deg"])
-    n = len(xs)
-    sx, sy = sum(xs), sum(ys)
-    slope = (n * sum(x * y for x, y in zip(xs, ys)) - sx * sy) / (n * sum(x * x for x in xs) - sx * sx)
-    intercept = (sy - slope * sx) / n
-    one_rad_per_g = math.degrees(1.0) / 9.81
+    rows = _run(tmp_path, "resid", "full-stick", pitch_source="estimator")
+    residual, apparent = _settled_trim(rows)
+    ratio = residual / apparent
+    static_part = residual - apparent
     print(
-        f"\nest-truth residual vs unaided specific force: {slope:.2f} deg per m/s^2 "
-        f"(1 rad/g = {one_rad_per_g:.2f}), intercept {intercept:+.3f} deg"
+        f"\nsettled trim over t in {TRIM_WINDOW_S} s:"
+        f"\n    est-truth residual        {residual:+.4f} deg"
+        f"\n    apparent vertical         {apparent:+.4f} deg  (= atan(a_unaided/g))"
+        f"\n    ratio                     {ratio:.4f}   (1 rad/g holds iff this is 1)"
+        f"\n    unexplained static part   {static_part:+.4f} deg "
+        f"({100 * abs(static_part / apparent):.1f}% of the apparent-vertical term)"
     )
-    assert abs(abs(slope) - one_rad_per_g) / one_rad_per_g < 0.25, (
-        "the est-truth residual no longer looks like an apparent-vertical "
-        "reading. If that is real, ADR-0011 criterion (f)'s framing needs "
-        "revisiting again, in the other direction."
+
+    # 5% is set by the instrument and by what the error MEANS, not by the
+    # measured 2.8%: it is about 1.7x this measurement's own sensitivity to
+    # the choice of settled window (the ratio moves over 1.009-1.039 across
+    # reasonable windows on one run), and 5% of the apparent-vertical term at
+    # this operating point is 0.12 deg of supplied lean -- half the smallest
+    # static perturbation this repo has characterised, so a scale error large
+    # enough to matter cannot hide inside it.
+    assert abs(ratio - 1.0) < 0.05, (
+        f"the est-truth residual is no longer the apparent vertical (ratio "
+        f"{ratio:.3f}). ADR-0011's second ratification rests on that identity; "
+        "if this has genuinely changed, the ADR needs revisiting again rather "
+        "than this band being widened."
     )
-    assert abs(intercept) < 0.5, (
-        "a large intercept would mean there IS a static bias component after "
-        "all, which would make the ADR's framing partly right"
+    # A RELATIVE bound, because the claim under test is relative: the residual
+    # is specific force RATHER THAN a static bias. 10% of the apparent-vertical
+    # term is the largest static component that still leaves that sentence
+    # true. Not derived from the measured value, which is 2.8%.
+    assert abs(static_part) < 0.10 * abs(apparent), (
+        f"a static component of {static_part:+.3f} deg against an "
+        f"apparent-vertical term of {apparent:+.3f} deg would mean there IS a "
+        "meaningful static bias after all, making the ADR's original framing "
+        "partly right"
+    )
+
+
+def test_f1_the_estimator_trim_is_pinned_so_a_retune_cannot_move_it_silently(tmp_path):
+    """ADR-0011 (f1), and the reason the second ratification exists.
+
+    The board survives full stick because the estimator supplies the lean the
+    acceleration physically requires. That is correct behaviour, but nothing
+    designed it and until this test nothing held it in place: any change to
+    `ESTIMATOR_TAU_S`, `ACCEL_FF_GAIN_M_S2_PER_A`, the IMU wiring or the
+    regulator gains could move the trim, and the first symptom would be the
+    board flipping again. (f1) exists to make that a RED BUILD instead.
+
+    # What the band is, and what it is emphatically not
+
+    `PINNED_TRIM_BAND_DEG` is a **drift detector**, not a tolerance. It does
+    not assert that a trim anywhere inside it is safe, and no acceptance
+    number anywhere in this repo may be justified by it.
+
+    Its width comes from what a moved trim BREAKS, which is measured in
+    `test_f2_the_peak_demand_slope_is_trim_derived_not_geometry_derived`:
+    shifting the trim by 0.10 deg moves the peak-demand slope by about 5.2%,
+    and that slope is the divisor `CMD_ENVELOPE_RESERVE` is derived from, held
+    to a 5% band by
+    `test_peak_current_demand_is_linear_in_stick_at_the_documented_slope`. So
+    0.10 deg is the trim movement at which the shipped reserve stops being
+    derived from anything true. The pin fires exactly where the derivation
+    goes stale, which is the only place it has a principled reason to fire.
+
+    It is worth stating what this band is NOT derived from. The measured
+    static-error characterisation -- 0.25 deg survived, 0.5 deg inverted the
+    board -- is **not a threshold**, and ADR-0011 is explicit that promoting
+    0.25 deg to a bar would be deriving acceptance from whatever happened to
+    pass, the precise move criterion (f) exists to forbid. Those numbers are
+    used here only as a sanity check in the safe direction: the band that the
+    derivation argument produced happens to sit well inside them, so the pin
+    also cannot fail to fire before a trim reaches a value whose consequences
+    are unknown. Had the derivation argument produced a wider band, the answer
+    would have been to look harder, not to quietly borrow 0.25 deg.
+
+    There is no lower bound worth arguing about. Every run here is
+    bit-deterministic (`--free-run`, fixed-timestep RK4, schedule indexed on
+    simulated time), so a band this size cannot chatter; it can only be moved
+    by somebody actually changing the controller.
+
+    # If this test fails
+
+    Do not widen the band, and do not adjust the pinned value to match. The
+    trim moved, which means `CMD_ENVELOPE_RESERVE`'s provenance moved with it
+    (see `test_f2_...`) and ADR-0011's named blocking prerequisite -- the
+    headroom-based fix -- has come due. Re-derive; do not re-baseline.
+    """
+    rows = _run(tmp_path, "f1trim", "full-stick", pitch_source="estimator")
+    residual, apparent = _settled_trim(rows)
+    print(
+        f"\n(f1) pinned trim: {residual:+.4f} deg measured, "
+        f"{PINNED_TRIM_DEG:+.3f} {chr(177)} {PINNED_TRIM_BAND_DEG:.2f} deg pinned"
+    )
+    assert abs(residual - PINNED_TRIM_DEG) < PINNED_TRIM_BAND_DEG, (
+        f"the estimator trim has moved to {residual:+.4f} deg from the pinned "
+        f"{PINNED_TRIM_DEG:+.3f} deg. ADR-0011's exit rests on the trim being "
+        "frozen: the 0.80 command-envelope reserve was derived at THIS "
+        "operating trim and is honest only for it, and the ADR names any "
+        "retune that moves this band as a blocking prerequisite for the "
+        "headroom-based fix. Re-derive the reserve from a re-measured slope; "
+        "do not re-baseline this number to make the build green."
     )
 
 
