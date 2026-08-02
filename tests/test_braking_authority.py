@@ -16,6 +16,22 @@ the **forward full-stick hold** (ADR-0011). It was then applied to every
 fore/aft command including braking, which was never derived -- the shaping was
 one multiply and the sign never entered it. `CMD_ENVELOPE_RESERVE_BRAKING`
 gives braking its own number, spent only when the stick opposes the motion.
+Measured at the shipped 0.90: **9.3% quicker to a stop and 7.7% shorter** than
+the old symmetric reserve, from 9.68 m/s.
+
+WHAT IT COSTS, AND WHO CHOSE TO SPEND IT
+-----------------------------------------
+Braking authority is bought straight out of ADR-0011's worst matrix point --
+the full reversal at speed is a braking event by the opposition test, and the
+two cannot be separated because braking hard from speed IS the load case.
+Pitch headroom there falls from 1.72 deg to **0.47 deg**, current headroom
+from 4.60 A to 3.41 A.
+
+That is thin, and it was the **CEO's explicit call with those numbers in front
+of him**, not a default. The sweep it was chosen from is below: 0.95 exceeds
+the pitch ceiling outright and 1.00 inverts the board, so 0.90 is near the
+edge of what the envelope allows at all. **ADR-0011 criterion (b) quotes the
+old margin and needs amending to the new one.**
 
 WHY THE OPPOSITION TEST AND THE SPEED GATE BOTH MATTER
 -------------------------------------------------------
@@ -35,10 +51,9 @@ guard, and it is the most important test in this file.
 THE FINDING THAT MATTERS MORE THAN THE TUNING
 ----------------------------------------------
 **The stop is lean-rate limited, not envelope limited.** Half a second after
-the stick is slammed to full aft from 9.68 m/s, the board has produced about
-3 A of braking out of 40 available; it takes ~2 s to reach 57% of the
-envelope, and the peak demand of the whole schedule occurs 8 s later during
-the reverse standing start, not during the stop at all.
+the stick is slammed to full aft from 9.68 m/s, the board has produced 4.17 A
+of braking out of 40 available -- 10% of envelope, still doing 9.63 m/s. It
+takes ~2 s to reach 65%.
 
 That is why scaling the command buys so little: scaling raises the FINAL
 lean, and the stopping distance is spent in the first second, at nearly zero

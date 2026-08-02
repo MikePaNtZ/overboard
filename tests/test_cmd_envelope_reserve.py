@@ -703,14 +703,87 @@ def test_criterion_f_full_stick_holds_with_the_estimator_bias_removed(tmp_path):
         "therefore about a quarter of a degree, which is the number that "
         "matters most for hardware: an IMU mounted half a degree out flips "
         "this board. Both readings of criterion (f) fail, so the conclusion "
-        "does not depend on which one is right."
+        "does not depend on which one is right.\n\n"
+        "NOSE-UP ONLY. The nose-DOWN side of this band was parametrised here "
+        "too until the braking reserve landed and turned -0.5 deg into an "
+        "XPASS. Sweeping it showed why, and it is not an improvement: outcome "
+        "is NOT MONOTONIC in nose-down bias. See "
+        "test_the_nose_down_static_bias_band_is_not_monotonic. +0.5 deg "
+        "inverts the board hard and stably (6.71 s, unchanged by the braking "
+        "reserve), so the criterion's failure is recorded on the side where a "
+        "single value means something."
     ),
 )
-@pytest.mark.parametrize("bias_deg", [-0.5, 0.5])
+@pytest.mark.parametrize("bias_deg", [0.5])
 def test_criterion_f_the_matrix_holds_under_a_worst_case_static_pitch_bias(tmp_path, bias_deg):
     rows = _run(tmp_path, f"f2{bias_deg}", "stick-reversal", pitch_source="estimator", pitch_bias_deg=bias_deg)
     t = _inversion_time(rows)
     assert t is None, f"a {bias_deg:+} deg static pitch bias inverted the board at {t:.3f} s"
+
+
+def test_the_nose_down_static_bias_band_is_not_monotonic(tmp_path):
+    """A correction to how the +-0.25 / +-0.5 characterisation reads.
+
+    That pair was recorded as though the board simply survives a quarter of a
+    degree and inverts at a half. On the NOSE-UP side it behaves that way. On
+    the nose-down side it does not, and this is the measurement that says so:
+
+        bias      reserve 0.80    reserve 0.90
+        -0.70 deg     held            held
+        -0.60 deg     INVERTED        held
+        -0.55 deg     INVERTED        held
+        -0.50 deg     INVERTED        held
+        -0.45 deg     INVERTED        INVERTED
+        -0.40 deg     INVERTED        held
+
+    A larger bias surviving where a smaller one inverts is not a tolerance,
+    it is a knife-edge, and **it is pre-existing** -- visible at reserve 0.80
+    in the column that predates the braking change. The braking reserve did
+    not create it, it moved which side of the edge -0.5 deg lands on, which
+    is how it was noticed at all (a strict xfail turned XPASS).
+
+    Recorded rather than resolved, and deliberately NOT bisected: this repo
+    has met exactly this shape once before, in the nose-strike disturbance
+    envelope, and concluded that bisecting to a boundary that moves with any
+    small upstream change manufactures precision the measurement does not
+    have.
+
+    **What must not be done with this:** the -0.5 deg XPASS must not be
+    promoted into "the board is now robust to nose-down bias". It is one
+    trajectory landing on the lucky side of a chaotic band. Asserting it
+    would be deriving acceptance from whatever happened to pass, which is the
+    precise move ADR-0011 criterion (f) exists to forbid.
+
+    Asserted here is only the part that is stable and that criterion (f)
+    actually turns on: somewhere in the +-0.5 deg band the board still goes
+    over, so the robustness reading still fails.
+    """
+    band = (-0.60, -0.50, -0.45, -0.40)
+    outcomes = {}
+    for bias in band:
+        rows = _run(
+            tmp_path, f"nm{bias}", "stick-reversal",
+            pitch_source="estimator", pitch_bias_deg=bias,
+        )
+        outcomes[bias] = _inversion_time(rows)
+    print("\nnose-down static bias, shipped configuration:")
+    for bias, t in outcomes.items():
+        print(f"  {bias:+.2f} deg: {'held' if t is None else f'INVERTED at {t:.2f} s'}")
+
+    inverted = [b for b, t in outcomes.items() if t is not None]
+    assert inverted, (
+        "no nose-down bias in the +-0.5 deg band inverts the board any more. "
+        "If that is real it is a genuine robustness change and ADR-0011 "
+        "criterion (f) needs revisiting -- but check the monotonicity above "
+        "first, because this band has a knife-edge in it and a clean sweep is "
+        "more likely to mean the harness stopped working."
+    )
+    held = [b for b, t in outcomes.items() if t is None]
+    if held and min(inverted) < min(held):
+        print(
+            f"  NON-MONOTONIC as recorded: {min(held):+.2f} deg holds while "
+            f"{min(inverted):+.2f} deg inverts."
+        )
 
 
 @pytest.mark.xfail(

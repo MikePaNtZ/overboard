@@ -231,6 +231,52 @@ const BALLAST_RANGE_M: f32 = 0.05;
 /// measured results for what it produces against the new speed cap.
 const YAW_CURVATURE_PER_STEER_RAD_PER_M: f32 = 0.15;
 
+/// How much tighter the turn gets at a standstill than at top speed, as a
+/// multiple of [`YAW_CURVATURE_PER_STEER_RAD_PER_M`].
+///
+/// # Why this exists
+///
+/// [`YAW_CURVATURE_PER_STEER_RAD_PER_M`]'s own doc comment says the defect it
+/// fixed was a board that "turned equally fast at any speed, backwards from
+/// every real vehicle (**turn radius shrinks as you slow down**, not the other
+/// way round)". It then made yaw RATE proportional to speed, which gives a
+/// radius that is *constant* — better than the original, but still not the
+/// behaviour the comment describes. Radius never shrank.
+///
+/// The CEO found the gap by driving it: *"in general i should be able to cut a
+/// tight turn by breaking and turning at same time while keeping speed."* With
+/// a speed-independent radius, braking into a turn cannot tighten it by any
+/// amount, so the manoeuvre does not exist.
+///
+/// # What it does
+///
+/// Curvature ramps linearly from `1x` at [`YAW_TIGHTEN_REF_SPEED_M_S`] and
+/// above, to this multiple at a standstill. At full steer and
+/// `roll_authority` 1.0 that is a 6.67 m radius at top speed and 3.33 m as the
+/// board comes to rest, passing through ~4.6 m at 5 m/s.
+///
+/// **The stationary board still cannot carve.** Yaw rate keeps its `|v|`
+/// factor, so it remains zero at zero speed however tight the curvature gets
+/// — the property `full_stick_at_zero_ground_speed_does_not_turn_the_board`
+/// pins, and the one the original flat-gain formulation got wrong.
+///
+/// # Status
+///
+/// A FEEL number on a declared non-physical channel, picked for the manoeuvre
+/// the CEO described and not derived from anything. 2x is deliberately modest:
+/// it is a noticeable tightening under braking rather than a pivot. Nothing
+/// here is a physics claim and no control decision may be tuned from it.
+const YAW_LOW_SPEED_TIGHTEN: f32 = 2.0;
+
+/// Speed at or above which the turn is at its widest, m/s — the reference
+/// point [`YAW_LOW_SPEED_TIGHTEN`] ramps down from.
+///
+/// [`MAX_GROUND_SPEED_M_S`], so the ramp spans exactly the board's usable
+/// speed range and the tightening is felt across all of it rather than only
+/// in the last stretch before a stop. Above the cap the curvature simply
+/// stays at its widest.
+const YAW_TIGHTEN_REF_SPEED_M_S: f32 = MAX_GROUND_SPEED_M_S;
+
 /// Ground-speed cap, m/s -- issue #161 follow-up, the CEO's explicit ask:
 /// "look at the top speed of a Onewheel XR and set that limit +10% and cap
 /// that." Future Motion's own widely-published Onewheel XR spec lists a top
@@ -414,15 +460,24 @@ const CMD_ENVELOPE_RESERVE: f32 = 0.80;
 /// Braking authority is not free: it is spent out of the same envelope, and
 /// the worst point in ADR-0011's acceptance matrix — the full reverse-to-
 /// forward stick reversal at speed — is a braking event by this definition.
-/// Raising this constant eats that entry's headroom directly. Measured across
-/// the sweep in `tests/test_braking_authority.py`, and the value here is
-/// chosen to keep the reversal's measured margins clear rather than to
-/// maximise braking.
+/// Raising this constant eats that entry's headroom directly, and the two
+/// cannot be separated, because braking hard from speed IS that load case.
+///
+/// At 0.90 the stop is 9.3% quicker and 7.7% shorter, and the reversal's
+/// pitch headroom falls from 1.72 deg to **0.47 deg** (current headroom 4.60
+/// A to 3.41 A). **That is thin, and it is a deliberate CEO decision taken
+/// with those numbers in front of him**, not a default — recorded here
+/// because a future reader finding 0.47 deg of margin deserves to know it was
+/// chosen rather than stumbled into. The sweep is in
+/// `tests/test_braking_authority.py`: 0.95 exceeds the pitch ceiling outright
+/// and 1.00 inverts the board.
+///
+/// ADR-0011 criterion (b) quotes the pre-change margin and needs amending.
 ///
 /// Deliberately NOT raised to 1.0. At 1.0 the braking command is unshaped,
 /// which reproduces the over-command the reserve exists to remove — the
 /// direction it acts in is the only thing that changed.
-const CMD_ENVELOPE_RESERVE_BRAKING: f32 = 0.85;
+const CMD_ENVELOPE_RESERVE_BRAKING: f32 = 0.90;
 
 /// Ground speed below which no command counts as braking, m/s.
 ///
@@ -1236,6 +1291,25 @@ fn speed_capped_fore_aft(stick: f32, last_forward_speed_m_s: f32) -> f32 {
 /// already unloading the board when it happens -- and every run in ADR-0011's
 /// data that saturated above the onset survived. A warning without the speed
 /// term would fire on all of those, which is a warning nobody reads.
+/// Curvature per unit steer at this ground speed, rad/m — widest at
+/// [`YAW_TIGHTEN_REF_SPEED_M_S`] and above, tightening toward a standstill by
+/// [`YAW_LOW_SPEED_TIGHTEN`]. See that constant for why.
+fn yaw_curvature_per_steer(forward_speed_m_s: f32) -> f32 {
+    let slowness = 1.0 - (forward_speed_m_s.abs() / YAW_TIGHTEN_REF_SPEED_M_S).clamp(0.0, 1.0);
+    YAW_CURVATURE_PER_STEER_RAD_PER_M * (1.0 + (YAW_LOW_SPEED_TIGHTEN - 1.0) * slowness)
+}
+
+/// The whole yaw law, in one place.
+///
+/// Extracted so the unit tests exercise the SHIPPED expression rather than a
+/// copy of it — the same reason [`speed_capped_fore_aft`] is a function. The
+/// zero-speed property below is the one this crate got wrong once already,
+/// and a test asserting it against a re-typed formula would not have caught
+/// it.
+fn yaw_rate_rad_s(steer: f32, forward_speed_m_s: f32, roll_authority: f32) -> f32 {
+    steer * yaw_curvature_per_steer(forward_speed_m_s) * forward_speed_m_s.abs() * roll_authority
+}
+
 fn authority_warning_active(utilisation_filtered: f32, forward_speed_m_s: f32) -> bool {
     utilisation_filtered > AUTHORITY_UTILISATION_WARN
         && forward_speed_m_s.abs() < SPEED_CAP_ONSET_M_S
@@ -1930,8 +2004,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // `forward_speed_m_s`, so turn radius stops depending on speed (as a
         // real vehicle's does). At a standstill this is exactly zero, and the
         // gate below then makes the whole injection a literal no-op.
-        let yaw_rate_rad_s =
-            steer * YAW_CURVATURE_PER_STEER_RAD_PER_M * forward_speed_m_s.abs() * roll_authority;
+        let yaw_rate_rad_s = yaw_rate_rad_s(steer, forward_speed_m_s, roll_authority);
         let dyaw_rad = -yaw_rate_rad_s * DT_S as f32;
         // GATED ON EXACT ZERO, deliberately. With no steer (or no ground
         // speed) the plant must evolve bit-identically to the pre-#163 code:
@@ -2464,13 +2537,72 @@ mod tests {
     /// curvature formulation exists to give: full stick at zero ground speed
     /// produces EXACTLY zero heading change, so the injection guarded by it is
     /// a literal no-op. You cannot carve a stationary onewheel.
+    ///
+    /// Through the SHIPPED `yaw_rate_rad_s` rather than a re-typed copy of the
+    /// expression: the low-speed tightening below multiplies curvature up as
+    /// speed falls, and a test that re-typed the formula could not tell you
+    /// whether the `|v|` factor that makes this zero had survived it.
     #[test]
     fn full_steer_at_a_standstill_injects_nothing() {
         for &steer in &[1.0f32, -1.0, 0.6] {
-            let roll_authority = 1.0f32;
-            let yaw_rate = steer * YAW_CURVATURE_PER_STEER_RAD_PER_M * 0.0f32 * roll_authority;
-            let dyaw = -yaw_rate * DT_S as f32;
+            let dyaw = -yaw_rate_rad_s(steer, 0.0, 1.0) * DT_S as f32;
             assert_eq!(dyaw, 0.0, "steer={steer} at rest must not turn the board");
         }
+    }
+
+    /// The turn tightens as the board slows -- the CEO's "cut a tight turn by
+    /// braking and turning at the same time".
+    ///
+    /// Asserted as the ORDERING plus the two endpoints, not as a table of
+    /// radii: the magnitude is a feel number and pinning it would turn a
+    /// tuning knob into a threshold, but the direction is the whole point and
+    /// a sign error here would be invisible in play until someone tried to
+    /// carve.
+    #[test]
+    fn the_turn_radius_shrinks_as_the_board_slows() {
+        let radius = |v: f32| 1.0 / (yaw_curvature_per_steer(v) * 1.0);
+        let top = radius(YAW_TIGHTEN_REF_SPEED_M_S);
+        let rest = radius(0.0);
+        assert!(
+            (top - 1.0 / YAW_CURVATURE_PER_STEER_RAD_PER_M).abs() < 1e-4,
+            "at and above the reference speed the turn must be the width it always was, \
+             or this change is a general steering retune wearing a low-speed label"
+        );
+        assert!(
+            (rest - top / YAW_LOW_SPEED_TIGHTEN).abs() < 1e-4,
+            "the standstill radius must be exactly the tighten factor, got {rest} vs {top}"
+        );
+        // Monotone all the way down, with no step. Walked from the reference
+        // speed DOWN to rest, which is the direction the property is stated
+        // in: each slower sample must turn at least as tightly as the one
+        // before it.
+        let mut previous = f32::INFINITY;
+        for i in (0..=20).rev() {
+            let v = YAW_TIGHTEN_REF_SPEED_M_S * (i as f32) / 20.0;
+            let r = radius(v);
+            assert!(r <= previous + 1e-6, "radius grew as speed fell at v={v}");
+            previous = r;
+        }
+        // Above the reference speed it stays at its widest rather than
+        // inverting into an ever-wider turn.
+        assert!((radius(YAW_TIGHTEN_REF_SPEED_M_S * 2.0) - top).abs() < 1e-4);
+    }
+
+    /// Tightening the low-speed turn must not resurrect the spin-in-place the
+    /// speed-proportional formulation was introduced to kill. Yaw RATE must
+    /// still fall to zero with speed, even though curvature is rising.
+    #[test]
+    fn yaw_rate_still_falls_to_zero_with_speed_despite_the_tightening() {
+        let mut previous = 0.0f32;
+        for i in 0..=20 {
+            let v = YAW_TIGHTEN_REF_SPEED_M_S * (i as f32) / 20.0;
+            let rate = yaw_rate_rad_s(1.0, v, 1.0);
+            assert!(
+                rate >= previous - 1e-6,
+                "yaw rate is not monotone in speed at v={v}"
+            );
+            previous = rate;
+        }
+        assert_eq!(yaw_rate_rad_s(1.0, 0.0, 1.0), 0.0);
     }
 }
