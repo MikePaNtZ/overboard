@@ -109,6 +109,27 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      # AC-12 (no-Pi coverage): the loop profiler's whole value is that it is
+      # already debugged when the Pi arrives, so it runs here on every PR --
+      # not to produce a number (this runner is not PREEMPT_RT and the tool
+      # withholds its verdict accordingly) but to prove the harness end to
+      # end: pacing, capture, percentiles, threshold evaluation, JSON write.
+      #
+      # 1000 cycles at 500 Hz is ~2 s. Deliberately NOT `--strict`: a shared
+      # CI runner will blow a 2 ms deadline whenever it feels like it, and a
+      # gate that goes red for that would be measuring GitHub's fleet.
+      - name: loop-profiler harness self-test
+        run: |
+          cargo run --release -p loop-profiler --bin overboard-loop-profile -- \
+            --cycles 1000 --no-rt --json /tmp/loop-profile.json
+          test -s /tmp/loop-profile.json
+          python3 -c "import json,sys; d=json.load(open('/tmp/loop-profile.json')); \
+            assert d['schema_version']==1, d; \
+            assert d['wake_late']['count']==1000, d['wake_late']; \
+            assert d['compute']['max_ns']>0, 'control law did not execute'; \
+            assert d['ac5']['verdict'] is None, 'a non-RT runner must not return a verdict'; \
+            print('harness ok:', d['platform'])"
+
       # ICD §6.3 / DR-MODE-1: board-app-ridden must have zero motion
       # authority, proven by the dependency graph rather than asserted by a
       # reviewer. canary-ridden is the positive control -- the gate has to
