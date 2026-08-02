@@ -576,7 +576,14 @@ def test_the_estimator_residual_is_specific_force_not_a_static_bias(tmp_path):
         f"({100 * abs(static_part / apparent):.1f}% of the apparent-vertical term)"
     )
 
-    assert abs(ratio - 1.0) < 0.10, (
+    # 5% is set by the instrument and by what the error MEANS, not by the
+    # measured 2.8%: it is about 1.7x this measurement's own sensitivity to
+    # the choice of settled window (the ratio moves over 1.009-1.039 across
+    # reasonable windows on one run), and 5% of the apparent-vertical term at
+    # this operating point is 0.12 deg of supplied lean -- half the smallest
+    # static perturbation this repo has characterised, so a scale error large
+    # enough to matter cannot hide inside it.
+    assert abs(ratio - 1.0) < 0.05, (
         f"the est-truth residual is no longer the apparent vertical (ratio "
         f"{ratio:.3f}). ADR-0011's second ratification rests on that identity; "
         "if this has genuinely changed, the ADR needs revisiting again rather "
