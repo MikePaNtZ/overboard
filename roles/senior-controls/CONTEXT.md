@@ -5,25 +5,32 @@
 - **Read first:** [`docs/decisions/INDEX.md`](../../docs/decisions/INDEX.md)
 
 ## Current sub-goals
-- **Was blocking the first public announcement, now partly cleared (PR TBD, issue #24 AC1):**
-  `RustController`'s `use_estimator` default flipped `False` → `True`, so the driverless
-  disturbance-rejection gate (`tests/test_closed_loop.py`), the ridden cascade gate, and
-  `scripts/render_scenario.py --compare` — the exact script that produces the artifact CI
-  publishes to `sim-latest` — now all run on the attitude **estimate**, not ground truth, by
-  default. hill.py/terrain.py/shuttle_run.py already did this; the driverless impulse gate,
-  which is what the published render and its `impulse_closed_loop_metrics.json` actually show,
-  did not. One pinned regression threshold moved with it and was re-measured rather than
-  loosened blindly: `test_there_is_large_margin_on_actuation_delay` was pinned at 6.80 deg
-  (truth pitch) and is now 9.71 deg (the honest number) — still clear of the 18.57 deg strike
-  angle, re-baselined to `< 10.5`.
-  **AC2 also now cleared (#67):** the disturbance-rejection envelope is mapped, not one fixed
-  magnitude. **AC3 also now cleared (see the decision-log entry below):** the `r_eff` tyre-ground
-  question — couldn't be justified, so fixed. **AC4 addressed in a separate open PR (#74, not
-  yet merged as of this entry):** determinism audited across all four scenarios. **Still open —
-  issue #24's one remaining AC:** an audit marking every acceptance number in the scenario docs
-  as measured vs. assumed. Its own well-scoped increment, not a blocker for any of the above.
-- Closed-loop control is in sim; the estimator now closes the loop on the driverless impulse gate
-  and the ridden cascade too, not only the shuttle.
+
+### Stage-0B Pi image (issue #182) — ACTIVE, this is the live thread
+Hardware (Pi 5 + Waveshare 2-CH CAN FD HAT, MCP2518FD) arrives 2026-08-03.
+
+**Landed on master:**
+- `crates/loop-profiler` / `overboard-loop-profile` (#181) — AC-5's instrument. Wake latency
+  + control-law compute as tail percentiles. Runs in CI on every PR (AC-12).
+  **Its first finding shapes everything:** control law p99.9 = **0.7 µs against a 2000 µs
+  budget**. Loop-rate viability is a *scheduler* question, not a compute one. Do not spend
+  time optimising the law.
+- `scripts/pi/` (#184) — the D3 spike, AC-1 pin verification, AC-2 kernel-contents
+  verification, `flash_pi.sh`, credential staging, the secret guard.
+
+**I0 ANSWERED GREEN.** `rpi-image-gen` builds in a privileged `debian:trixie` container on
+`ubuntu-24.04-arm`, native arm64, no QEMU. Design §3's primary choice stands;
+**derive-from-stock is retired as the active plan** (still documented as the regression path).
+
+**I1 in flight — PR #197, DOES NOT BUILD YET.** Four rounds. Next failure is *one line*:
+`chroot: failed to run command 'apt'` from the STOCK `image-rpios` layer's
+`customize05-pkgs`. Our base is slim and apt is not installed in the target.
+**Fix: add `apt` to `packages:` in `scripts/pi/image/layer/overboard-base.yaml`.**
+High confidence, untested.
+
+### Other controls threads
+- Issue #24's last AC (audit every scenario acceptance number as measured vs assumed) remains
+  open. Not blocking anything.
 
 ## Turf notes
 - Owns `crates/`, `tests/`, `scripts/`, most of `sim/` — but **not** `sim/models/`,
@@ -31,6 +38,13 @@
 - **Inside `sim/models/`:** `<sensor>` and `<actuator>` elements are yours and need no row.
   Mass, inertia, geometry, contact and friction are Mechanical's and do.
 - `.github/workflows/ci.yml` is yours. `.github/policy_check.py` and `CODEOWNERS` are the COO's.
+- **A NEW workflow file is COO turf, and so is any new top-level directory.**
+  `.github/workflows/pi-image.yml` needs `TURF-OVERRIDE:` in a commit message on every branch
+  that touches it — and **a rebase drops it**, because the gate reads commit messages, not the
+  PR body. #197 went red for exactly this after #184 merged. Re-assert it after any rebase.
+- **`pi/` at the top level falls to the CEO catch-all** (`policy_check.py --who pi` confirms).
+  Design §1 pre-provisioned `scripts/pi/` as the non-blocking fallback; the Pi work lives there
+  deliberately, not by accident. Do not "tidy" it into `pi/` without a CODEOWNERS row first.
 
 ## Decisions made (edit in place — completed work goes in log/, not here)
 
@@ -239,6 +253,31 @@
 _Older entries collapsed above this line as the log grows; nothing predates the crate-exclusion entry._
 
 ## Known dead ends
+
+- **Guessing rpi-image-gen's interface from convention (2026-08-02). Cost five CI rounds.**
+  `./build.sh` (does not exist) → `./bin/idp.sh` (exists, and is a *fastboot provisioner*, not
+  a builder — the worst kind of wrong answer) → a config *directory* where a `.yaml` file was
+  wanted → a missing `-S`. The entrypoint is `./rpi-image-gen`, extensionless, and
+  `-c` is relative to `-S`.
+  **What actually worked was reading the tool's own example layers over HTTP from GitHub**
+  (`raw.githubusercontent.com` / the contents API both work from this sandbox). Half an hour of
+  that turned I1 into a near-first-attempt job after I0 had burned five rounds.
+  **Rule for next time: fetch and read the upstream source before writing config against it.**
+
+- **Copying from the nearest example rather than the thing being replaced (2026-08-02).**
+  The recurring root cause of this whole workstream. `Provides: device,rpi-device` was copied
+  from the *slim example* (which requires `device-base`); the right reference was the stock
+  `rpi5` layer (which requires `rpi-device-base` and provides `rpi-device` alone). Cost a build.
+
+- **Prose inside a `# METABEGIN` block (2026-08-02).** It is machine-parsed DEB822, not a
+  comment block, despite every line starting with `#`. A malformed header does **not** fail
+  where the mistake is — it makes the layer *invisible* and the build fails elsewhere reporting
+  it "not found". `scripts/pi/check_layer_headers.py` now guards this in CI.
+
+- **A check reporting green over a red script — twice, two mechanisms (2026-08-02).**
+  First `continue-on-error: true`; then, after removing it, `docker … | tee` returning *tee's*
+  exit status because Actions runs steps under `bash -e`, **not** `-o pipefail`.
+  **Any step in this repo that pipes to `tee` has this bug.** Worth a sweep.
 
 - **Fetching vesc-project.com for the VESC 6 CAN Formats PDF (2026-07-28).**
   `WebFetch` returned HTTP 403 for every URL tried on that domain (the PDF
