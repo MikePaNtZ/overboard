@@ -113,11 +113,6 @@ DISTURBANCE_WINDOW_S = 0.002
 #: physics rather than about `overboard_rider.xml`.
 G_M_S2 = 9.80665
 
-#: `ACCEL_FF_GAIN_M_S2_PER_A`, `host.rs`. The command feedforward already
-#: removes this much specific force per amp before the filter sees it, so the
-#: specific force the filter is left reading is `a_x - this * I`.
-ACCEL_FF_GAIN_M_S2_PER_A = 0.0584
-
 #: The window, in seconds of simulated time, over which the estimator trim is
 #: measured -- see `_settled_trim`. Late in the run on purpose, and stated as
 #: a constant so it is a fixed instrument rather than a fitting parameter.
@@ -245,6 +240,11 @@ def _settled_trim(rows, window=TRIM_WINDOW_S):
     """
     t_lo, t_hi = window
     half = DIFF_HALF_CYCLES
+    # Read from `host.rs`, not copied: the command feedforward already removes
+    # this much specific force per amp before the filter sees it, so a stale
+    # copy here would mis-state what the filter was left reading and the trim
+    # pin below would fire for the wrong reason -- or, worse, fail to.
+    accel_ff_gain = _rust_constant("ACCEL_FF_GAIN_M_S2_PER_A")
     residual, apparent = [], []
     for i in range(half, len(rows) - half):
         if not t_lo <= rows[i]["sim_time_s"] <= t_hi:
@@ -252,7 +252,7 @@ def _settled_trim(rows, window=TRIM_WINDOW_S):
         a_x = (rows[i + half]["forward_speed_m_s"] - rows[i - half]["forward_speed_m_s"]) / (
             rows[i + half]["sim_time_s"] - rows[i - half]["sim_time_s"]
         )
-        unaided = a_x - ACCEL_FF_GAIN_M_S2_PER_A * rows[i]["applied_amps"]
+        unaided = a_x - accel_ff_gain * rows[i]["applied_amps"]
         residual.append(rows[i]["est_pitch_deg"] - rows[i]["truth_pitch_deg"])
         apparent.append(math.degrees(math.atan(unaided / G_M_S2)))
     assert residual, f"no rows in the trim window {window}"
