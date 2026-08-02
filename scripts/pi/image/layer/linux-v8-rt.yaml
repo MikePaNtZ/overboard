@@ -52,6 +52,22 @@ mmdebstrap:
   packages:
     - linux-image-6.12.75+rpt-rpi-v8-rt=1:6.12.75-1+rpt1
   customize-hooks:
-    # AC-2: held, so an unattended `apt upgrade` on the bench cannot silently
-    # move the one variable every Stage-0B measurement is conditioned on.
-    - chroot $1 apt-mark hold linux-image-6.12.75+rpt-rpi-v8-rt
+    # AC-2: held, so an unattended upgrade on the bench cannot silently move
+    # the one variable every Stage-0B measurement is conditioned on.
+    #
+    # `dpkg --set-selections`, NOT `apt-mark hold`. This is a slim image and
+    # apt is not installed in the target -- `apt-mark` failed with "No such
+    # file or directory" after the entire rootfs had already bootstrapped.
+    # dpkg is always present (it is what installed everything), and a dpkg
+    # hold is what apt-mark writes anyway.
+    - echo 'linux-image-6.12.75+rpt-rpi-v8-rt hold' | chroot $1 dpkg --set-selections
+    # Read back, because a hold that silently did not take is worse than no
+    # hold: it would look pinned in review and float on the bench.
+    - |
+      set -eu
+      state="$(chroot "$1" dpkg --get-selections linux-image-6.12.75+rpt-rpi-v8-rt)"
+      echo "kernel hold state: $state"
+      case "$state" in
+        *hold*) ;;
+        *) echo "E: kernel is NOT held (got: $state)" >&2; exit 1 ;;
+      esac

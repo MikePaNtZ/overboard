@@ -48,8 +48,19 @@ def layer_packages(path: Path) -> list[str]:
 
 
 def layer_holds(path: Path) -> list[str]:
-    """Packages the layer passes to `apt-mark hold`."""
-    return re.findall(r"apt-mark\s+hold\s+(\S+)", path.read_text())
+    """Packages the layer marks `hold`.
+
+    Matches the dpkg form (`echo '<pkg> hold' | dpkg --set-selections`) as
+    well as `apt-mark hold`. The image uses dpkg because apt is not installed
+    in a slim target -- apt-mark failed there after the whole rootfs had
+    already bootstrapped -- and a checker that only knew the apt spelling
+    would have reported the kernel as unheld while it was correctly held.
+    """
+    text = path.read_text()
+    return (
+        re.findall(r"apt-mark\s+hold\s+(\S+)", text)
+        + re.findall(r"['\"]?(\S+)\s+hold['\"]?\s*\|", text)
+    )
 
 
 def main() -> int:
