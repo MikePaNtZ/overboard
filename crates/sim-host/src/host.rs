@@ -383,6 +383,88 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// problem, which is the only way a known failure stays known.
 const CMD_ENVELOPE_RESERVE: f32 = 0.80;
 
+/// The command-envelope reserve spent when the stick OPPOSES the current
+/// motion — i.e. when the rider is braking rather than accelerating.
+///
+/// # Why braking gets its own number at all
+///
+/// [`CMD_ENVELOPE_RESERVE`] was derived from a peak-demand slope measured on
+/// the **forward full-stick hold**, where the board accelerates from rest and
+/// full stick over-commands the envelope by 5%. Applying that same 0.80 to a
+/// braking command was never derived, only inherited: the shaping was one
+/// multiply and the sign never entered it. The cost is that the rider gets
+/// 80% of the lean they asked for when trying to stop, for a reason that only
+/// ever applied to setting off.
+///
+/// The CEO's report from driving the build is the ask this answers: *"you
+/// should be able to stop faster by leaning back [...] but we don't need to
+/// overdo it."*
+///
+/// # Why the test is OPPOSITION, not sign
+///
+/// The naive version of this is "aft stick gets more authority". That
+/// reintroduces the ADR-0011 defect in mirror image: full aft from rest is a
+/// backward standing start, which over-commands the envelope exactly as the
+/// forward one does. Braking is not a direction, it is a *relationship*
+/// between the command and the motion, so the test is `stick * speed < 0` —
+/// the same one the speed cap already uses.
+///
+/// # What it costs, and why this value
+///
+/// Braking authority is not free: it is spent out of the same envelope, and
+/// the worst point in ADR-0011's acceptance matrix — the full reverse-to-
+/// forward stick reversal at speed — is a braking event by this definition.
+/// Raising this constant eats that entry's headroom directly. Measured across
+/// the sweep in `tests/test_braking_authority.py`, and the value here is
+/// chosen to keep the reversal's measured margins clear rather than to
+/// maximise braking.
+///
+/// Deliberately NOT raised to 1.0. At 1.0 the braking command is unshaped,
+/// which reproduces the over-command the reserve exists to remove — the
+/// direction it acts in is the only thing that changed.
+const CMD_ENVELOPE_RESERVE_BRAKING: f32 = 0.85;
+
+/// Ground speed below which no command counts as braking, m/s.
+///
+/// Without this the opposition test fires on the standing start it is meant
+/// to exclude. **Measured, not guessed:** a full-stick launch from rest rocks
+/// the board BACKWARD to -0.085 m/s between t = 0.504 s and t = 1.112 s
+/// before it moves off, so for six tenths of a second the forward stick
+/// genuinely opposes the motion and would have drawn the braking reserve.
+/// That would have changed ADR-0011's `full-stick` acceptance run — the one
+/// the estimator trim and [`PEAK_DEMAND_A_PER_UNIT_STICK`] are both pinned
+/// against — for a manoeuvre with no braking in it at all.
+///
+/// 0.25 m/s is about 3x that transient. Well under walking pace, so no stop
+/// a rider would call a stop begins below it, and well above anything the
+/// launch rock produces. The property that matters is pinned by
+/// `the_braking_reserve_is_not_spent_on_a_standing_start`.
+const BRAKING_RESERVE_MIN_SPEED_M_S: f32 = 0.25;
+
+/// The braking reserve's two bounds, enforced by the COMPILER.
+///
+/// Equal to [`CMD_ENVELOPE_RESERVE`] would make the constant inert; 1.0 would
+/// reproduce the over-command the reserve exists to remove, with only the
+/// direction it acts in changed. And a full braking command must not demand
+/// the whole envelope on its own, or there is nothing left for the
+/// disturbance the reserve is named for.
+const _: () = {
+    assert!(
+        CMD_ENVELOPE_RESERVE_BRAKING > CMD_ENVELOPE_RESERVE,
+        "CMD_ENVELOPE_RESERVE_BRAKING at or below CMD_ENVELOPE_RESERVE buys nothing -- \
+         delete it rather than shipping a constant that does not act"
+    );
+    assert!(
+        CMD_ENVELOPE_RESERVE_BRAKING < 1.0,
+        "an unshaped braking command is exactly the over-command ADR-0011's reserve \
+         was introduced to remove"
+    );
+    assert!(
+        CMD_ENVELOPE_RESERVE_BRAKING * PEAK_DEMAND_A_PER_UNIT_STICK < MAX_CURRENT_A,
+        "a full braking command must not demand the whole actuator envelope on its own"
+    );
+};
+
 /// The measurement [`CMD_ENVELOPE_RESERVE`] is derived FROM, in amps of peak
 /// fore/aft current demand per unit of fore/aft stick.
 ///
@@ -825,6 +907,18 @@ pub struct HostConfig {
     /// shipped constant.
     pub cmd_envelope_reserve: Option<f32>,
 
+    /// **Verification only.** Overrides [`CMD_ENVELOPE_RESERVE_BRAKING`] --
+    /// the reserve spent when the stick opposes the motion. Sweeping this is
+    /// how that constant's cost against ADR-0011's worst matrix point is
+    /// measured rather than assumed.
+    ///
+    /// `None` falls back to [`HostConfig::cmd_envelope_reserve`] if THAT is
+    /// set, and only then to the shipped constant. So `--cmd-reserve X` on
+    /// its own still scales the whole fore/aft command, which is what every
+    /// sweep written before braking had its own reserve assumes -- including
+    /// `--cmd-reserve 0` meaning "no stick at all".
+    pub cmd_envelope_reserve_braking: Option<f32>,
+
     /// **Verification only.** A scheduled external disturbance -- see
     /// [`Disturbance`]. `None` applies none, which is the deployed
     /// behaviour.
@@ -924,6 +1018,7 @@ impl Default for HostConfig {
             pitch_bias_deg: 0.0,
             free_run: false,
             cmd_envelope_reserve: None,
+            cmd_envelope_reserve_braking: None,
             disturbance: None,
             incline_deg: 0.0,
             trace_path: None,
@@ -1084,6 +1179,34 @@ fn shape_fore_aft_command(stick: f32, reserve: f32) -> f32 {
     stick * reserve
 }
 
+/// Like [`shape_fore_aft_command`], but spends the BRAKING reserve when the
+/// command opposes the current motion. See [`CMD_ENVELOPE_RESERVE_BRAKING`].
+///
+/// The opposition test is `stick * speed < 0`, deliberately the same one
+/// [`speed_capped_fore_aft`] already uses, so there is one definition of
+/// "this command opposes the motion" in this file rather than two that can
+/// drift apart.
+///
+/// **At rest the accelerating reserve applies** (`stick * 0.0 >= 0.0`), which
+/// is the case that matters for safety: full aft from a standstill is a
+/// backward standing start, not a stop, and it over-commands the envelope
+/// exactly as the forward one does. That is the mirror of the defect
+/// ADR-0011 was called for, and it keeps the accelerating reserve.
+fn shape_fore_aft_command_directional(
+    stick: f32,
+    reserve: f32,
+    braking_reserve: f32,
+    last_forward_speed_m_s: f32,
+) -> f32 {
+    if last_forward_speed_m_s.abs() > BRAKING_RESERVE_MIN_SPEED_M_S
+        && stick * last_forward_speed_m_s < 0.0
+    {
+        shape_fore_aft_command(stick, braking_reserve)
+    } else {
+        shape_fore_aft_command(stick, reserve)
+    }
+}
+
 /// The speed cap's authority ramp, as a function -- unchanged in behaviour,
 /// extracted so ADR-0011 criterion (a)'s reversal entry can be stated as a
 /// unit test as well as a sim run.
@@ -1228,6 +1351,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // HostConfig::cmd_envelope_reserve, which is how the constant's own
     // provenance measurement is taken).
     let cmd_envelope_reserve = cfg.cmd_envelope_reserve.unwrap_or(CMD_ENVELOPE_RESERVE);
+    // `--cmd-reserve` alone still means "scale the WHOLE fore/aft command by
+    // this", which is what every sweep that predates the braking reserve
+    // assumes -- `PEAK_DEMAND_A_PER_UNIT_STICK`'s provenance sweep among them,
+    // and `--cmd-reserve 0` as the way to say "no stick at all". Without this
+    // fallback a run asking for zero stick still gets a braking command the
+    // moment the board rolls backwards, which is exactly how it was found.
+    let cmd_envelope_reserve_braking = cfg
+        .cmd_envelope_reserve_braking
+        .or(cfg.cmd_envelope_reserve)
+        .unwrap_or(CMD_ENVELOPE_RESERVE_BRAKING);
     let pitch_bias_rad = cfg.pitch_bias_deg.to_radians();
     // Low-passed |proposed current| / MAX_CURRENT_A. Starts at zero, which is
     // true: an unarmed board at rest is asking for nothing.
@@ -1358,7 +1491,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // measured full-stick effect on this geometry is 0.03 deg of roll
         // (see ROLL_FULL_YAW_AUTHORITY_RAD) and which consumes no wheel
         // torque at all. Scaling it would cost steering feel to buy nothing.
-        let weight_shift_fore_aft = shape_fore_aft_command(stick_fore_aft, cmd_envelope_reserve);
+        //
+        // Braking spends its own reserve (CMD_ENVELOPE_RESERVE_BRAKING).
+        // Gated on `last_forward_speed_m_s` -- one cycle old, the same lag
+        // the speed cap below runs on, and for the same reason.
+        let weight_shift_fore_aft = shape_fore_aft_command_directional(
+            stick_fore_aft,
+            cmd_envelope_reserve,
+            cmd_envelope_reserve_braking,
+            last_forward_speed_m_s,
+        );
 
         // `arm`/`reset` bits: accepted and tracked, logged on change rather
         // than every tick. Neither gates anything yet -- the host self-arms
@@ -2105,9 +2247,90 @@ mod tests {
             assert_eq!(
                 shape_fore_aft_command(-u, CMD_ENVELOPE_RESERVE),
                 -shaped,
-                "u={u}: braking authority must be shaped exactly like driving authority; \
-                 a one-sided cap is an asymmetric-authority bug that only shows up under a \
-                 hard recovery in one direction"
+                "u={u}: at a given reserve the shaping must not depend on the SIGN of the \
+                 stick; a one-sided cap is an asymmetric-authority bug that only shows up \
+                 under a hard recovery in one direction"
+            );
+        }
+    }
+
+    /// The braking reserve is not a one-sided cap either -- the property the
+    /// test above protects still holds, one level up.
+    ///
+    /// `shape_fore_aft_command_directional` is asymmetric in
+    /// (stick, motion) TOGETHER, not in the sign of the stick: braking is a
+    /// relationship between the command and the motion. So flipping both
+    /// signs must give exactly the mirrored command, at every speed. A board
+    /// that stopped harder going forwards than backwards would be the
+    /// asymmetric-authority bug in a new place.
+    #[test]
+    fn the_braking_reserve_is_symmetric_under_flipping_stick_and_motion_together() {
+        for &v in &[0.0f32, 0.1, 0.25, 0.3, 1.0, 5.0, 9.34, 12.0] {
+            for &u in &[0.0f32, 0.1, 0.5, 1.0] {
+                let forward = shape_fore_aft_command_directional(
+                    u,
+                    CMD_ENVELOPE_RESERVE,
+                    CMD_ENVELOPE_RESERVE_BRAKING,
+                    v,
+                );
+                let mirrored = shape_fore_aft_command_directional(
+                    -u,
+                    CMD_ENVELOPE_RESERVE,
+                    CMD_ENVELOPE_RESERVE_BRAKING,
+                    -v,
+                );
+                assert_eq!(
+                    forward, -mirrored,
+                    "u={u}, v={v}: braking is not mirror-symmetric"
+                );
+            }
+        }
+    }
+
+    /// Below the speed gate NOTHING draws the braking reserve, whatever the
+    /// signs say.
+    ///
+    /// This is the property that keeps ADR-0011's `full-stick` acceptance run
+    /// -- the run the estimator trim and `PEAK_DEMAND_A_PER_UNIT_STICK` are
+    /// both pinned against -- bit-identical under any braking reserve. The
+    /// launch transient really does move the board backward under forward
+    /// stick (measured: to -0.085 m/s for six tenths of a second), so without
+    /// the gate that run would silently become a braking run.
+    #[test]
+    fn the_braking_reserve_is_not_spent_on_a_standing_start() {
+        // Every speed here is inside the gate, and -0.085 is the measured
+        // launch-transient extreme the gate exists to cover.
+        for &v in &[0.0f32, -0.085, 0.085, -0.24, 0.24] {
+            for &u in &[-1.0f32, -0.5, 0.5, 1.0] {
+                assert_eq!(
+                    shape_fore_aft_command_directional(
+                        u,
+                        CMD_ENVELOPE_RESERVE,
+                        CMD_ENVELOPE_RESERVE_BRAKING,
+                        v,
+                    ),
+                    shape_fore_aft_command(u, CMD_ENVELOPE_RESERVE),
+                    "u={u} at {v} m/s drew the braking reserve below the gate"
+                );
+            }
+        }
+    }
+
+    /// Opposing the motion above the gate DOES draw it, or the constant is
+    /// inert. The companion to the test above: together they pin both sides
+    /// of the gate rather than only the safe one.
+    #[test]
+    fn opposing_the_motion_above_the_gate_draws_the_braking_reserve() {
+        for &v in &[0.3f32, 1.0, 5.0, 9.34] {
+            assert_eq!(
+                shape_fore_aft_command_directional(
+                    -1.0,
+                    CMD_ENVELOPE_RESERVE,
+                    CMD_ENVELOPE_RESERVE_BRAKING,
+                    v,
+                ),
+                -CMD_ENVELOPE_RESERVE_BRAKING,
+                "full aft at {v} m/s forward did not draw the braking reserve"
             );
         }
     }
