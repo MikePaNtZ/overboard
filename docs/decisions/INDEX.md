@@ -33,7 +33,7 @@ primitive the org has.
 | [0008](ADR-0008-documentation-drift.md) | Two doc tiers; drift caught at PR time | Accepted | Anyone changing code a doc describes |
 | [0009](ADR-0009-fourth-repo-and-game-engineer-seat.md) | Fourth repo for the Unreal client, and a Game Engineer seat | Accepted | Where game/renderer code may live; the repo-boundary rule |
 | [0010](ADR-0010-game-wire-v1-fixed-for-the-launch-weekend.md) | Game wire v1, fixed by the COO for the launch weekend | Accepted ⏳ *expires Tue 2026-08-04* | `sim-host` and the UE client; the MuJoCo↔Unreal frame transform |
-| [0011](ADR-0011-hold-the-launch-until-the-board-stops-flipping.md) | Hold the launch until the board stops flipping at full stick | Accepted 🛑 *launch held; exit criteria provisional pending diagnosis* | Every role with Monday-dated work; all public stability claims |
+| [0011](ADR-0011-hold-the-launch-until-the-board-stops-flipping.md) | Hold the launch until the board stops flipping at full stick | Accepted 🛑 *launch held; exit criteria ratified 2026-08-02* | Every role with Monday-dated work; all public stability claims |
 
 **Roles:** [`ROLES.md`](ROLES.md) is the single home for the role list — `policy` parses it.
 `python3 .github/policy_check.py --who <path>` answers "who owns this?".
