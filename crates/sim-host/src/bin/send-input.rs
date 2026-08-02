@@ -44,50 +44,61 @@ const SCHEDULE: &[(f64, f64, f32, f32, f32, &str)] = &[
     (14.0, 15.0, 0.0, 0.0, 0.0, "release"),
 ];
 
-/// `--scenario s-curve`: hold a decent forward speed and weave, for watching the board CARVE
+/// `--scenario s-curve`: hold a decent forward speed and weave wide, for watching the board CARVE
 /// rather than checking one turn happens at all.
 ///
 /// [`SCHEDULE`] above is issue #161 W2's acceptance criterion and is deliberately left alone --
 /// it exercises accelerate / coast / reverse / turn once each, which is what that AC asks for and
 /// what any regression check should keep running. This one is a viewing scenario.
 ///
-/// Shape: build speed, then alternate steer around the original heading. The first and last lobes
-/// are HALF length so the weave is centred on the road rather than walking off it -- full lobes
-/// throughout would leave the board pointing 25-odd degrees off-axis at the end of every pass.
+/// Shape: build speed, then five alternating 2.6 s lobes around the original heading, entered and
+/// left on half-length lobes so the weave is centred on the road rather than walking off it.
+/// Measured result: 5 reversals, ~82 deg of heading peak-to-peak, +/-3 m of lateral excursion over
+/// ~74 m at ~5.2 m/s. The road at OB_City's spawn carries road-level surface out to roughly 8.6 m
+/// either side, so +/-3 m keeps a few feet of margin to the kerb.
 ///
-/// Sizing is measured, not guessed. `YAW_RATE_GAIN_RAD_S` is 1.5 rad/s at full steer and full
-/// authority; a live run at steer 0.6 with lateral 0.8 produced ~0.78 rad/s, i.e. `roll_authority`
-/// lands near 0.87 (well above its 0.35 floor) once the rider leans into it. At steer 0.5 that is
-/// ~0.64 rad/s, so a 0.8 s half-lobe swings ~29 deg and a 1.6 s full lobe swings ~59 deg through
-/// centre -- a weave that reads clearly on camera without leaving the carriageway.
-///
-/// The exit lobe is LONGER than the entry one (1.2 s against 0.8 s), which is not a typo. The
-/// ballast takes time to build roll, so a short lobe sees a lower `roll_authority` than the same
-/// fraction of a long one and under-turns: with entry and exit both at 0.8 s the left/right
-/// DURATIONS balanced exactly (4.0 s each) and the heading still finished +6.4 deg off, walking
-/// the board 5.8 m sideways over 50 m. Balanced time does not mean balanced yaw when the gain is
-/// state-dependent. 1.2 s over-corrected to -19.8 deg, so the null sits near 0.95 s.
-///
-/// **Do not try to tune the residual heading to zero.** This schedule is open loop and `sim-host`
-/// paces on the wall clock, missing roughly half its 500 Hz deadlines on a non-RT macOS host, so
-/// the arrival timing of these 50 Hz packets shifts run to run: two runs of the SAME schedule
-/// gave yaw extremes of (-28.2, +38.9) and (-33.7, +30.0) deg. The weave shape is repeatable; the
-/// exact end heading is not, and chasing it would be fitting noise. Expect to finish somewhere
-/// within roughly +/-15 deg of straight and drifting a few metres off the centre line.
+/// **Width comes from lobe DURATION, not from more steer.** Lateral excursion grows with the time
+/// spent holding a heading, so long gentle lobes push the board wide while keeping it pointed
+/// mostly down the road; cranking `steer` instead just aims it across the carriageway at the same
+/// offset. 2.6 s at steer 0.40 is the shape that reads as carving rather than swerving.
 ///
 /// `fore_aft` stays slightly positive (0.12) through the weave rather than zero: there is no outer
 /// velocity loop, so the board coasts rather than holding speed, and a small standing lean covers
 /// the losses without running away. Sign convention matches [`SCHEDULE`]: positive is right.
+///
+/// # The entry lobe is 1.17 s and that number is load-bearing
+///
+/// It sets where the whole oscillation is CENTRED, and the board's lateral drift follows directly
+/// from the mean heading -- ~74 m of travel at a 7 deg mean is ~9 m off line. Measured:
+///
+/// | entry lobe | mean yaw | lateral drift |
+/// |---|---|---|
+/// | 1.30 s | +7.0 deg | -10.0 m |
+/// | 1.17 s | -1.1 deg | +2.5 m |
+/// | 1.05 s | -6.9 deg | +11.8 m |
+///
+/// A quarter of a second swings the drift by twenty metres, so do not treat this as a free knob.
+///
+/// Two things that look like fixes and are not. Balancing the left/right DURATIONS exactly does
+/// not centre it -- `roll_authority` is state-dependent, so equal time does not buy equal yaw.
+/// And pre-loading roll before the first steer input (lean applied, steer still zero) makes it
+/// WORSE, not better: it hands the entry lobe more authority than the full lobes get, pushing the
+/// mean to +13 deg and the drift to -23 m. The entry lobe over-delivers; it does not under-deliver.
+///
+/// Finally: `sim-host` paces on the wall clock and misses roughly half its 500 Hz deadlines on a
+/// non-RT macOS host, so packet arrival shifts between runs. Expect a couple of metres of run-to-run
+/// variation in the final offset. Chasing the last metre is fitting noise; a genuinely
+/// drift-free weave needs closed-loop steering, which this open-loop sender deliberately is not.
 const S_CURVE_SCHEDULE: &[(f64, f64, f32, f32, f32, &str)] = &[
     (0.0, 1.0, 0.0, 0.0, 0.0, "settle"),
     (1.0, 4.0, 0.65, 0.0, 0.0, "lean forward (build speed)"),
-    (4.0, 4.8, 0.12, 0.7, 0.5, "weave right (half lobe, enter)"),
-    (4.8, 6.4, 0.12, -0.7, -0.5, "weave left"),
-    (6.4, 8.0, 0.12, 0.7, 0.5, "weave right"),
-    (8.0, 9.6, 0.12, -0.7, -0.5, "weave left"),
-    (9.6, 11.2, 0.12, 0.7, 0.5, "weave right"),
-    (11.2, 12.15, 0.12, -0.7, -0.5, "straighten (exit lobe)"),
-    (12.15, 15.0, 0.0, 0.0, 0.0, "release (coast straight)"),
+    (4.0, 5.17, 0.12, 0.7, 0.40, "weave right (half lobe, enter)"),
+    (5.17, 7.77, 0.12, -0.7, -0.40, "weave left"),
+    (7.77, 10.37, 0.12, 0.7, 0.40, "weave right"),
+    (10.37, 12.97, 0.12, -0.7, -0.40, "weave left"),
+    (12.97, 15.57, 0.12, 0.7, 0.40, "weave right"),
+    (15.57, 16.87, 0.12, -0.7, -0.40, "straighten (exit lobe)"),
+    (16.87, 19.2, 0.0, 0.0, 0.0, "release (coast straight)"),
 ];
 
 fn total_duration_s(schedule: Schedule) -> f64 {
