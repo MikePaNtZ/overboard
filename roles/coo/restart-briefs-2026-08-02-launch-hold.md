@@ -222,20 +222,51 @@ and (c) right now** on branch `feat/controls/cmd-envelope-reserve` — the deriv
 envelope reserve and the loss-of-authority warning, both in the same host file. A second
 session on the same work is a merge conflict at best and duplicated measurement at worst.
 
-Restart it once that PR is up. When you do, the brief needs these three, none of which are
-started:
+Restart it once that PR is up. Everything below is filed as an issue with acceptance criteria,
+so this brief is a reading order rather than the work itself:
 
-- **Braking far too weak and coasting far too free** (CEO feedback from driving). Real
-  onewheels brake hard through regen and have real rolling resistance; neither exists here.
-  This is the fore-aft path plus a drag term — the **same files** the in-flight agent is in,
-  so it must be sequenced after, not alongside.
-- **Turn radius ~2× tighter** (CEO drove it) and **reset** (criterion (e)). Both are
-  snapshotted on `feat/controls/turn-radius-and-reset` — **240 lines, UNVALIDATED**, written
-  by an agent that died on a session limit. **Do not merge it.** A COO agent is assessing it
-  now; the verdict lands before this restart.
+- **[#204] Braking far too weak and coasting far too free** (CEO feedback from driving). Real
+  onewheels brake hard through regen and have real rolling resistance; neither exists here —
+  two missing terms, not a tuning gap. **Sequence this last.** It is the only one that changes
+  what the board *does* rather than what it is *allowed* to do, and it carries a real tail:
+  braking loads the board the same way gravity does during a forward stop, which is exactly
+  the reverse-to-forward reversal case ADR-0011 names as the worst and untested. Stronger
+  braking may create a *new* way to invert the board, in the regime the launch is held over.
+- **Turn radius and reset** — the branch has now been assessed. Verdict below; it changes what
+  this brief asks for, so read it rather than the older "unvalidated, verify first" note.
 - **`damping="0.08"`** on `wheel_hinge` is the only load-bearing MJCF constant with no
   provenance comment, and it blocks propagating any speed-dependent number to the hardware
   spec. It belongs in the imperfection-profile conformance contract (fabe806).
+
+### `feat/controls/turn-radius-and-reset` — verdict: NEEDS-REWORK, do not merge
+
+Assessed 2026-08-02 against a build, a test run and a real end-to-end measurement, not by
+reading the diff. It delivers **one of its two headline features and zero of the other**, and
+merging it as-is would falsely close out an ADR-0011 exit criterion. Split into two issues so
+the good half is not held hostage by the missing one:
+
+- **[#202] Reset works — verified by measurement — but has zero tests.** Kick the board over,
+  reset, and pitch snaps from ~3.12 rad to ~0, `fallen` clears, position returns to (0,0), and
+  it stays stable through 5+ further seconds including a turn. The stub log line is genuinely
+  gone. **The blocker is a comment, not the code:** `host.rs` ~line 847 claims *"asserted by
+  measurement, not assumed — see this file's own reset measurements"* and **no such
+  measurements exist in that diff**. That is this org's signature failure — closing on a
+  plausible mechanism rather than a measurement — pre-loaded into the code where the next
+  reader cannot tell. The comment becomes true or it goes; there is no softened third option.
+- **[#201] Turn radius was never implemented.** `YAW_CURVATURE_PER_STEER_RAD_PER_M` is still
+  `0.15`, byte-identical to `master`. What the branch actually added is *measurement
+  scaffolding* — a `turnaround` scenario — and it is worth keeping. Using it: current radius
+  is **6.95 m** by circle-fit over 5251 points, residual std 4.7 cm. Target ~3.5 m.
+
+`cargo build`, `clippy --all-targets` and `cargo test --workspace` are clean on the branch
+(67/67 pre-existing tests, zero warnings) — but **it adds no tests of its own**, so green CI
+says nothing about either feature.
+
+**Conflict warning, and it is the sharpest one in the repo right now:** the reset-bit block
+sits inside `run()` in `crates/sim-host/src/host.rs` at ~lines 773–873, directly adjacent to
+the staleness gating and the stick-tuple computation — the exact region the in-flight
+`feat/controls/cmd-envelope-reserve` work is editing. Braking/coasting lands there too. All
+three must be sequenced through that file, never run in parallel.
 
 ---
 
