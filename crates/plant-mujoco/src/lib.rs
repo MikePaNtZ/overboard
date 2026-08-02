@@ -59,6 +59,9 @@ extern "C" {
     fn plant_mujoco_actuator_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_joint_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_joint_qposadr(model: *mut c_void, joint_id: c_int) -> c_int;
+    fn plant_mujoco_joint_dofadr(model: *mut c_void, joint_id: c_int) -> c_int;
+    fn plant_mujoco_set_qpos_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
+    fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -242,6 +245,64 @@ impl Plant {
         out
     }
 
+    /// Writes `values` into `mjData::qpos` starting at `adr` -- the ONLY write
+    /// path into the state vector this crate exposes, added for the kinematic
+    /// in-plant yaw injection (issue #163). See
+    /// [`Plant::set_qvel_range`] for the ordering rule both share.
+    ///
+    /// A RANGE write rather than a whole-array one on purpose: the caller
+    /// names exactly which joint's slots it means, so a mistake corrupts one
+    /// joint instead of the entire state.
+    ///
+    /// # Panics
+    /// If `adr + values.len()` exceeds `nq`.
+    pub fn set_qpos_range(&mut self, adr: usize, values: &[f64]) {
+        assert!(
+            adr + values.len() <= self.nq(),
+            "set_qpos_range: [{adr}, {}) is out of bounds for nq={}",
+            adr + values.len(),
+            self.nq()
+        );
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // the assertion above proves the write stays inside `mjData::qpos`.
+        unsafe {
+            plant_mujoco_set_qpos_range(
+                self.data,
+                adr as c_int,
+                values.as_ptr(),
+                values.len() as c_int,
+            )
+        };
+    }
+
+    /// Writes `values` into `mjData::qvel` starting at `adr` (issue #163).
+    ///
+    /// **Call this BEFORE [`Plant::step`], never after.** `mj_step` runs the
+    /// forward kinematics that turn a written `qpos`/`qvel` into a consistent
+    /// `xpos`/`xquat`/`xmat`, so anything read between the write and the next
+    /// step is stale -- the same before-vs-after-the-step seam
+    /// [`Plant::set_ctrl`] already documents.
+    ///
+    /// # Panics
+    /// If `adr + values.len()` exceeds `nv`.
+    pub fn set_qvel_range(&mut self, adr: usize, values: &[f64]) {
+        assert!(
+            adr + values.len() <= self.nv(),
+            "set_qvel_range: [{adr}, {}) is out of bounds for nv={}",
+            adr + values.len(),
+            self.nv()
+        );
+        // SAFETY: see `set_qpos_range`.
+        unsafe {
+            plant_mujoco_set_qvel_range(
+                self.data,
+                adr as c_int,
+                values.as_ptr(),
+                values.len() as c_int,
+            )
+        };
+    }
+
     /// `mjModel::opt.timestep`, seconds -- issue #107 (I1c) AC2: `hal`'s
     /// `wait_observe()` must step this plant `control_period / mj_timestep`
     /// times, and that ratio must be an exact integer. Read from the model
@@ -370,6 +431,27 @@ impl Plant {
         }
         // SAFETY: `id` was just resolved against this same model.
         let adr = unsafe { plant_mujoco_joint_qposadr(self.model, id) };
+        Some(adr as usize)
+    }
+
+    /// `mjModel::jnt_dofadr` for the joint named `name`, or `None` if the model
+    /// has no such joint -- the index into `Plant::qvel()`'s vector where that
+    /// joint's own degrees of freedom start.
+    ///
+    /// **Not interchangeable with [`Plant::joint_qposadr`].** A free joint is 7
+    /// `qpos` values but only 6 `qvel` ones, so the two addresses diverge for
+    /// every joint declared after one -- reaching `qvel` through a `qpos`
+    /// address silently writes the wrong slots. Added with the kinematic
+    /// in-plant yaw injection (issue #163), which writes both.
+    pub fn joint_dofadr(&self, name: &str) -> Option<usize> {
+        let name_c = CString::new(name).expect("joint name must not contain a NUL byte");
+        // SAFETY: see `joint_qposadr`.
+        let id = unsafe { plant_mujoco_joint_id(self.model, name_c.as_ptr()) };
+        if id < 0 {
+            return None;
+        }
+        // SAFETY: `id` was just resolved against this same model.
+        let adr = unsafe { plant_mujoco_joint_dofadr(self.model, id) };
         Some(adr as usize)
     }
 
