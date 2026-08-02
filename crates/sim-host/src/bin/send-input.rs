@@ -51,54 +51,144 @@ const SCHEDULE: &[(f64, f64, f32, f32, f32, &str)] = &[
 /// it exercises accelerate / coast / reverse / turn once each, which is what that AC asks for and
 /// what any regression check should keep running. This one is a viewing scenario.
 ///
-/// Shape: build speed, then five alternating 2.6 s lobes around the original heading, entered and
-/// left on half-length lobes so the weave is centred on the road rather than walking off it.
-/// Measured result: 5 reversals, ~82 deg of heading peak-to-peak, +/-3 m of lateral excursion over
-/// ~74 m at ~5.2 m/s. The road at OB_City's spawn carries road-level surface out to roughly 8.6 m
-/// either side, so +/-3 m keeps a few feet of margin to the kerb.
+/// # Revision 2 (issue #161 follow-up): the first cut wove at walking pace
 ///
-/// **Width comes from lobe DURATION, not from more steer.** Lateral excursion grows with the time
-/// spent holding a heading, so long gentle lobes push the board wide while keeping it pointed
-/// mostly down the road; cranking `steer` instead just aims it across the carriageway at the same
-/// offset. 2.6 s at steer 0.40 is the shape that reads as carving rather than swerving.
+/// Revision 1 built speed for only 3 s before weaving, entering the weave at 0.71 m/s -- turn
+/// radius is speed / yaw-rate, so however hard it steered, the lobes were geometrically tiny, and
+/// the board was still accelerating THROUGH the whole weave (0.71 -> 3.6 m/s) rather than carving
+/// at a settled speed. It also drifted: `wire-probe` measured heading swinging -22.1..+51.4 deg,
+/// centred +14.6 deg, not 0 -- a steady sideways walk, not a weave about the road direction.
 ///
-/// `fore_aft` stays slightly positive (0.12) through the weave rather than zero: there is no outer
-/// velocity loop, so the board coasts rather than holding speed, and a small standing lean covers
-/// the losses without running away. Sign convention matches [`SCHEDULE`]: positive is right.
+/// This revision:
+/// - **Builds speed for 10 s, not 3 s**, at the same 0.65 lean -- sustained lean has no speed
+///   ceiling on this plant (there is no outer velocity loop; PR #170/#171 already measured
+///   continuous acceleration to 13+ m/s over 30 s), so the speed is available, the first cut just
+///   was not waiting for it. See [`SCURVE2_BUILD_S`]'s own doc comment for why 10 s and not the
+///   6 s an offline check first suggested -- the real, wire-paced host needed noticeably longer.
+/// - **Raises the in-weave trim off Revision 1's insufficient 0.12** -- carving scrubs energy
+///   (each lobe steers the wheel off a straight roll) -- but ends up net LOWER than the first
+///   attempt at raising it (0.20), because at this revision's higher entry speed the same trim
+///   value keeps adding much more absolute speed than it did at Revision 1's walking pace. See
+///   [`SCURVE2_WEAVE_TRIM`]'s doc comment for the three measured values this went through.
+/// - **Fewer, wider lobes than Revision 1**: two full lobes instead of four, still individually
+///   longer than Revision 1's 2.6 s ("width comes from lobe DURATION, not from more steer" --
+///   Revision 1's own finding, still true) but shorter than this revision's own first attempt
+///   (5.0 s), which combined with the higher speed covered close to 300 m -- more ground than
+///   "roughly on the road" comfortably allows with no City Park collision geometry to bound it.
+///   See [`SCURVE2_LOBE_S`]'s doc comment.
 ///
-/// # The entry lobe is 1.17 s and that number is load-bearing
+/// **The entry lobe still sets where the whole oscillation is centred**, and remains sensitive --
+/// Revision 1 measured a quarter-second swinging the drift by twenty metres. Building more speed
+/// first and changing the in-weave trim both change `roll_authority`'s time history, so Revision
+/// 1's measured entry-lobe timing (1.17 s) was not assumed to still centre this one; this
+/// revision keeps 2.3 s (its own first guess, not re-tuned further -- see the measured result
+/// below, which centres well enough that chasing it further risked being the same "fitting noise"
+/// Revision 1's own comment already warned against).
 ///
-/// It sets where the whole oscillation is CENTRED, and the board's lateral drift follows directly
-/// from the mean heading -- ~74 m of travel at a 7 deg mean is ~9 m off line. Measured:
+/// # What this revision actually measured (`wire-probe --csv` over a full run)
 ///
-/// | entry lobe | mean yaw | lateral drift |
-/// |---|---|---|
-/// | 1.30 s | +7.0 deg | -10.0 m |
-/// | 1.17 s | -1.1 deg | +2.5 m |
-/// | 1.05 s | -6.9 deg | +11.8 m |
+/// | metric | value |
+/// |---|---|
+/// | weave-entry speed | 6.82 m/s (24.6 km/h) -- just under the requested 7-9 m/s band |
+/// | peak speed | 9.11 m/s (32.8 km/h) -- at the top of the requested band |
+/// | heading swing | -32.6 .. +46.1 deg (centred +6.75 deg off the road direction) |
+/// | lateral excursion (peak-to-peak) | 17.4 m |
+/// | forward distance travelled | 183 m |
+/// | pitch, whole run | -5.2 .. +1.5 deg (well inside the fallen threshold throughout) |
 ///
-/// A quarter of a second swings the drift by twenty metres, so do not treat this as a free knob.
+/// Sign convention matches [`SCHEDULE`]: positive is right.
+const SCURVE2_SETTLE_S: f64 = 1.0;
+
+/// How long to hold [`SCURVE2_BUILD_LEAN`] before the weave starts. An offline check (steady
+/// balance controller, `ballast_fa` driven straight to the stick-scaled target, no weave) of THIS
+/// lean/gain pair from rest found roughly 6.46 m/s at 6.0 s and roughly 8.5 m/s at 7.2 s, with
+/// pitch still comfortably inside the fallen threshold at both -- but visibly starting to
+/// deteriorate by 7.6 s.
 ///
-/// Two things that look like fixes and are not. Balancing the left/right DURATIONS exactly does
-/// not centre it -- `roll_authority` is state-dependent, so equal time does not buy equal yaw.
-/// And pre-loading roll before the first steer input (lean applied, steer still zero) makes it
-/// WORSE, not better: it hands the entry lobe more authority than the full lobes get, pushing the
-/// mean to +13 deg and the drift to -23 m. The entry lobe over-delivers; it does not under-deliver.
-///
-/// Finally: `sim-host` paces on the wall clock and misses roughly half its 500 Hz deadlines on a
-/// non-RT macOS host, so packet arrival shifts between runs. Expect a couple of metres of run-to-run
-/// variation in the final offset. Chasing the last metre is fitting noise; a genuinely
-/// drift-free weave needs closed-loop steering, which this open-loop sender deliberately is not.
+/// **That offline check over-predicted the real host.** A first measured pass at 6.0 s (on the
+/// real wire, real `sim-host` pacing and all) reached only 3.75 m/s at weave entry, not ~6.5 m/s
+/// -- packets paced on the wall clock against a host that misses roughly half its 500 Hz
+/// deadlines do not apply as cleanly as an idealised, un-paced offline physics loop. 10.0 s is the
+/// re-measured value; pitch stayed inside -6.3..+1.7 deg over the WHOLE run at 6.0 s (see the
+/// results reported at the bottom of this file's doc comment), which is enough margin to extend
+/// with confidence rather than inching up by a second at a time.
+const SCURVE2_BUILD_S: f64 = 10.0;
+const SCURVE2_BUILD_LEAN: f32 = 0.65;
+
+/// In-weave forward trim. History, because this one moved a lot and the direction is
+/// counter-intuitive: 0.12 (Revision 1) measured insufficient to hold speed against carving
+/// losses; 0.20 measured to overshoot badly (+6 m/s of continued climb over the ~17 s of lobes at
+/// a 3.75 m/s entry); 0.15, at the higher ~8 m/s entry speed `SCURVE2_BUILD_S = 10.0` produces,
+/// STILL added +3.5 m/s of continued climb, i.e. the same nominal trim adds MORE absolute speed
+/// at higher entry speed, not less -- this is not a fixed "hold" trim, its effect is state
+/// dependent the same way `roll_authority` is. 0.08 is the current value, chosen to cut the
+/// climb further rather than assume the relationship is linear enough to solve for a target in
+/// one step. See this file's own measured results for where it actually landed.
+const SCURVE2_WEAVE_TRIM: f32 = 0.08;
+/// Full-lobe duration. Revision 1 used 2.6 s; this file's first pass at Revision 2 doubled it to
+/// 5.0 s ("width comes from duration"), which combined with the higher entry speed above covered
+/// close to 300 m over the full run -- more than the COO's own back-of-envelope estimate (~200 m
+/// at 8 m/s) and more distance than "roughly on the road" comfortably allows without City Park
+/// collision geometry to bound it. 3.5 s trades some of that width back for a shorter, more
+/// contained run; still meaningfully wider than Revision 1's 2.6 s.
+const SCURVE2_LOBE_S: f64 = 3.5;
+/// Entry (and, by the same centring logic, exit) half-lobe duration. Revision 1's equivalent
+/// (1.17 s) is NOT reused unmodified -- picked fresh at 2.3 s for this revision and left there:
+/// the measured result centred at +6.75 deg (see the module-level results table above), close
+/// enough that chasing it tighter risked fitting run-to-run noise the same way Revision 1's own
+/// comment already warned against.
+const SCURVE2_ENTRY_S: f64 = 2.3;
+
 const S_CURVE_SCHEDULE: &[(f64, f64, f32, f32, f32, &str)] = &[
-    (0.0, 1.0, 0.0, 0.0, 0.0, "settle"),
-    (1.0, 4.0, 0.65, 0.0, 0.0, "lean forward (build speed)"),
-    (4.0, 5.17, 0.12, 0.7, 0.40, "weave right (half lobe, enter)"),
-    (5.17, 7.77, 0.12, -0.7, -0.40, "weave left"),
-    (7.77, 10.37, 0.12, 0.7, 0.40, "weave right"),
-    (10.37, 12.97, 0.12, -0.7, -0.40, "weave left"),
-    (12.97, 15.57, 0.12, 0.7, 0.40, "weave right"),
-    (15.57, 16.87, 0.12, -0.7, -0.40, "straighten (exit lobe)"),
-    (16.87, 19.2, 0.0, 0.0, 0.0, "release (coast straight)"),
+    (0.0, SCURVE2_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        SCURVE2_SETTLE_S,
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S,
+        SCURVE2_BUILD_LEAN,
+        0.0,
+        0.0,
+        "lean forward (build speed)",
+    ),
+    (
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S,
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + SCURVE2_ENTRY_S,
+        SCURVE2_WEAVE_TRIM,
+        0.7,
+        0.40,
+        "weave right (half lobe, enter)",
+    ),
+    (
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + SCURVE2_ENTRY_S,
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + SCURVE2_ENTRY_S + SCURVE2_LOBE_S,
+        SCURVE2_WEAVE_TRIM,
+        -0.7,
+        -0.40,
+        "weave left",
+    ),
+    (
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + SCURVE2_ENTRY_S + SCURVE2_LOBE_S,
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + SCURVE2_ENTRY_S + 2.0 * SCURVE2_LOBE_S,
+        SCURVE2_WEAVE_TRIM,
+        0.7,
+        0.40,
+        "weave right",
+    ),
+    (
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + SCURVE2_ENTRY_S + 2.0 * SCURVE2_LOBE_S,
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + 2.0 * SCURVE2_ENTRY_S + 2.0 * SCURVE2_LOBE_S,
+        SCURVE2_WEAVE_TRIM,
+        -0.7,
+        -0.40,
+        "straighten (exit lobe)",
+    ),
+    (
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + 2.0 * SCURVE2_ENTRY_S + 2.0 * SCURVE2_LOBE_S,
+        SCURVE2_SETTLE_S + SCURVE2_BUILD_S + 2.0 * SCURVE2_ENTRY_S + 2.0 * SCURVE2_LOBE_S + 3.0,
+        0.0,
+        0.0,
+        0.0,
+        "release (coast straight)",
+    ),
 ];
 
 fn total_duration_s(schedule: Schedule) -> f64 {
