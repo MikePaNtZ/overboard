@@ -71,7 +71,95 @@ claim ("the board never became unstable at any aggression level tested") is fals
 be reinstated in any softened form; measurements taken against the de-rated delivery support
 nothing and may not be cited.
 
-### Exit criteria — RATIFIED 2026-08-02, after diagnosis
+### ⚠️ SECOND RATIFICATION 2026-08-02 — the exit bar below is RESPECIFIED
+
+**Read this before the criteria list.** The fix this ADR specified was built, measured and
+merged (#205). It **met (b), (c), (a)-1 and (a)-2** — including the full reverse-to-forward
+reversal at speed, which this ADR records as never having been tested and names the worst
+case. It **provably cannot meet (f) or (a)-3 at any value of the constant.**
+
+Two criteria therefore change. Adjudicated by the Oracle; the reasoning is recorded because
+"the criterion was wrong" is exactly what a party that failed a criterion would say, and that
+objection deserves an answer rather than a ruling.
+
+**(f) was mis-specified, and one identity proves it.** This ADR states lean sensitivity as
+**5.84° per m/s², fixed by geometry**. One radian per g is **57.2958 / 9.80665 = 5.8425° per
+m/s²**. The measured `est − truth` residual slope is ~5.8° per m/s². *These are the same
+number because they are the same physics:* the lean an inverted pendulum needs to sustain
+acceleration `a` is `atan(a/g) ≈ a/g`, which is exactly the apparent-vertical tilt a
+complementary filter reads.
+
+So the estimator is not carrying an error that flatters the controller. It is **inadvertently
+implementing the textbook balance-vehicle solution** — the same lean-into-acceleration a
+Segway performs deliberately. `--pitch-source truth` does not de-bias the loop; it **deletes
+the only mechanism generating the physically-required lean**, leaving a pitch-only regulator
+with 4 cm of ballast trying to buy 17 cm of CoM offset. That controller inverting at every
+stick fraction down to 0.05 is what the physics predicts. The criterion was measuring a
+different, broken controller.
+
+**What does NOT follow: ±0.25° does not become the new criterion.** The measured static-error
+tolerance band is ±0.25° (inverts at ±0.5°). Promoting it to a bar would be **deriving the
+acceptance number from what happened to pass** — the precise move (f) exists to forbid.
+Record it as a *measured characterisation*, never as a threshold. A tolerance requirement
+comes from the environment, not from the measurement.
+
+**(f) is replaced by freeze-and-pin.** The pass currently rests on an unversioned accident;
+promoting it to a design element is the only honest way to stand on it:
+
+- **(f1)** Regression-test the residual: slope ≈ 1 rad/g and static offset inside a pinned
+  band, so any estimator or tuning change that moves the trim **breaks CI** instead of
+  silently re-flipping the board.
+- **(f2)** Pin the reserve's **derivation, not just its value.** The 41.97 A/unit slope was
+  measured at the current operating trim, so the constant is **trim-derived, not
+  geometry-derived** — describing it otherwise is a rationalisation. Assert the measured slope
+  in the harness.
+- **(f3)** Longer-term, bundled with the headroom fix: make the lean setpoint explicit as
+  `θ_ref = atan(a_des / g)` feedforward. At that point (f)'s original truth-fed reading
+  becomes **satisfiable, and is reinstated.**
+
+**(a)-3 and static robustness move to the hardware gate — verbatim, not deleted.** 201°/s of
+imparted pitch rate against a KD channel affording ~76°/s is a geometry and actuator fact that
+no software meets, and this ADR already concluded the undersized elements are **ballast stroke
+and CoM height**. For hardware the mounting, calibration and thermal budget is comfortably
+≥1°, and the system fails that — which confirms the hardware finding rather than excusing it.
+
+Keeping them on the *game* gate would convert this hold into "redesign the physical board
+before shipping a game", which is not what it was called for. The hold was called because the
+first thing a new player does inverted the board. That is fixed and verified.
+
+**The split is honest only under all three conditions. Drop any one and it is the softening
+move this ADR forbids:**
+
+1. **Moved, not dropped.** Both criteria land on the hardware/bench gate verbatim, cited as
+   currently failing, with their measured numbers, in the same pass as this amendment.
+2. **The authored world is constrained to what the controller survives, and the constraint is
+   encoded as a checkable asset rule** — not a hope. The board rides out ~1 mm at a calm point,
+   so terrain must be analytically smooth and authored inclines must stay well inside the
+   measured static tolerance (a 0.5° slope is an effective static pitch disturbance).
+3. **The loss-of-authority warning ships** as the in-game surfacing of the cliff. 2.868 s of
+   lead is adequate.
+
+**The deferred headroom-based fix is not required to clear this hold** — demanding a never-run
+feedback path be designed and validated *under* a launch hold trades a measured, bounded risk
+for an unmeasured one built under schedule pressure. But the 0.80 reserve is open-loop and
+operating-point dependent, so it is honest **only for the frozen world and the frozen trim**.
+The headroom fix is therefore a **named blocking prerequisite on the next boundary**: any world
+expansion beyond the constrained terrain, any retune that moves the pinned trim band, and the
+hardware gate. Named here rather than left as a deferred aspiration.
+
+**Strongest counter-argument, recorded rather than buried:** (f) exists precisely to stop this
+conversation, and accepting "the criterion was wrong" from the party that failed it is a
+corrosive precedent. It was not accepted on their say-so. The 1-rad/g identity is independently
+checkable arithmetic; the implementer **volunteered** the failing result under the robustness
+reading the criterion was reaching for, which a party steering toward a ship would have
+omitted; and the harness reproduced this ADR's own independently-established figures
+(saturation 4.920 s vs 4.92 s, `FALLEN` 5.868 s vs 5.87 s). The finding survives every reading
+of the criterion. The precedent worry is answered by the three conditions above being *harder*
+than a quiet pass, not softer.
+
+---
+
+### Exit criteria — FIRST RATIFICATION 2026-08-02, after diagnosis (see respecification above)
 
 The provisional criteria in the first revision of this ADR asked whether the −10° was real
 pitch or estimator error. **It is real physics.** Estimated and true pitch never diverge by
