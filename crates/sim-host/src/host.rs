@@ -29,6 +29,74 @@
 //! driverless-plant, `pitch_ref`-only inner loop but became actively wrong
 //! the moment this file switched to a ridden plant with a driven ballast --
 //! nothing in this loop opposes net forward motion, and nothing should.
+//!
+//! # Issue #163: the heading now lives INSIDE the plant
+//!
+//! This host used to carry a synthetic heading alongside the physics: a
+//! `yaw_rad` integrated from `steer`, composed onto MuJoCo's truth quaternion
+//! on the way out, with the ground path dead-reckoned from real forward speed
+//! projected along it. MuJoCo's own board only ever translated along one axis
+//! underneath, so its true position bore no relation to what a renderer drew
+//! -- which is why the drivable corridor had to be a soft host-side lean
+//! rather than actual collision geometry.
+//!
+//! The same steering law now writes its increment straight into the plant's
+//! free joint before each physics step (see the yaw block at the bottom of
+//! [`run`], and `sim_backend::SimBackend::inject_kinematic_yaw`). **The
+//! collision goal never required yaw to be physically GENERATED -- only
+//! MuJoCo's pose to be AUTHORITATIVE**, and those are different problems.
+//! Steering is still commanded rather than emergent: no tire model produces
+//! this turn, and the `Playable Sim` declaration keeps saying so. But
+//! position, ground path and every contact are now simulated at that heading,
+//! nothing is dead-reckoned, and the MJCF is untouched.
+//!
+//! ## What it measured
+//!
+//! Every figure below is master vs this branch, run through
+//! `--scripted-scenario` (issue #190/#191's sim-time-indexed player, so the
+//! input path has no socket and no wall clock in it) and decoded off the wire
+//! at full float precision -- not `wire-probe --csv`, whose 6-decimal
+//! rounding cannot demonstrate bit identity.
+//!
+//! **Zero steer is bit-identical.** `--startup-kick` with no scenario and no
+//! sender, so `steer` is 0 for the whole run; 7,854 common ticks. `pitch`,
+//! `quat` (all four), `wheel_angle`, `wheel_rate`, `motor_current`,
+//! `rider_fore_aft`, `rider_lateral`, `pos_z`, `sim_time` and `flags` are ALL
+//! bit-identical. The plant is untouched, which is exactly what the
+//! `dyaw == 0` gate exists to guarantee.
+//!
+//! Only `pos_x`/`pos_y` differ, which is the point of the change: those are
+//! where the dead-reckoned path used to be reported and are now MuJoCo's own.
+//! **The gap between them is the size of the error the old design was
+//! shipping**: 14.7 mm over 7.37 m of travel (0.2%) in x, and 8.2 um in y --
+//! where dead reckoning reported y as exactly 0.0, because it could not
+//! represent lateral motion at all.
+//!
+//! **With steer on, the plant lands where the reckoning said it would.**
+//! `--scripted-scenario default`, 9,000 ticks, tick-for-tick: `pitch` differs
+//! by at most 2.1e-9 rad (1.2e-7 deg), `wheel_rate` by 4.8e-7 rad/s,
+//! `motor_current` by 3.9e-7 A, the largest quaternion component by 8.3e-5,
+//! and the commanded heading by 1.7e-4 rad. The path itself: 4.4 cm over a
+//! 16 m run (0.28%) in x, 1.5 cm in y. The pitch envelope is IDENTICAL to
+//! master's on the same schedule, -5.842..+6.390 deg -- the same envelope the
+//! corridor-brake run recorded, and well inside the 10 deg carving limit.
+//!
+//! The reconstruction that comparison rests on is itself checked: replaying
+//! the deleted dead-reckoning integral offline against master's own run
+//! reproduces master's reported track to 0.0000 m, so it is the deleted
+//! block and not an approximation of it. Truth attitude tracks the commanded
+//! heading to 0.19 deg, and master's own truth attitude differs from its
+//! `yaw_rad` by the same 0.19 deg -- that residual is the plant's own
+//! contact-driven yaw, not the injection fighting the physics.
+//!
+//! **The `s-curve` flip (issue #190) is untouched.** Driven deterministically,
+//! master and branch cross 20, 90 and 170 deg of pitch on the IDENTICAL tick
+//! (seq 2933 / t = 5.868 s, seq 3070, seq 3216), and every physics column is
+//! bit-identical for the first 7,375 ticks -- the whole zero-steer portion of
+//! that run, which is where the flip happens. The two traces only separate
+//! once `steer` goes non-zero at t = 14.75 s, by which point both boards are
+//! already tumbling and diverge chaotically. That flip is issue #190's, and
+//! nothing here moves it.
 
 use crate::pacer::Pacer;
 use crate::wire::{self, InputIn, StateOut};
@@ -90,6 +158,13 @@ const BALLAST_RANGE_M: f32 = 0.05;
 /// Non-physical game channel, SHAPED by [`ROLL_FULL_YAW_AUTHORITY_RAD`]
 /// below -- the simulated wheel is a cylinder and cannot physically carve
 /// (issue #161). The real lean-steer controller is Tuesday.
+///
+/// **Unchanged in value and in law by issue #163's kinematic in-plant yaw
+/// injection.** What changed is only where the resulting heading is APPLIED:
+/// this same `steer * k * v * roll_authority` rate is now integrated into
+/// MuJoCo's own free joint before each physics step, instead of being
+/// composed onto the plant's output afterwards. The steering feel is signed
+/// off and must not move; see [`run`]'s own yaw block.
 ///
 /// # Revision history (moved through 1.5 -> 3.0 -> speed-proportional)
 ///
@@ -244,38 +319,27 @@ pub const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
 /// clearly down", not precise enough to gate a published claim.
 const FALLEN_PITCH_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
 
-/// Soft, host-side drivable-corridor bounds in the DEAD-RECKONED frame
-/// (`dr_pos_x_m`/`dr_pos_y_m` -- see the PARTIALLY SYNTHETIC POSITION block
-/// below), NOT MuJoCo collision geometry -- issue #161 follow-up, item 4:
-/// the CEO wants the board to stop passing through walls, curbs and map
-/// boundaries.
+/// Soft, host-side drivable-corridor bounds, checked against **MuJoCo's own
+/// truth position** -- issue #161 follow-up, item 4: the CEO wants the board
+/// to stop passing through walls, curbs and map boundaries.
 ///
-/// **Why MuJoCo-frame collision geometry cannot work here (Option A per the
-/// COO, not Option B, and NOT today):** since the dead-reckoning fix
-/// (issue #161/#169, PR #172), `pos`'s x/y on the wire -- and therefore
-/// what the renderer shows on screen -- are dead-reckoned from real forward
-/// speed projected along the SYNTHETIC yaw heading. MuJoCo's own plant
-/// never turns; it only ever translates along its own -X axis. So the
-/// position MuJoCo's physics engine actually occupies bears no relation to
-/// where the board appears on screen, and collision geometry added to the
-/// MJCF would be tested against the WRONG position entirely -- the board
-/// would bounce off invisible walls in the wrong place and pass through
-/// the visible ones anyway. This is the accumulated cost of the
-/// yaw-as-overlay design (the right call at the time; it got a launch demo
-/// shipped), and boundaries are where it stops paying for free.
+/// **CHANGED (issue #163, kinematic in-plant yaw injection): this used to be
+/// checked in the DEAD-RECKONED frame, and no longer is.** The original
+/// version of this comment explained at length why MuJoCo-frame bounds could
+/// not work: `pos`'s x/y on the wire were dead-reckoned from real forward
+/// speed projected along a synthetic heading, MuJoCo's own plant never turned
+/// (it only ever translated along its own -X axis), so the position the
+/// physics engine occupied bore no relation to where the board appeared on
+/// screen. That is no longer true. The host now rotates the board's free
+/// joint inside the plant every tick, so MuJoCo integrates the ground path
+/// itself and its truth position IS the on-screen position. These bounds are
+/// therefore now checked against `truth_pos_x_m`/`truth_pos_y_m` directly.
 ///
-/// The real fix (Option B, the COO's own framing) is making yaw physical --
-/// the board genuinely turning in MuJoCo so its true position is 2D and
-/// collision geometry can be tested against it directly. That would ALSO
-/// delete the dead-reckoning `Playable Sim` declaration line entirely,
-/// since the path would stop being invented -- an honesty improvement, not
-/// just an engineering one. It is also a change to how the plant moves,
-/// the day before launch, against a control law tuned for the 1-D case --
-/// explicitly NOT attempted here. This corridor is the stopgap (Option A):
-/// when the dead-reckoned position leaves it, arrest forward motion. Not
-/// real collision -- the board still passes through the VISUAL geometry --
-/// but it stops travelling further away from the road, which is the
-/// visible problem this fixes today.
+/// This remains a SOFT corridor -- a lean applied against travel, not a
+/// contact -- because the model still declares no wall geometry. What has
+/// changed is that adding some would now work: collision geometry in the MJCF
+/// would be tested against the same position the renderer draws, which is the
+/// thing the dead-reckoned design foreclosed.
 ///
 /// Derived from the actual UE <-> MuJoCo origin mapping the COO supplied
 /// (`OB_City`'s `BoardActor`, printed on launch: "MuJoCo origin -> UE
@@ -297,13 +361,25 @@ const FALLEN_PITCH_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
 /// m for the measurement run and `send-input`'s `default` schedule (the
 /// stable, already-validated AC schedule -- not `s-curve`) driven straight
 /// at it. The edge-triggered log fired exactly once, at `(-3.0, 0.0)`;
-/// `dr_pos_x_m` then overshot to -10.3 m under residual momentum before the
+/// the reported position (then dead-reckoned, now truth) overshot to -10.3 m
+/// under residual momentum before the
 /// brake arrested it, settling to a steady -9.4..-10.3 m band for the rest
 /// of the run rather than continuing to run away -- an active brake against
 /// momentum, not a teleport back to the line, exactly as designed. Pitch
 /// stayed within -5.8..+6.4 deg throughout: the corridor brake itself did
 /// not destabilize the board. Bound reverted to -700.0 after the
 /// measurement.
+///
+/// **Re-verified after the switch to truth position** (issue #163), by the
+/// identical method -- `CORRIDOR_X_MIN_M` temporarily tightened to -3.0 m,
+/// `send-input`'s `default` schedule driven at it, bound reverted afterwards.
+/// The edge-triggered log fired exactly once, again at `(-3.0, 0.0)`; truth
+/// `x` overshot to -7.6 m under residual momentum, then held at -7.3 m for
+/// the rest of the run, and pitch stayed within -4.7..+6.2 deg. Same
+/// behaviour, and the overshoot differs from the -10.3 m above only because
+/// the board is carrying a different speed at the crossing -- `send-input`
+/// is a wall-clock sender against a tick-paced host, so no two runs of the
+/// same schedule cross the line at the same moment.
 const CORRIDOR_X_MIN_M: f64 = -700.0;
 const CORRIDOR_X_MAX_M: f64 = 50.0;
 const CORRIDOR_HALF_WIDTH_M: f64 = 8.6;
@@ -494,20 +570,41 @@ impl From<InputIn> for LatestInput {
 /// Spawns the control loop on its own dedicated thread (issue #161: "not on
 /// the main thread") and returns the join handle. The caller decides what to
 /// do with the calling thread -- `src/bin/sim-host.rs` just joins it.
-/// Hamilton product of two `[w, x, y, z]` quaternions.
+/// Body-frame pitch and roll, radians, from the `frame` body's world rotation
+/// matrix (row-major `xmat`) and the world-frame heading currently baked into
+/// the plant.
 ///
-/// Order is `a` then `b` read right-to-left: the result applies `b`'s rotation first, then `a`'s.
-/// Used to compose the synthetic heading (`a`) onto MuJoCo's truth attitude (`b`) -- see the call
-/// site for why that order, and not the other one, is the correct composition.
-fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    let [aw, ax, ay, az] = a;
-    let [bw, bx, by, bz] = b;
-    [
-        aw * bw - ax * bx - ay * by - az * bz,
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-    ]
+/// Pitch is `atan2(R[0][2], R[2][2])` -- exactly
+/// `sim/scenarios/impulse_response.py::frame_pitch_rad`'s formula against the
+/// identical array, nose-up positive per ICD 10.1 -- and roll is the same
+/// atan2-of-a-tilted-axis derivation applied to the Y-Z plane (about local X)
+/// instead of the X-Z plane (about local Y). Both are exact only when the
+/// OTHER angle is near zero: 3D rotations do not commute and this is not a
+/// true Euler decomposition. Acceptable for the roll-shaped yaw limiter's
+/// "cheap stopgap" status (issue #161 W2 item 4); the real lean-steer
+/// controller needs a better one.
+///
+/// **`yaw_rad` must be removed FIRST, and that is why this function exists**
+/// (issue #163). Those formulas assume the world x/y axes still line up with
+/// the body's, which was true only while the board had no yaw freedom at all
+/// -- precisely what the kinematic in-plant yaw injection changed. `xmat` is
+/// now `Rz(yaw) * R_body`, whose third column mixes body pitch and body roll
+/// by the heading angle, so after a 90 deg turn the raw formulas would report
+/// the board's ROLL as its PITCH and `FALLEN` would fire on an upright board.
+/// Left-multiplying by `Rz(-yaw)` -- which is all the two `deyawed_*` lines
+/// are -- recovers the body-frame values the ICD and the roll gate both mean.
+///
+/// At `yaw_rad == 0` this reduces to `1.0 * xmat[k] + 0.0 * xmat[j]`, i.e.
+/// bit-identically the pre-#163 expressions; `deyaw_at_zero_yaw_is_a_no_op`
+/// pins that.
+fn body_pitch_roll_rad(xmat: &[f64; 9], yaw_rad: f32) -> (f32, f32) {
+    let (yaw_s, yaw_c) = yaw_rad.sin_cos();
+    let deyawed_02 = yaw_c * xmat[2] as f32 + yaw_s * xmat[5] as f32;
+    let deyawed_12 = -yaw_s * xmat[2] as f32 + yaw_c * xmat[5] as f32;
+    (
+        deyawed_02.atan2(xmat[8] as f32),
+        deyawed_12.atan2(xmat[8] as f32),
+    )
 }
 
 pub fn spawn(cfg: HostConfig) -> std::thread::JoinHandle<Result<RunSummary, HostError>> {
@@ -585,6 +682,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // finished, so a later rising edge can retrigger it.
     let mut fall_kick_window_start_s: Option<f64> = None;
     let mut prev_outside_corridor = false;
+    // The heading this host has injected into the plant so far, radians,
+    // unbounded (it is a running total, not an angle in `[-pi, pi]`) -- the
+    // integral of the yaw law at the bottom of the loop body. Two readers:
+    // the state-out wire's `yaw_rad` field, whose contract is exactly this
+    // continuous running total (see `wire::StateOut::yaw_rad`), and the
+    // attitude de-rotation below, which needs to know how much world-frame
+    // yaw is currently baked into MuJoCo's own quaternion before it can read
+    // body pitch and roll back out of it.
     let mut yaw_rad: f32 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
     // Previous tick's ground speed, m/s, signed (positive = forward) -- used
@@ -594,18 +699,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // cycle old by construction, the same lag `last_amps` already has for the
     // command-feedforward estimator.
     let mut last_forward_speed_m_s: f32 = 0.0;
-    // Dead-reckoned game-ground path -- see the PARTIALLY SYNTHETIC POSITION
-    // block further down for why this exists and what it costs. f64: this
-    // accumulates every tick for the whole run, and f32 would visibly drift
-    // over a multi-minute session the way `wheel_angle_rad` (f32, but reset
-    // every run and never compared against a long-run reference) does not
-    // need to guard against.
-    let mut dr_pos_x_m: f64 = 0.0;
-    let mut dr_pos_y_m: f64 = 0.0;
-    // Latest TRUE MuJoCo x/y, kept for `write_stats` -- the out-of-band
-    // channel that keeps ground truth available now that `pos`'s x/y on the
-    // wire itself are dead-reckoned, not MuJoCo truth. See the PARTIALLY
-    // SYNTHETIC POSITION block below.
+    // Latest TRUE MuJoCo x/y -- now BOTH the wire's `pos` and the corridor
+    // check's input (issue #163), as well as `write_stats`'s. Kept in a
+    // variable across ticks because the corridor check runs at the top of the
+    // loop body, before this tick's own observation, and so reads the
+    // PREVIOUS tick's truth -- the same one-cycle lag `last_forward_speed_m_s`
+    // has, for the same reason.
     let mut truth_pos_x_m: f64 = 0.0;
     let mut truth_pos_y_m: f64 = 0.0;
 
@@ -750,18 +849,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         };
 
         // Corridor boundary (issue #161 follow-up, item 4) -- see
-        // CORRIDOR_X_MIN_M's doc comment for why this exists instead of
-        // MuJoCo collision geometry, and where the bounds come from.
-        // Checked against dr_pos_x_m/dr_pos_y_m as they stood at the END of
-        // the PREVIOUS tick (this tick's own dead-reckoning update runs
-        // later in this same loop body) -- the same one-cycle lag the speed
-        // cap above uses, and for the same reason.
-        let outside_corridor = !(CORRIDOR_X_MIN_M..=CORRIDOR_X_MAX_M).contains(&dr_pos_x_m)
-            || dr_pos_y_m.abs() > CORRIDOR_HALF_WIDTH_M;
+        // CORRIDOR_X_MIN_M's doc comment for the bounds and for why this is a
+        // soft lean rather than contact. Checked against MuJoCo TRUTH position
+        // as of the END of the PREVIOUS tick (issue #163: this used to read
+        // the dead-reckoned path, which no longer exists) -- the same
+        // one-cycle lag the speed cap above uses, and for the same reason.
+        let outside_corridor = !(CORRIDOR_X_MIN_M..=CORRIDOR_X_MAX_M).contains(&truth_pos_x_m)
+            || truth_pos_y_m.abs() > CORRIDOR_HALF_WIDTH_M;
         if outside_corridor && !prev_outside_corridor {
             eprintln!(
-                "sim-host: LEFT THE DRIVABLE CORRIDOR at ({dr_pos_x_m:.1}, {dr_pos_y_m:.1}) m \
-                 -- arresting forward lean"
+                "sim-host: LEFT THE DRIVABLE CORRIDOR at ({truth_pos_x_m:.1}, \
+                 {truth_pos_y_m:.1}) m -- arresting forward lean"
             );
         } else if prev_outside_corridor && !outside_corridor {
             eprintln!("sim-host: back inside the drivable corridor");
@@ -876,109 +974,50 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // `impulse-response-rust` / `sim/scenarios/impulse_response.py::
         // frame_pitch_rad` use, against the same underlying xmat.
         let xmat = backend.truth_frame_xmat();
-        let pitch_rad = (xmat[2] as f32).atan2(xmat[8] as f32);
-        // Roll (rotation about the frame's forward/-X axis) -- the same
-        // atan2-of-a-tilted-axis derivation `pitch_rad` uses, applied to the
-        // Y-Z plane (roll, about local X) instead of the X-Z plane (pitch,
-        // about local Y). Exact only when pitch is near zero, since 3D
-        // rotations don't commute and this is not a true Euler decomposition
-        // -- acceptable for the roll-shaped yaw limiter's "cheap stopgap"
-        // status (issue #161 W2 item 4); the real lean-steer controller
-        // (Tuesday) needs a better one.
-        let roll_rad = (xmat[5] as f32).atan2(xmat[8] as f32);
+        // ATTITUDE MUST BE DE-YAWED BEFORE PITCH/ROLL COME OUT OF IT (issue
+        // #163). Both readings below are `atan2` on the frame's world z-axis,
+        // and that derivation assumes the world x/y axes still line up with
+        // the body's -- true when the board had no yaw freedom at all, which
+        // is exactly what the kinematic injection changed. `xmat` is now
+        // `Rz(yaw) * R_body`; its third column mixes body pitch and body roll
+        // by the heading angle, so after a 90 deg turn the raw formula would
+        // report the board's ROLL as its PITCH, and `FALLEN` would fire on a
+        // board that is upright. Removing the heading first (`Rz(-yaw) *
+        // xmat`, applied to the two elements the formulas read) recovers the
+        // body-frame values the ICD and the roll gate both mean.
+        //
+        // `yaw_rad` here is the heading currently baked into the plant -- this
+        // tick's own increment is computed and injected at the BOTTOM of the
+        // loop body, after this. At `yaw_rad == 0` (zero steer, all run) this
+        // reduces to `1.0 * xmat[k] + 0.0 * xmat[j]`, i.e. bit-identically the
+        // pre-#163 expressions.
+        let (pitch_rad, roll_rad) = body_pitch_roll_rad(&xmat, yaw_rad);
         let pos_f64 = backend.truth_frame_xpos();
         truth_pos_x_m = pos_f64[0];
         truth_pos_y_m = pos_f64[1];
+        // MuJoCo's own attitude, sent to the wire UNMODIFIED (issue #163).
+        // The host used to compose a synthetic heading onto this quaternion
+        // on its way out, because the plant had no yaw of its own; the
+        // heading now lives inside the plant, so there is nothing left to
+        // bolt on and the wire carries plain MuJoCo truth.
         let quat_f64 = backend.truth_frame_xquat();
-        // MuJoCo's own attitude: pitch and roll, and NO yaw -- this plant has no yaw degree of
-        // freedom at all. The heading is bolted on below, after `yaw_rad` is updated.
-        let quat_truth = [
+        let quat = [
             quat_f64[0] as f32,
             quat_f64[1] as f32,
             quat_f64[2] as f32,
             quat_f64[3] as f32,
         ];
 
-        // yaw_rad: NON-PHYSICAL game channel (issue #161). `steer` supplies
-        // the sign/direction; `roll_authority` scales its magnitude between
-        // YAW_AUTHORITY_FLOOR (steer alone, however little the player is
-        // leaning) and 1.0 (at/above ROLL_FULL_YAW_AUTHORITY_RAD's measured,
-        // physically-achievable roll). Read BOTH constants' doc comments
-        // before touching this line -- on the current (widened) wheel
-        // geometry, achievable roll is ~0.03 deg, so `steer` is effectively
-        // the primary driver of yaw this weekend, NOT roll; the floor is
-        // what makes that honest instead of a limiter that reads as "off".
-        // Updated BEFORE the position dead-reckoning below, so that
-        // reckoning always projects against this tick's freshest heading.
-        let roll_authority = YAW_AUTHORITY_FLOOR
-            + (1.0 - YAW_AUTHORITY_FLOOR)
-                * (roll_rad.abs() / ROLL_FULL_YAW_AUTHORITY_RAD).clamp(0.0, 1.0);
-        // SIGN (issue #161 follow-up, CEO-reported bug: "turns me left when
-        // I turn right"): increasing yaw_rad is a positive rotation about
-        // +Z (see the quaternion composition further down), which in this
-        // Z-up right-handed frame is counter-clockwise viewed from above --
-        // LEFT, by this model's own "right = +y" convention (see the `imu`
-        // site comment in `overboard_rider.xml`) and confirmed directly by
-        // the dead-reckoning heading formula below (`heading_y = -sin
-        // (yaw_rad)`, which moves toward -Y, i.e. left, as yaw_rad
-        // increases). So positive `steer` (stick-right) must DECREASE
-        // yaw_rad, not increase it -- `-=`, not `+=`. See `wire.rs`'s
-        // `InputIn::steer` doc comment for the wire-level convention this
-        // fixes.
-        //
-        // SPEED-PROPORTIONAL (issue #161 follow-up, CEO's own diagnosis:
-        // "you can just straight up turn yourself around... too fast").
-        // `YAW_CURVATURE_PER_STEER_RAD_PER_M`'s own doc comment has the
-        // full reasoning; the short version is that yaw RATE now scales
-        // with `forward_speed_m_s`, so turn radius stops depending on speed
-        // (as a real vehicle's does) instead of yaw rate being a flat,
-        // speed-independent rad/s.
-        let yaw_rate_rad_s =
-            steer * YAW_CURVATURE_PER_STEER_RAD_PER_M * forward_speed_m_s.abs() * roll_authority;
-        yaw_rad -= yaw_rate_rad_s * DT_S as f32;
-
-        // --- PARTIALLY SYNTHETIC POSITION (issue #161/#163) -------------
-        //
-        // MuJoCo only ever translates this plant along its own -X axis
-        // (there is no lateral/carving force anywhere in this model --
-        // `yaw_rad` never touches the physics). Sending MuJoCo's own
-        // x/y straight through, the way W1/W2's first cut did, is
-        // therefore honest about the SIM but dishonest about the GAME: on
-        // screen the board would spin to face `yaw_rad` while sliding
-        // along its original straight line underneath -- a car spinning
-        // out, not a board carving -- and that reads as a physics bug to
-        // anyone watching, on the single artifact (Monday's footage) this
-        // whole channel exists to protect.
-        //
-        // So `pos`'s x/y are DEAD-RECKONED here, in the host (never in
-        // Unreal -- the renderer computes no board state, ADR-0009 and
-        // `overboard-game`'s own README are explicit about that boundary):
-        // REAL forward ground speed (`wheel_rate_rad_s * DEFAULT_R_EFF_M`,
-        // straight off `hal`, nothing invented) is projected along the
-        // SYNTHETIC heading (`yaw_rad`) and integrated every tick. The
-        // result is a curved path that matches where the board is
-        // pointing -- exactly as partially synthetic as the heading that
-        // drives it, no more and no less.
-        //
-        // z is untouched: vertical position stays real MuJoCo truth (the
-        // wheel's own rolling motion in the sagittal plane needs no
-        // reckoning -- MuJoCo already integrates that correctly, which is
-        // the entire property this block exists to compensate for the
-        // LACK of in the lateral plane).
-        //
-        // This is a NEW non-physical channel, same status as `yaw_rad`/
-        // `steer` -- it needs its own line in the `Playable Sim` channel
-        // declaration (issue #163), flagged in this PR's body rather than
-        // added to `docs/vocabulary/` directly (Archivist's path, not
-        // this crate's). True MuJoCo x/y is NOT deleted -- see
-        // `write_stats`'s `truth_pos_x_m`/`truth_pos_y_m` lines below,
-        // which keep it available out-of-band for anything downstream
-        // that needs ground truth rather than the game path.
-        let heading_x = -yaw_rad.cos();
-        let heading_y = -yaw_rad.sin();
-        dr_pos_x_m += (forward_speed_m_s * heading_x) as f64 * DT_S;
-        dr_pos_y_m += (forward_speed_m_s * heading_y) as f64 * DT_S;
-        let pos = [dr_pos_x_m as f32, dr_pos_y_m as f32, pos_f64[2] as f32];
+        // MuJoCo truth, straight through (issue #163). Nothing is
+        // dead-reckoned any more: the board's heading is injected into the
+        // plant before each step (see the bottom of this loop body), so
+        // MuJoCo integrates the ground path itself, against its own contacts
+        // and collision geometry, and this IS where the board is.
+        let pos = [
+            truth_pos_x_m as f32,
+            truth_pos_y_m as f32,
+            pos_f64[2] as f32,
+        ];
 
         // Wire v2 (issue #161 follow-up): the ACTUAL ballast joint
         // positions -- CEO feedback was "there is no rider, and the turn
@@ -992,32 +1031,6 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // NOT amplify it for legibility; that is the renderer's job, as its
         // own declared non-physical channel, not this crate's to fake.
         let (rider_fore_aft_m, rider_lateral_m) = backend.truth_ballast_positions();
-
-        // --- SYNTHETIC HEADING, APPLIED TO ATTITUDE TOO (issue #161/#163) ------------
-        //
-        // The dead reckoning above curves the PATH along `yaw_rad`. Sending MuJoCo's raw
-        // quaternion alongside it -- which is what the first cut of this block did -- makes the
-        // board travel that curve without ever turning to face it: it crabs sideways, nose fixed,
-        // which reads as a physics bug just as loudly as the failure the comment above describes.
-        // The two are the same mismatch with opposite signs, and fixing only one of them swaps
-        // which half is wrong.
-        //
-        // So the same synthetic heading that steers the path also rotates the body. Composed
-        // HERE, in MuJoCo's frame and before the wire, so `MuJoCoToUnreal`'s handedness flip
-        // applies to it exactly as it does to the truth attitude -- the renderer keeps computing
-        // nothing (ADR-0009), and there is one heading in the system rather than two that can
-        // disagree.
-        //
-        // Yaw is about +Z, applied on the LEFT: world-frame heading first, then the board's own
-        // pitch/roll within it. Right-multiplying would apply the heading in the board's tilted
-        // local frame, so a leaning board would yaw about its own tilted axis and drift out of
-        // the ground plane. The sign is fixed by the dead reckoning it must agree with: rotating
-        // about +Z by `yaw_rad` maps (-1, 0) to (-cos, -sin), which IS (heading_x, heading_y).
-        //
-        // `quat_truth` is not discarded -- write_stats still logs the unmodified MuJoCo attitude
-        // alongside truth_pos_x_m/truth_pos_y_m, so ground truth stays available out-of-band.
-        let (yaw_sin_half, yaw_cos_half) = (yaw_rad * 0.5).sin_cos();
-        let quat = quat_mul([yaw_cos_half, 0.0, 0.0, yaw_sin_half], quat_truth);
 
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
         if pitch_rad.abs() > FALLEN_PITCH_RAD {
@@ -1041,6 +1054,94 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             rider_lateral_m,
         };
         out_socket.send_to(&state.to_bytes(), cfg.state_out_addr)?;
+
+        // --- KINEMATIC IN-PLANT YAW INJECTION (issue #163) --------------
+        //
+        // The steering law below is UNCHANGED -- same constants, same roll
+        // shaping, same sign, same speed-proportional curvature. What changed
+        // is where its output goes. It used to integrate a `yaw_rad` that the
+        // physics never saw, and the host then dead-reckoned the ground path
+        // and composed the heading onto the outgoing quaternion, because
+        // MuJoCo's own board only ever translated along one axis. Both of
+        // those are gone. The increment is now written straight into the
+        // plant's free joint, immediately below, so the very next physics step
+        // integrates the board's translation along the new heading itself.
+        //
+        // **The reframe that motivates it: the collision goal never needed yaw
+        // to be physically GENERATED, only MuJoCo's pose to be
+        // AUTHORITATIVE.** Those are different problems and the second is far
+        // smaller. Steering is still commanded rather than emergent -- no tire
+        // model produces this turn, and this file is still the only place the
+        // heading comes from -- but position, ground path and every contact
+        // downstream of it are now genuinely simulated at that heading, and
+        // collision geometry in the MJCF would finally be tested against the
+        // position the renderer actually draws. Nothing is dead-reckoned any
+        // more. The MJCF is untouched, which is the entire point of doing it
+        // this way.
+        //
+        // **REJECTED: making the wheel carve by geometry** (replacing the
+        // cylinder with a sphere, ellipsoid or torus so a lean migrates the
+        // contact patch and friction generates the turn). Recorded here
+        // because it is the obvious idea and it is a trap on this plant:
+        // the board is currently roll-stable ONLY because the wide cylinder
+        // rim physically cannot tip (measured full-stick roll is 0.03 deg --
+        // see ROLL_FULL_YAW_AUTHORITY_RAD). Any laterally-migrating contact
+        // profile converts the board into a roll-axis inverted pendulum about
+        // the contact point, and there is NO roll/lean controller in this
+        // repo yet, so it would simply fall over sideways. That option is
+        // gated on lean-steer; they are one epic, not two. Also, a torus mesh
+        // fails silently rather than loudly: MuJoCo convex-hulls meshes, and
+        // the convex hull of a torus is a rounded-rim disc.
+        //
+        // Placed here, at the END of the loop body, rather than at the top:
+        // this way everything already sent on the wire above describes the
+        // state as OBSERVED, and the injection is unambiguously the last
+        // thing that happens before the next `wait_observe()` steps the
+        // physics. `roll_rad` and `forward_speed_m_s` are this tick's own
+        // fresh values, exactly as the pre-#163 law used.
+        //
+        // `roll_authority` scales the law's magnitude between
+        // YAW_AUTHORITY_FLOOR (steer alone, however little the player is
+        // leaning) and 1.0 (at/above ROLL_FULL_YAW_AUTHORITY_RAD's measured,
+        // physically-achievable roll). Read BOTH constants' doc comments
+        // before touching it -- on the current (widened) wheel geometry,
+        // achievable roll is ~0.03 deg, so `steer` is effectively the primary
+        // driver of yaw, NOT roll; the floor is what makes that honest
+        // instead of a limiter that reads as "off".
+        let roll_authority = YAW_AUTHORITY_FLOOR
+            + (1.0 - YAW_AUTHORITY_FLOOR)
+                * (roll_rad.abs() / ROLL_FULL_YAW_AUTHORITY_RAD).clamp(0.0, 1.0);
+        // SIGN (issue #161 follow-up, CEO-reported bug: "turns me left when
+        // I turn right"): increasing yaw_rad is a positive rotation about +Z,
+        // which in this Z-up right-handed frame is counter-clockwise viewed
+        // from above -- LEFT, by this model's own "right = +y" convention
+        // (see the `imu` site comment in `overboard_rider.xml`). So positive
+        // `steer` (stick-right) must DECREASE yaw_rad -- `-`, not `+`. See
+        // `wire.rs`'s `InputIn::steer` doc comment for the wire-level
+        // convention this implies.
+        //
+        // SPEED-PROPORTIONAL (issue #161 follow-up, CEO's own diagnosis: "you
+        // can just straight up turn yourself around... too fast").
+        // `YAW_CURVATURE_PER_STEER_RAD_PER_M`'s own doc comment has the full
+        // reasoning; the short version is that yaw RATE scales with
+        // `forward_speed_m_s`, so turn radius stops depending on speed (as a
+        // real vehicle's does). At a standstill this is exactly zero, and the
+        // gate below then makes the whole injection a literal no-op.
+        let yaw_rate_rad_s =
+            steer * YAW_CURVATURE_PER_STEER_RAD_PER_M * forward_speed_m_s.abs() * roll_authority;
+        let dyaw_rad = -yaw_rate_rad_s * DT_S as f32;
+        // GATED ON EXACT ZERO, deliberately. With no steer (or no ground
+        // speed) the plant must evolve bit-identically to the pre-#163 code:
+        // this loop injects nothing, writes nothing, and the only remaining
+        // difference on the wire is that `pos` reports MuJoCo's own x/y
+        // instead of a reckoned one. `SimBackend::inject_kinematic_yaw`
+        // re-checks the same condition; the gate is repeated here so that
+        // `yaw_rad` and the plant can never disagree about whether a tick's
+        // increment was applied.
+        if dyaw_rad != 0.0 {
+            yaw_rad += dyaw_rad;
+            backend.inject_kinematic_yaw(dyaw_rad as f64);
+        }
 
         ticks += 1;
 
@@ -1091,10 +1192,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
 /// pick up. Never allowed to interrupt the control loop -- a failure here is
 /// silently swallowed ON PURPOSE (unlike a missed deadline or a malformed
 /// input packet, which issue #161 requires surfacing loudly): this file is
-/// internal tooling, not the wire. `truth_pos_x_m`/`truth_pos_y_m` exist
-/// because `pos`'s x/y on the wire are now dead-reckoned, not MuJoCo truth
-/// (see the PARTIALLY SYNTHETIC POSITION block in `run`) -- ground truth
-/// must stay reachable for anything downstream that needs it.
+/// internal tooling, not the wire. `truth_pos_x_m`/`truth_pos_y_m` are kept
+/// here for continuity with the tooling that already reads them -- as of
+/// issue #163 they are the SAME values the wire's `pos` now carries, since
+/// the dead-reckoned path is gone and MuJoCo's own position is authoritative.
 fn write_stats(
     path: &std::path::Path,
     ticks: u64,
@@ -1113,86 +1214,108 @@ fn write_stats(
 mod tests {
     use super::*;
 
-    /// Rotate `v` by quaternion `q` (`q v q*`).
-    fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
-        let qv = [0.0, v[0], v[1], v[2]];
-        let qc = [q[0], -q[1], -q[2], -q[3]];
-        let r = quat_mul(quat_mul(q, qv), qc);
-        [r[1], r[2], r[3]]
-    }
-
-    fn yaw_quat(yaw_rad: f32) -> [f32; 4] {
-        let (s, c) = (yaw_rad * 0.5).sin_cos();
-        [c, 0.0, 0.0, s]
-    }
-
-    #[test]
-    fn quat_mul_identity_is_identity() {
-        // 90 deg about +Y. Spelled with the constant rather than 0.7071068, which clippy
-        // (correctly) flags as an approximation of it.
-        const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
-        let q = [H, 0.0, H, 0.0];
-        let i = [1.0, 0.0, 0.0, 0.0];
-        for (a, b) in quat_mul(i, q).iter().zip(q.iter()) {
-            assert!((a - b).abs() < 1e-6, "identity * q != q");
-        }
-        for (a, b) in quat_mul(q, i).iter().zip(q.iter()) {
-            assert!((a - b).abs() < 1e-6, "q * identity != q");
-        }
-    }
-
-    /// THE invariant this whole fix exists for: the attitude on the wire must point the board
-    /// along the heading the position dead reckoning is steering it down. Before the fix, `quat`
-    /// was MuJoCo's raw attitude, which has no yaw at all -- so the board crabbed along a curved
-    /// path with its nose fixed. `yaw_rad` was transmitted and used by nobody.
+    /// Build `Rz(yaw) * Ry(pitch) * Rx(-roll)`, row-major, the same layout
+    /// MuJoCo's `xmat` uses. This is the composition [`body_pitch_roll_rad`]
+    /// has to invert.
     ///
-    /// The board's nose is its LOCAL -X (see `overboard_onewheel.xml`: "FORWARD IS -X"), and the
-    /// dead reckoning drives it along `(-cos yaw, -sin yaw)`. Those must be the same direction.
+    /// The `-roll` is not a typo. This crate's roll is measured about the
+    /// frame's FORWARD axis, which is its local **-X** (see
+    /// `overboard_onewheel.xml`: "FORWARD IS -X"), so a positive roll here is
+    /// a negative rotation about +X. Building the reference matrix in the same
+    /// convention the function under test reports keeps the sign flip in one
+    /// place instead of scattering `-` through every assertion.
+    fn xmat_from(yaw: f64, pitch: f64, roll: f64) -> [f64; 9] {
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        let (sr, cr) = (-roll).sin_cos();
+        [
+            cy * cp,
+            cy * sp * sr - sy * cr,
+            cy * sp * cr + sy * sr,
+            sy * cp,
+            sy * sp * sr + cy * cr,
+            sy * sp * cr - cy * sr,
+            -sp,
+            cp * sr,
+            cp * cr,
+        ]
+    }
+
+    /// Guard 1's unit-test half: with no heading injected, the de-yaw must be
+    /// a LITERAL no-op -- not "close to", but the identical bits the pre-#163
+    /// code produced. Zero steer has to leave every wire field it can reach
+    /// untouched, and `1.0 * x + 0.0 * y` is only bit-safe as long as nobody
+    /// "simplifies" the expression later.
     #[test]
-    fn synthetic_heading_rotates_the_body_it_steers() {
-        let level = [1.0f32, 0.0, 0.0, 0.0];
-        for &yaw in &[0.0f32, 0.3, -0.7, 1.9, -2.8, 3.0] {
-            let quat = quat_mul(yaw_quat(yaw), level);
-            let nose = rotate(quat, [-1.0, 0.0, 0.0]);
+    fn deyaw_at_zero_yaw_is_a_no_op() {
+        for &(p, r) in &[(0.0, 0.0), (0.12, -0.03), (-0.31, 0.007), (0.0, 0.4)] {
+            let xmat = xmat_from(0.0, p, r);
+            let (pitch, roll) = body_pitch_roll_rad(&xmat, 0.0);
+            // Bit-for-bit against the exact expressions this replaced.
+            assert_eq!(pitch, (xmat[2] as f32).atan2(xmat[8] as f32));
+            assert_eq!(roll, (xmat[5] as f32).atan2(xmat[8] as f32));
+        }
+    }
 
-            // Exactly the two lines the position integrator uses.
-            let heading_x = -yaw.cos();
-            let heading_y = -yaw.sin();
+    /// THE regression the in-plant injection introduces if de-yawing is
+    /// forgotten: a turned board reports its ROLL as its PITCH, so `FALLEN`
+    /// fires on a board that is perfectly upright.
+    ///
+    /// Concretely: 12 deg of body roll, no body pitch, yawed 90 deg. The raw
+    /// pre-#163 formula reads the frame's world z-axis in world x, which after
+    /// a quarter turn IS the roll -- it would report ~12 deg of pitch. The
+    /// de-yawed reading must report ~0.
+    #[test]
+    fn a_turned_board_does_not_report_its_roll_as_pitch() {
+        let yaw = std::f64::consts::FRAC_PI_2;
+        let roll = 12.0f64.to_radians();
+        let xmat = xmat_from(yaw, 0.0, roll);
 
+        let naive_pitch = (xmat[2] as f32).atan2(xmat[8] as f32);
+        assert!(
+            naive_pitch.abs() > 0.15,
+            "this test proves nothing unless the naive formula is badly wrong here \
+             (got {naive_pitch} rad)"
+        );
+
+        let (pitch, r) = body_pitch_roll_rad(&xmat, yaw as f32);
+        assert!(
+            pitch.abs() < 1e-5,
+            "de-yawed pitch should be ~0 on an unpitched board, got {pitch} rad"
+        );
+        assert!(
+            (r - roll as f32).abs() < 1e-5,
+            "de-yawed roll should be the body roll ({roll} rad), got {r}"
+        );
+    }
+
+    /// The de-yaw must recover both angles across a range of headings, not
+    /// just the one the previous test happens to pick.
+    #[test]
+    fn deyaw_recovers_body_pitch_and_roll_at_any_heading() {
+        let pitch = 0.09f64;
+        let roll = 0.02f64;
+        for &yaw in &[0.0f64, 0.4, -1.1, 2.6, -3.0, 5.9] {
+            let xmat = xmat_from(yaw, pitch, roll);
+            let (p, r) = body_pitch_roll_rad(&xmat, yaw as f32);
             assert!(
-                (nose[0] - heading_x).abs() < 1e-5 && (nose[1] - heading_y).abs() < 1e-5,
-                "yaw={yaw}: nose points ({}, {}) but the path is steered along ({heading_x}, {heading_y})",
-                nose[0],
-                nose[1]
+                (p - pitch as f32).abs() < 1e-4 && (r - roll as f32).abs() < 1e-4,
+                "yaw={yaw}: recovered ({p}, {r}), wanted ({pitch}, {roll})"
             );
         }
     }
 
-    /// The heading must be composed on the LEFT (world frame), not the right (body frame).
-    ///
-    /// With the board rolled, right-multiplying yaws it about its own tilted axis, which lifts the
-    /// nose out of the ground plane and makes the rendered heading disagree with the flat path the
-    /// dead reckoning integrates. Left-multiplying keeps the two consistent: whatever the board's
-    /// attitude, its nose still projects onto the heading the position is following.
+    /// The steering law's standstill property, which the speed-proportional
+    /// curvature formulation exists to give: full stick at zero ground speed
+    /// produces EXACTLY zero heading change, so the injection guarded by it is
+    /// a literal no-op. You cannot carve a stationary onewheel.
     #[test]
-    fn heading_is_applied_in_the_world_frame_not_the_body_frame() {
-        let roll = 0.35f32; // rolled board, as during a carve
-        let (s, c) = (roll * 0.5).sin_cos();
-        let rolled = [c, s, 0.0, 0.0]; // rotation about local X
-        let yaw = 0.9f32;
-
-        let correct = rotate(quat_mul(yaw_quat(yaw), rolled), [-1.0, 0.0, 0.0]);
-        let wrong = rotate(quat_mul(rolled, yaw_quat(yaw)), [-1.0, 0.0, 0.0]);
-
-        let (hx, hy) = (-yaw.cos(), -yaw.sin());
-        assert!(
-            (correct[0] - hx).abs() < 1e-5 && (correct[1] - hy).abs() < 1e-5,
-            "left-composed heading should match the dead-reckoned one"
-        );
-        // Guard against someone "simplifying" the order later: on a rolled board the two differ.
-        assert!(
-            (wrong[0] - hx).abs() > 1e-3 || (wrong[1] - hy).abs() > 1e-3,
-            "body-frame composition must NOT agree here, or this test proves nothing"
-        );
+    fn full_steer_at_a_standstill_injects_nothing() {
+        for &steer in &[1.0f32, -1.0, 0.6] {
+            let roll_authority = 1.0f32;
+            let yaw_rate = steer * YAW_CURVATURE_PER_STEER_RAD_PER_M * 0.0f32 * roll_authority;
+            let dyaw = -yaw_rate * DT_S as f32;
+            assert_eq!(dyaw, 0.0, "steer={steer} at rest must not turn the board");
+        }
     }
 }

@@ -79,36 +79,44 @@ pub struct StateOut {
     /// world frame. **Not** converted to Unreal's frame -- that conversion
     /// is deliberately the game side's job, not this host's (issue #161).
     ///
-    /// **`x`/`y` are PARTIALLY SYNTHETIC as of issue #161/#169's follow-up,
-    /// NOT raw MuJoCo truth** -- `crate::host` dead-reckons them from real
-    /// forward ground speed projected along the synthetic `yaw_rad` heading,
-    /// because MuJoCo itself never turns this plant (there is no lateral
-    /// force in the model; `yaw_rad` is a rendering-only overlay). Sending
-    /// literal MuJoCo x/y here would make the board spin in place while
-    /// sliding along its original straight line on screen -- a car spinning
-    /// out, not a board carving. See `crate::host::run`'s "PARTIALLY
-    /// SYNTHETIC POSITION" comment for the full reasoning; true MuJoCo x/y
-    /// stays reachable out-of-band via `crate::host::write_stats`'s
-    /// `truth_pos_x_m`/`truth_pos_y_m`. This deviates from this field's
-    /// original description in ADR-0010's wire table (which predates the
-    /// widened-wheel roll-authority finding that made it necessary); per
-    /// that ADR's own "Consequences" section, the code and this comment are
-    /// authoritative over the table when they disagree.
-    ///
-    /// `z` is untouched: vertical position is real MuJoCo truth throughout.
+    /// **Raw MuJoCo truth, all three components, as of issue #163.** Between
+    /// PR #172 and #163 `x`/`y` were dead-reckoned here -- projected from real
+    /// forward ground speed along a synthetic heading -- because MuJoCo never
+    /// turned this plant and sending its literal x/y would have shown a board
+    /// spinning in place while sliding down its original straight line.
+    /// `crate::host` now injects the heading into the plant's free joint
+    /// before each physics step instead, so MuJoCo integrates the ground path
+    /// itself and its own position IS the on-screen position. Nothing here is
+    /// reckoned, and this field is once again exactly what ADR-0010's wire
+    /// table describes.
     pub pos: [f32; 3],
-    /// Board body orientation, raw MuJoCo, **w, x, y, z**.
+    /// Board body orientation, raw MuJoCo, **w, x, y, z** -- and as of issue
+    /// #163 that is now literally true again. Between PR #172 and #163 the
+    /// host composed its synthetic heading onto this quaternion on the way
+    /// out, because the plant had no yaw of its own to report; the heading
+    /// now lives inside the plant, so there is nothing left to bolt on and
+    /// this carries MuJoCo's attitude unmodified. It already includes the
+    /// board's heading, so a renderer needs nothing but this.
     pub quat: [f32; 4],
     pub wheel_angle_rad: f32,
     /// Positive = forward.
     pub wheel_rate_rad_s: f32,
     /// Nose-up positive (ICD SS10.1).
     pub pitch_rad: f32,
-    /// NON-PHYSICAL game steering channel -- see
-    /// `crate::host::YAW_CURVATURE_PER_STEER_RAD_PER_M`'s doc comment for
-    /// the current rate model. The simulated wheel is a cylinder and cannot
-    /// physically carve; this is an integration of the `steer` input,
-    /// present so the game side has a heading to render with.
+    /// COMMANDED heading, radians, as a continuous running total (NOT wrapped
+    /// to `[-pi, pi]`) -- the integral of the `steer` input under
+    /// `crate::host::YAW_CURVATURE_PER_STEER_RAD_PER_M`'s rate model. The
+    /// simulated wheel is a cylinder and cannot physically carve: no tire
+    /// contact generates this turn, the host commands it.
+    ///
+    /// **What changed at issue #163: this is no longer an overlay the physics
+    /// never saw.** Each tick's increment is injected into MuJoCo's own free
+    /// joint before the step, so this value is the heading actually baked into
+    /// the plant, and `quat` above agrees with it by construction rather than
+    /// by a second composition. It is kept on the wire as a convenience (a
+    /// continuous, unwrapped scalar heading a renderer can interpolate
+    /// without unwrapping a quaternion), not as a separate source of truth --
+    /// `quat` is the authoritative attitude.
     ///
     /// **Sign (issue #161 follow-up): positive `yaw_rad` turns the board
     /// LEFT** (a positive rotation about MuJoCo's +Z, which is

@@ -196,3 +196,32 @@ int plant_mujoco_joint_id(void* model, const char* name) {
 int plant_mujoco_joint_qposadr(void* model, int joint_id) {
   return ((mjModel*)model)->jnt_qposadr[joint_id];
 }
+
+// `mjModel::jnt_dofadr` -- the index into qvel/qfrc, which is NOT the same as
+// jnt_qposadr the moment any joint in the model is a ball or a free joint (a
+// free joint is 7 qpos but only 6 qvel). Added for the kinematic in-plant yaw
+// injection (issue #163): the host rotates the board's free-joint orientation
+// AND its world linear velocity, and reaching qvel through the qpos address
+// would silently write the wrong slots on any model with a quaternion in it.
+int plant_mujoco_joint_dofadr(void* model, int joint_id) {
+  return ((mjModel*)model)->jnt_dofadr[joint_id];
+}
+
+// The only WRITE path into qpos/qvel this crate exposes, and deliberately a
+// RANGE write rather than a whole-array one (issue #163's kinematic yaw
+// injection): the caller names exactly which slots it means, so a bug can
+// corrupt one joint rather than smearing the entire state vector. Bounds are
+// checked on the Rust side against nq/nv before either is called.
+//
+// Ownership: `src` must point to at least `n` doubles. Callers must call these
+// BEFORE plant_mujoco_step, never after -- same ordering rule as
+// plant_mujoco_set_ctrl, and for the same reason: mj_step's own forward
+// kinematics is what turns a written qpos into a consistent xpos/xquat/xmat,
+// so anything read between the write and the next step is stale.
+void plant_mujoco_set_qpos_range(void* data, int adr, const double* src, int n) {
+  memcpy(((mjData*)data)->qpos + adr, src, (size_t)n * sizeof(double));
+}
+
+void plant_mujoco_set_qvel_range(void* data, int adr, const double* src, int n) {
+  memcpy(((mjData*)data)->qvel + adr, src, (size_t)n * sizeof(double));
+}

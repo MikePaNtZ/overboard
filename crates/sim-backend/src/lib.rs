@@ -138,6 +138,13 @@ pub struct SimBackend {
     /// joint position issue #161 wire v2 puts on the state-out wire.
     ballast_fa_qposadr: Option<usize>,
     ballast_lateral_qposadr: Option<usize>,
+    /// `mjModel::jnt_qposadr` / `jnt_dofadr` for the board's `frame_free`
+    /// free joint, if the open model declares one. Resolved once in `open()`;
+    /// used only by [`SimBackend::inject_kinematic_yaw`]. BOTH addresses are
+    /// kept because a free joint spans 7 `qpos` but only 6 `qvel` -- see
+    /// `plant_mujoco::Plant::joint_dofadr`.
+    frame_free_qposadr: Option<usize>,
+    frame_free_dofadr: Option<usize>,
     cycle: u64,
     open: bool,
     armed: bool,
@@ -310,6 +317,119 @@ impl SimBackend {
             .unwrap_or(0.0);
         (fore_aft, lateral)
     }
+
+    /// Rotates the board's free joint about the WORLD vertical axis through
+    /// its own current x/y by `dyaw_rad`, so that the next
+    /// [`BoardObserve::wait_observe`] integrates the board's translation along
+    /// the new heading (issue #163 -- kinematic in-plant yaw injection).
+    ///
+    /// **This is a kinematic injection, not a torque.** No yaw moment is
+    /// generated anywhere: the heading is imposed on the state vector, and
+    /// MuJoCo then does the rest -- position, ground path and every contact
+    /// are integrated at that heading by the solver, against real collision
+    /// geometry. Compare the mechanism it replaces (`sim-host` dead-reckoning
+    /// `pos` on the wire while the plant translated along one fixed axis
+    /// underneath), which left MuJoCo's own position unrelated to what a
+    /// renderer drew and made collision geometry untestable.
+    ///
+    /// Three things happen, and the third one is the subtle one:
+    ///
+    /// 1. The free joint's quaternion is PRE-multiplied by `quat_z(dyaw)`.
+    ///    Pre- (world-frame), not post- (body-frame): a rolled or pitched
+    ///    board must yaw about the world vertical, not about its own tilted
+    ///    axis, or the heading walks out of the ground plane.
+    /// 2. The free joint's LINEAR velocity is rotated by the same `dyaw`. A
+    ///    free joint's linear `qvel` is expressed in the WORLD frame, so
+    ///    rotating the body without it would leave the board travelling its
+    ///    old direction with a new nose angle -- crabbing, which is precisely
+    ///    the artefact that reads as a physics bug.
+    /// 3. The free joint's ANGULAR velocity is left alone. A free joint's
+    ///    angular `qvel` is expressed in the BODY frame (MuJoCo's own
+    ///    convention, and the asymmetry with the linear half is deliberate on
+    ///    MuJoCo's part), so it is already relative to the rotated body and
+    ///    rotating it again would double-count the injection as a spurious
+    ///    yaw rate.
+    ///
+    /// Nothing else in the state is touched -- the free joint's POSITION is
+    /// left exactly where it was, which is what makes this a rotation about
+    /// the vertical axis through the board rather than about the world origin,
+    /// and every child joint (`wheel_hinge`, the two ballast slides) is
+    /// expressed relative to this body and so follows it for free.
+    ///
+    /// **`dyaw_rad == 0.0` is a literal no-op**, returning before any read or
+    /// write: with zero steer the plant must evolve bit-identically to the
+    /// pre-injection code, and that guarantee is worth more than the branch
+    /// costs.
+    ///
+    /// Call this BEFORE `wait_observe`, like
+    /// [`SimBackend::apply_external_force`] and
+    /// [`SimBackend::set_ballast_targets`] -- but unlike those it takes effect
+    /// IMMEDIATELY on the state vector rather than being buffered, so it is
+    /// applied ONCE per call and must not be re-issued for the same tick.
+    ///
+    /// A no-op on a model that declares no `frame_free` joint, the same
+    /// tolerance [`SimBackend::set_ballast_targets`] has.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn inject_kinematic_yaw(&mut self, dyaw_rad: f64) {
+        if dyaw_rad == 0.0 {
+            return;
+        }
+        let (Some(qadr), Some(vadr)) = (self.frame_free_qposadr, self.frame_free_dofadr) else {
+            return;
+        };
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("inject_kinematic_yaw: backend is not open");
+
+        // 1. Attitude: q <- quat_z(dyaw) * q.
+        let qpos = plant.qpos();
+        let q = [
+            qpos[qadr + 3],
+            qpos[qadr + 4],
+            qpos[qadr + 5],
+            qpos[qadr + 6],
+        ];
+        let (half_s, half_c) = (dyaw_rad * 0.5).sin_cos();
+        let mut rotated = quat_mul([half_c, 0.0, 0.0, half_s], q);
+        // Renormalized explicitly rather than trusting the product of two unit
+        // quaternions to stay unit: this runs 500 times a second for an
+        // open-ended session, and MuJoCo's own renormalization inside
+        // mj_integratePos is not something this crate should depend on for a
+        // value it wrote itself.
+        let norm = (rotated.iter().map(|v| v * v).sum::<f64>()).sqrt();
+        if norm > 0.0 {
+            for v in rotated.iter_mut() {
+                *v /= norm;
+            }
+        }
+        plant.set_qpos_range(qadr + 3, &rotated);
+
+        // 2. World-frame linear velocity, rotated about +Z by the same angle.
+        //    vz is untouched, hence a 2-element write.
+        let qvel = plant.qvel();
+        let (s, c) = dyaw_rad.sin_cos();
+        let (vx, vy) = (qvel[vadr], qvel[vadr + 1]);
+        plant.set_qvel_range(vadr, &[c * vx - s * vy, s * vx + c * vy]);
+
+        // 3. Body-frame angular velocity (qvel[vadr + 3 ..= vadr + 5]): NOT
+        //    touched, on purpose. See this method's doc comment.
+    }
+}
+
+/// Hamilton product of two `[w, x, y, z]` quaternions, `a` then `b` read
+/// right-to-left: the result applies `b`'s rotation first, then `a`'s.
+fn quat_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    let [aw, ax, ay, az] = a;
+    let [bw, bx, by, bz] = b;
+    [
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ]
 }
 
 impl BoardObserve for SimBackend {
@@ -378,6 +498,12 @@ impl BoardObserve for SimBackend {
         // actuator that happens to drive it (issue #161 wire v2).
         self.ballast_fa_qposadr = plant.joint_qposadr("ballast_fa");
         self.ballast_lateral_qposadr = plant.joint_qposadr("ballast_lat");
+        // The board's own free joint -- both models declare it (`frame_free`).
+        // Resolved leniently (`Option`, not `expect`) for the same reason the
+        // ballast lookups are: this backend must keep opening a model that
+        // does not happen to declare the thing an optional feature needs.
+        self.frame_free_qposadr = plant.joint_qposadr("frame_free");
+        self.frame_free_dofadr = plant.joint_dofadr("frame_free");
 
         self.plant = Some(plant);
         self.cycle = 0;
@@ -823,6 +949,122 @@ mod tests {
             28.0,
             "40 A * KT_NM_PER_A must equal the model's ctrlrange bound (28 N*m); \
              see overboard_onewheel.xml's <motor ... ctrlrange=\"-28 28\">"
+        );
+    }
+
+    // ---- kinematic in-plant yaw injection (issue #163) ------------------
+
+    /// GUARD 1, at the layer that can actually break the plant: a zero
+    /// increment must be a LITERAL no-op -- no read, no write, and a state
+    /// vector that is bit-identical afterwards. Every scenario that never
+    /// touches `steer` depends on this, and "close enough" is not the claim.
+    #[test]
+    fn a_zero_yaw_injection_is_bit_identical() {
+        let mut b = armed();
+        b.wait_observe().unwrap();
+        let qpos_before = b.truth_qpos();
+        let quat_before = b.truth_frame_xquat();
+
+        b.inject_kinematic_yaw(0.0);
+
+        assert_eq!(b.truth_qpos(), qpos_before);
+        assert_eq!(b.truth_frame_xquat(), quat_before);
+    }
+
+    /// The attitude half of the injection: the free joint's quaternion must
+    /// pick up exactly the requested rotation about the WORLD +Z, and the
+    /// board's position must not move (this is a rotation about the vertical
+    /// axis through the board, not about the world origin).
+    #[test]
+    fn injecting_yaw_rotates_the_free_joint_about_world_z() {
+        let mut b = armed();
+        b.wait_observe().unwrap();
+        let before = b.truth_qpos();
+        let dyaw = 0.25f64;
+
+        b.inject_kinematic_yaw(dyaw);
+        // xquat is only refreshed by a step, so read qpos, which is written
+        // directly -- and step once to confirm the plant accepts it.
+        let after = b.truth_qpos();
+
+        // Free joint is qpos[0..7] on both models: x, y, z, then w, x, y, z.
+        assert_eq!(&after[0..3], &before[0..3], "the board must not translate");
+        let q = [after[3], after[4], after[5], after[6]];
+        // Yaw out of a quaternion: atan2(2(wz + xy), 1 - 2(y^2 + z^2)).
+        let yaw =
+            (2.0 * (q[0] * q[3] + q[1] * q[2])).atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]));
+        assert!(
+            (yaw - dyaw).abs() < 1e-9,
+            "expected {dyaw} rad of world yaw, got {yaw}"
+        );
+        let norm = q.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-12, "quaternion must stay unit");
+
+        b.wait_observe().unwrap();
+    }
+
+    /// The velocity half, and the reason the injection is not just a
+    /// quaternion write: a free joint's LINEAR `qvel` is world-frame, so it
+    /// has to be rotated with the body or the board keeps travelling its old
+    /// direction with a new nose angle -- crabbing.
+    ///
+    /// Driven at 90 deg so the check is unambiguous: motion purely along -X
+    /// must come out purely along -Y.
+    #[test]
+    fn injecting_yaw_rotates_world_linear_velocity_but_not_body_angular() {
+        let mut b = armed();
+        b.wait_observe().unwrap();
+        // Give the board a clean world velocity to rotate, and a body-frame
+        // angular velocity that must survive untouched.
+        b.plant
+            .as_mut()
+            .unwrap()
+            .set_qvel_range(0, &[-3.0, 0.0, 0.0, 0.11, 0.22, 0.33]);
+
+        b.inject_kinematic_yaw(std::f64::consts::FRAC_PI_2);
+
+        let v = b.plant.as_ref().unwrap().qvel();
+        assert!(
+            v[0].abs() < 1e-9,
+            "world vx should have rotated away, got {}",
+            v[0]
+        );
+        assert!(
+            (v[1] - -3.0).abs() < 1e-9,
+            "world vy should now carry the speed, got {}",
+            v[1]
+        );
+        assert_eq!(v[2], 0.0, "vertical speed must not be touched");
+        // Body-frame angular velocity: untouched, on purpose. Rotating it too
+        // would double-count the injection as a spurious yaw RATE.
+        assert_eq!((v[3], v[4], v[5]), (0.11, 0.22, 0.33));
+    }
+
+    /// The property the whole approach is for: with a heading injected, the
+    /// plant's own integration carries the board along the NEW direction.
+    /// Nothing outside MuJoCo computes this path.
+    #[test]
+    fn the_plant_itself_translates_along_the_injected_heading() {
+        let mut b = armed();
+        b.wait_observe().unwrap();
+        // Roll the board forward along its -X at a steady clip.
+        b.plant
+            .as_mut()
+            .unwrap()
+            .set_qvel_range(0, &[-4.0, 0.0, 0.0]);
+        b.inject_kinematic_yaw(std::f64::consts::FRAC_PI_2);
+
+        let start = b.truth_frame_xpos();
+        for _ in 0..50 {
+            b.wait_observe().unwrap();
+        }
+        let end = b.truth_frame_xpos();
+
+        let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+        assert!(
+            dy < -0.1 && dy.abs() > dx.abs() * 5.0,
+            "after a 90 deg injection the board should travel along -Y, not -X \
+             (moved dx={dx:.4} m, dy={dy:.4} m)"
         );
     }
 }
