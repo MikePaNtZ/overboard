@@ -97,6 +97,13 @@ jobs:
       - name: The image layer installs exactly the pinned kernel, and holds it
         run: python3 scripts/pi/check_image_pin.py
 
+      # A malformed METABEGIN block does not fail where the mistake is -- it
+      # makes the layer INVISIBLE, and the build then fails 40 minutes later
+      # complaining that some other layer references one that is "not found".
+      # Seconds here against a full image build there.
+      - name: Layer headers parse as DEB822
+        run: python3 scripts/pi/check_layer_headers.py
+
   # -------------------------------------------------------------------------
   # I1 -- build the actual Overboard image.
   #

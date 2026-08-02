@@ -5,12 +5,6 @@
 #  MCP2518FD CAN HAT wired in and one core isolated for the control loop.
 # X-Env-Layer-Version: 1.0.0
 # X-Env-Layer-Requires: rpi-device-base,overboard-linux-v8-rt
-# Provides `rpi-device` ONLY, matching the stock rpi5 layer this mirrors.
-# An earlier revision also declared `device` -- copied from the slim EXAMPLE's
-# device layer, which requires plain `device-base` -- and the build stopped
-# with "Provider conflict: 'device' is declared by multiple layers:
-# rpi-device-base, overboard-pi5". `rpi-device-base` already provides
-# `device`; re-declaring it claims a capability the base owns.
 # X-Env-Layer-Provides: rpi-device
 #
 # X-Env-VarPrefix: device
@@ -33,6 +27,38 @@
 # X-Env-Var-assetdir-Valid: dir
 # X-Env-Var-assetdir-Set: y
 # METAEND
+#
+# ---------------------------------------------------------------------------
+# ⚠️ THE BLOCK ABOVE IS PARSED, NOT COMMENTED.
+#
+# Everything between METABEGIN and METAEND is DEB822 -- `Key: Value`, with
+# continuation lines indented by one space. The leading `#` on every line
+# makes it look like a comment block and it is not. A prose sentence added
+# between two fields cost a full build:
+#
+#     Invalid DEB822 format: line 'Provides `rpi-device` ONLY, matching...'
+#     appears to be a continuation but is not indented.
+#     Layer 'overboard-pi5' not found
+#
+# Note the second line: an unparseable header does not fail loudly as a
+# syntax error, it makes the layer INVISIBLE, and the build then reports the
+# layer as missing. Explanation belongs down here, below METAEND, where this
+# is an ordinary comment.
+# ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# WHY `Provides: rpi-device` AND NOT `device,rpi-device`
+#
+# `rpi-device-base`, which this requires, already provides `device`.
+# Re-declaring it claims a capability the base owns, and the build stops with
+# "Provider conflict: 'device' is declared by multiple layers:
+# rpi-device-base, overboard-pi5".
+#
+# The wrong version was copied from the slim EXAMPLE's device layer, which
+# requires plain `device-base`. The right reference was the stock `rpi5`
+# layer -- the thing actually being replaced -- which provides `rpi-device`
+# alone.
+# ---------------------------------------------------------------------------
 #
 # ---------------------------------------------------------------------------
 # WHY THIS EXISTS INSTEAD OF THE STOCK `rpi5` LAYER
