@@ -71,24 +71,113 @@ claim ("the board never became unstable at any aggression level tested") is fals
 be reinstated in any softened form; measurements taken against the de-rated delivery support
 nothing and may not be cited.
 
-### Exit criteria — provisional
+### Exit criteria — RATIFIED 2026-08-02, after diagnosis
 
-Marked provisional because the mechanism is not yet understood: the board holds roughly −10°
-of steady-state pitch under sustained acceleration, which is what parks it beside the cliff,
-and it is not established whether that is real physical pitch or an attitude-estimator error.
-A diagnosis is in flight. **If it is estimator error, the controller is balancing against a
-lie and these criteria are wrong** — they will be revised on that finding and this ADR
-superseded or amended.
+The provisional criteria in the first revision of this ADR asked whether the −10° was real
+pitch or estimator error. **It is real physics.** Estimated and true pitch never diverge by
+more than ~1° (mean 0.57°). Sustaining ~2 m/s² requires ~17 cm of forward CoM offset; the
+ballast stroke supplies 4 cm; the remaining 13 cm is bought by tilting a 0.67 m body, which
+costs 11°. **Sensitivity is 5.84° of lean per m/s², fixed by geometry.** Total pitch authority
+is `MAX_CURRENT_A·KT/KP` = 28/140 = 0.2 rad = **11.46°**, and steady full-stick acceleration
+spends 10.4° of it. The bias does not sit beside the cliff; **it is the cliff**.
 
-1. Holding full stick from rest, from any starting state, does not invert the board.
-2. Whatever margin is chosen is stated as a measured number, not as "stable".
-3. A saturation / loss-of-authority signal exists and fires **before** the outcome is decided.
-   `FALLEN` currently trips ~1 s after the board is already committed to going over.
-4. Demo footage is re-shot through `--scripted-scenario` so it is bit-identically
-   reproducible, and its caption claims only what that run measured.
-5. Reset works. It is currently a no-op — the host logs `input reset bit set -- not
-   implemented yet, ignoring` — so a fallen board has no recovery path short of relaunching
-   the stack. Tracked with the in-flight yaw epic.
+Two findings inverted earlier assumptions and are recorded so nobody re-derives them wrongly:
+
+- **Correcting the estimator makes the board worse.** The ~1° nose-down error acts as nose-up
+  trim. Feeding the controller MuJoCo truth makes it flip **1.74 s earlier**; measured four
+  ways, monotonic in the bias. This is **accidental model error, not a designed safety
+  property**, and criterion (f) exists specifically to stop it being load-bearing.
+- **The survivability boundary is the speed cap, not the lean.** Every run that saturated
+  above 8.34 m/s (where `SPEED_CAP_MARGIN_M_S` begins withdrawing fore/aft authority)
+  survived; every run that saturated below it flipped. Once torque is clamped, `τ = −kp·θ`
+  no longer holds and pitch is open-loop unstable — **saturation is survivable if and only if
+  something is already unloading the board when it occurs.**
+
+Criteria (a) and (c) below were sharpened by the Oracle; (f) and (g) were added by it.
+
+1. **(a) The board does not invert across a named test matrix** — "from any starting state"
+   was untestable as written:
+   - full stick from rest;
+   - **full reverse-to-forward stick reversal at speed** — the worst case, since commanded
+     deceleration and gravity load the same side. This has never been tested;
+   - full stick during a kerb strike (use the disturbance derivation from #147).
+2. **(b)** Margin is stated as a measured number, not as "stable" — quoted in **both** current
+   headroom and pitch headroom, at the worst point in the matrix.
+3. **(c) A loss-of-authority warning fires before the outcome is decided, with a stated
+   measured lead time.** The trigger is **saturation while below speed-cap onset** — that is
+   the actual discriminator. A warning that fires on saturation above 8.34 m/s is noise.
+   `FALLEN` today trips ~1 s *after* the board is committed. The signal already exists and is
+   discarded at `host.rs:850` (`let (bounded_cmd, _sat) = envelope.apply(...)`); filtered
+   authority utilisation over 0.85 gives a measured 2.69 s of lead.
+4. **(d)** Demo footage re-shot through `--scripted-scenario` so it is bit-identically
+   reproducible, captioned to only what that run measured.
+5. **(e)** Reset works. Currently a no-op — the host logs `input reset bit set -- not
+   implemented yet, ignoring` — so a fallen board has no recovery short of relaunching the
+   stack. Snapshot preserved on `feat/controls/turn-radius-and-reset` (unvalidated).
+6. **(f) Every pass must hold with the estimator bias removed** — acceptance runs are fed
+   MuJoCo truth, the measured-worse case. **No criterion may be satisfied on borrowed
+   margin.** This is the most important addition: without it, (a) can pass only because of an
+   accident nobody designed.
+7. **(g) Every pass must hold across a damping sweep of 0.5×–2×** on the wheel-hinge
+   `damping="0.08"` (see below). Cheap in sim, and it converts a soft cliff into a bounded one.
+
+### The fix, and why 0.80 is not a magic number
+
+**Cap commanded lean, changing nothing else.** Input shaping upstream of the estimator, the
+regulator and the envelope — standard fly-by-wire practice and the only zero-risk move
+available. Measured cost: **top speed unchanged** (the speed cap governs it), 0.93 s slower to
+8 m/s, 8% less distance over 15 s.
+
+The constant must be **derived, not tuned to the cliff**: peak demand is linear at 42 A per
+unit stick, so 0.80 × 42 = 33.6 A ≈ **84% of envelope**, leaving steady lean at 8.3° of the
+11.46° ceiling ≈ **28% pitch reserve**. Name it for the reserve it expresses (e.g.
+`CMD_ENVELOPE_RESERVE`) and cite the 42 A/unit measurement as provenance. Tuning to the
+measured 0.96/0.97 cliff is forbidden — that boundary rests partly on the accidental
+estimator bias and on an undocumented damping constant.
+
+Rejected alternatives: lowering `MAX_GROUND_SPEED_M_S` to 6–7 m/s is causally proven but costs
+top speed while the stick cap costs none — dominated. Retuning `KP`/`KD` moves every
+gain-related acceptance criterion in the repo and is refused. Raising `MAX_CURRENT_A` is a
+claim about hardware, not a tuning knob.
+
+**The permanent fix is different and is deliberately not shipped here:** derive fore/aft
+authority from remaining **current headroom** rather than from speed. It is the runtime form
+of the spec rule below, protects at any speed and any lean, and needs no arbitrary top-speed
+number — but it is a new feedback path that has never been run, and there is no launch
+pressure to justify shipping it unvalidated.
+
+### What propagates to the hardware spec
+
+The sim-first premise obliges a hardware finding here. **The supported finding is not "the
+motor is undersized"** — writing that into the spec would aim the hardware effort at the wrong
+lever, because more torque raises the pitch ceiling but does nothing about the 11° of lean
+that 2 m/s² geometrically requires. What propagates:
+
+- **Command-map derivation rule.** The stick→setpoint map SHALL be derived from the actuator
+  envelope minus a stated disturbance reserve. The present 5% over-command at full stick is a
+  **normalisation defect, not a sizing gap**, and a spec rule prevents it recurring on hardware.
+- **The geometry, which is gain-independent and damping-independent** — the truest hardware
+  findings available: 5.84° of lean per m/s², and 17 cm of CoM offset required at 2 m/s²
+  against 4 cm of ballast stroke. These say the **ballast stroke**, not the motor, is the
+  undersized element if acceleration without deep lean is wanted. The three levers are torque
+  envelope, ballast stroke and CoM height; the spec should trade them with these sensitivities
+  in hand.
+- **The coupling identity** `pitch ceiling = τ_max / KP` — record the identity, not today's
+  11.46°, because any hardware gain change moves the cliff.
+
+**Explicitly does NOT propagate yet:** any speed-dependent number, including the 8.34 m/s
+survivability boundary and top-speed envelope fractions. Those rest on `damping="0.08"`.
+
+### The undocumented constant
+
+`damping="0.08"` on `wheel_hinge` is the only load-bearing constant in the MJCF with **no
+provenance comment**, in files where every other constant carries a paragraph of derivation.
+It costs 0.55 N·m (0.79 A) per m/s of ground speed — **18% of the envelope at the speed cap** —
+and it sets the entire speed-dependence of this failure. It does not block launch *provided
+criterion (g) holds*, but it blocks propagating any speed-dependent number to the hardware
+spec, and it blocks the eventual headroom-based fix, which would inherit its speed dependence.
+It belongs in the imperfection-profile conformance contract (fabe806), which exists for exactly
+this class of silent constant.
 
 ## Options considered
 
