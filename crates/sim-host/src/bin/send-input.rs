@@ -144,7 +144,9 @@ fn main() {
                         schedule_name = "s-curve";
                     }
                     other => {
-                        eprintln!("send-input: unknown scenario '{other}' (want: default, s-curve)");
+                        eprintln!(
+                            "send-input: unknown scenario '{other}' (want: default, s-curve)"
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -159,7 +161,9 @@ fn main() {
 
     let socket = UdpSocket::bind("127.0.0.1:0").expect("send-input: bind failed");
     let duration = total_duration_s(schedule);
-    eprintln!("send-input: sending to {target} for {duration:.1}s per the '{schedule_name}' schedule");
+    eprintln!(
+        "send-input: sending to {target} for {duration:.1}s per the '{schedule_name}' schedule"
+    );
 
     let start = Instant::now();
     let period = Duration::from_millis(20);

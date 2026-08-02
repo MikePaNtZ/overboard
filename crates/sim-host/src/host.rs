@@ -756,7 +756,10 @@ mod tests {
 
     #[test]
     fn quat_mul_identity_is_identity() {
-        let q = [0.7071068, 0.0, 0.7071068, 0.0];
+        // 90 deg about +Y. Spelled with the constant rather than 0.7071068, which clippy
+        // (correctly) flags as an approximation of it.
+        const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
+        let q = [H, 0.0, H, 0.0];
         let i = [1.0, 0.0, 0.0, 0.0];
         for (a, b) in quat_mul(i, q).iter().zip(q.iter()) {
             assert!((a - b).abs() < 1e-6, "identity * q != q");
