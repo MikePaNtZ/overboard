@@ -38,6 +38,13 @@ mmdebstrap:
     - network-manager
     # Key-only SSH is how the board is reached; there is no console user.
     - openssh-server
+    # Required by the STOCK image-rpios layer, not by us: its
+    # `customize05-pkgs` hook shells out to apt inside the target, and a slim
+    # base does not install apt there. Build round 4 died on
+    # `chroot: failed to run command 'apt'` AFTER the whole rootfs had
+    # bootstrapped. Ours holds the kernel with dpkg and does not need apt --
+    # but the layer we compose with does, so it ships.
+    - apt
 
   customize-hooks:
     # -----------------------------------------------------------------------
