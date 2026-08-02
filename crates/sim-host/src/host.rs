@@ -271,6 +271,22 @@ impl From<InputIn> for LatestInput {
 /// Spawns the control loop on its own dedicated thread (issue #161: "not on
 /// the main thread") and returns the join handle. The caller decides what to
 /// do with the calling thread -- `src/bin/sim-host.rs` just joins it.
+/// Hamilton product of two `[w, x, y, z]` quaternions.
+///
+/// Order is `a` then `b` read right-to-left: the result applies `b`'s rotation first, then `a`'s.
+/// Used to compose the synthetic heading (`a`) onto MuJoCo's truth attitude (`b`) -- see the call
+/// site for why that order, and not the other one, is the correct composition.
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let [aw, ax, ay, az] = a;
+    let [bw, bx, by, bz] = b;
+    [
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ]
+}
+
 pub fn spawn(cfg: HostConfig) -> std::thread::JoinHandle<Result<RunSummary, HostError>> {
     std::thread::Builder::new()
         .name("sim-host-control".into())
@@ -523,7 +539,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         truth_pos_x_m = pos_f64[0];
         truth_pos_y_m = pos_f64[1];
         let quat_f64 = backend.truth_frame_xquat();
-        let quat = [
+        // MuJoCo's own attitude: pitch and roll, and NO yaw -- this plant has no yaw degree of
+        // freedom at all. The heading is bolted on below, after `yaw_rad` is updated.
+        let quat_truth = [
             quat_f64[0] as f32,
             quat_f64[1] as f32,
             quat_f64[2] as f32,
@@ -602,6 +620,32 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // NOT amplify it for legibility; that is the renderer's job, as its
         // own declared non-physical channel, not this crate's to fake.
         let (rider_fore_aft_m, rider_lateral_m) = backend.truth_ballast_positions();
+
+        // --- SYNTHETIC HEADING, APPLIED TO ATTITUDE TOO (issue #161/#163) ------------
+        //
+        // The dead reckoning above curves the PATH along `yaw_rad`. Sending MuJoCo's raw
+        // quaternion alongside it -- which is what the first cut of this block did -- makes the
+        // board travel that curve without ever turning to face it: it crabs sideways, nose fixed,
+        // which reads as a physics bug just as loudly as the failure the comment above describes.
+        // The two are the same mismatch with opposite signs, and fixing only one of them swaps
+        // which half is wrong.
+        //
+        // So the same synthetic heading that steers the path also rotates the body. Composed
+        // HERE, in MuJoCo's frame and before the wire, so `MuJoCoToUnreal`'s handedness flip
+        // applies to it exactly as it does to the truth attitude -- the renderer keeps computing
+        // nothing (ADR-0009), and there is one heading in the system rather than two that can
+        // disagree.
+        //
+        // Yaw is about +Z, applied on the LEFT: world-frame heading first, then the board's own
+        // pitch/roll within it. Right-multiplying would apply the heading in the board's tilted
+        // local frame, so a leaning board would yaw about its own tilted axis and drift out of
+        // the ground plane. The sign is fixed by the dead reckoning it must agree with: rotating
+        // about +Z by `yaw_rad` maps (-1, 0) to (-cos, -sin), which IS (heading_x, heading_y).
+        //
+        // `quat_truth` is not discarded -- write_stats still logs the unmodified MuJoCo attitude
+        // alongside truth_pos_x_m/truth_pos_y_m, so ground truth stays available out-of-band.
+        let (yaw_sin_half, yaw_cos_half) = (yaw_rad * 0.5).sin_cos();
+        let quat = quat_mul([yaw_cos_half, 0.0, 0.0, yaw_sin_half], quat_truth);
 
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
         if pitch_rad.abs() > FALLEN_PITCH_RAD {
@@ -691,4 +735,89 @@ fn write_stats(
         "ticks={ticks}\nmissed_deadlines={missed_deadlines}\ntruth_pos_x_m={truth_pos_x_m}\ntruth_pos_y_m={truth_pos_y_m}\n"
     );
     let _ = std::fs::write(&tmp, contents).and_then(|_| std::fs::rename(&tmp, path));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rotate `v` by quaternion `q` (`q v q*`).
+    fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+        let qv = [0.0, v[0], v[1], v[2]];
+        let qc = [q[0], -q[1], -q[2], -q[3]];
+        let r = quat_mul(quat_mul(q, qv), qc);
+        [r[1], r[2], r[3]]
+    }
+
+    fn yaw_quat(yaw_rad: f32) -> [f32; 4] {
+        let (s, c) = (yaw_rad * 0.5).sin_cos();
+        [c, 0.0, 0.0, s]
+    }
+
+    #[test]
+    fn quat_mul_identity_is_identity() {
+        let q = [0.7071068, 0.0, 0.7071068, 0.0];
+        let i = [1.0, 0.0, 0.0, 0.0];
+        for (a, b) in quat_mul(i, q).iter().zip(q.iter()) {
+            assert!((a - b).abs() < 1e-6, "identity * q != q");
+        }
+        for (a, b) in quat_mul(q, i).iter().zip(q.iter()) {
+            assert!((a - b).abs() < 1e-6, "q * identity != q");
+        }
+    }
+
+    /// THE invariant this whole fix exists for: the attitude on the wire must point the board
+    /// along the heading the position dead reckoning is steering it down. Before the fix, `quat`
+    /// was MuJoCo's raw attitude, which has no yaw at all -- so the board crabbed along a curved
+    /// path with its nose fixed. `yaw_rad` was transmitted and used by nobody.
+    ///
+    /// The board's nose is its LOCAL -X (see `overboard_onewheel.xml`: "FORWARD IS -X"), and the
+    /// dead reckoning drives it along `(-cos yaw, -sin yaw)`. Those must be the same direction.
+    #[test]
+    fn synthetic_heading_rotates_the_body_it_steers() {
+        let level = [1.0f32, 0.0, 0.0, 0.0];
+        for &yaw in &[0.0f32, 0.3, -0.7, 1.9, -2.8, 3.0] {
+            let quat = quat_mul(yaw_quat(yaw), level);
+            let nose = rotate(quat, [-1.0, 0.0, 0.0]);
+
+            // Exactly the two lines the position integrator uses.
+            let heading_x = -yaw.cos();
+            let heading_y = -yaw.sin();
+
+            assert!(
+                (nose[0] - heading_x).abs() < 1e-5 && (nose[1] - heading_y).abs() < 1e-5,
+                "yaw={yaw}: nose points ({}, {}) but the path is steered along ({heading_x}, {heading_y})",
+                nose[0],
+                nose[1]
+            );
+        }
+    }
+
+    /// The heading must be composed on the LEFT (world frame), not the right (body frame).
+    ///
+    /// With the board rolled, right-multiplying yaws it about its own tilted axis, which lifts the
+    /// nose out of the ground plane and makes the rendered heading disagree with the flat path the
+    /// dead reckoning integrates. Left-multiplying keeps the two consistent: whatever the board's
+    /// attitude, its nose still projects onto the heading the position is following.
+    #[test]
+    fn heading_is_applied_in_the_world_frame_not_the_body_frame() {
+        let roll = 0.35f32; // rolled board, as during a carve
+        let (s, c) = (roll * 0.5).sin_cos();
+        let rolled = [c, s, 0.0, 0.0]; // rotation about local X
+        let yaw = 0.9f32;
+
+        let correct = rotate(quat_mul(yaw_quat(yaw), rolled), [-1.0, 0.0, 0.0]);
+        let wrong = rotate(quat_mul(rolled, yaw_quat(yaw)), [-1.0, 0.0, 0.0]);
+
+        let (hx, hy) = (-yaw.cos(), -yaw.sin());
+        assert!(
+            (correct[0] - hx).abs() < 1e-5 && (correct[1] - hy).abs() < 1e-5,
+            "left-composed heading should match the dead-reckoned one"
+        );
+        // Guard against someone "simplifying" the order later: on a rolled board the two differ.
+        assert!(
+            (wrong[0] - hx).abs() > 1e-3 || (wrong[1] - hy).abs() > 1e-3,
+            "body-frame composition must NOT agree here, or this test proves nothing"
+        );
+    }
 }
