@@ -209,6 +209,13 @@ copy is now wrong.
 
 **Who moves:**
 
+- **CMO** — ⚠️ **added by amendment 2026-08-02; the first revision of this list missed it.**
+  `roles/cmo/CONTEXT.md` was merged on 2026-08-01 (#164), the day before this ADR was
+  ratified, and its first sub-goal still read "LAUNCH IS MONDAY 2026-08-03 MORNING, readiness
+  review Sunday night." Under the session-start protocol that file is the first thing a CMO
+  session reads, so the role is not merely uninformed — **any** restart, for any reason, boots
+  into stale launch orders. A supersession banner was added under `TURF-OVERRIDE` to defuse
+  it; the sub-goals themselves remain CMO's to re-base.
 - **Senior Controls** — owns the fix and the diagnosis. Everything else queues behind it.
 - **Digital Content Production** — the existing "Manny rips" capture is superseded; hold the
   re-shoot until a margined lean is chosen.
@@ -225,4 +232,26 @@ repo, and the withdrawn stability claim is registered with it.
 The date itself is **convention only**. There is no CI check that can tell whether a launch
 happened, so this ADR binds only sessions that read it — which is precisely why the COO owes
 the CEO a list of sessions to restart, and why that list is part of closing this decision
-rather than a follow-up to it.
+rather than a follow-up to it. That list is
+[`roles/coo/restart-briefs-2026-08-02-launch-hold.md`](../../roles/coo/restart-briefs-2026-08-02-launch-hold.md).
+
+### The gap this ADR shipped with, found the same day
+
+"Binds only sessions that read it" is weaker than it sounds, and the CMO amendment above is
+the proof. **A role's standing context file can contradict a ratified ADR and nothing
+notices.** The ADR is read by sessions that go looking for it; `roles/<role>/CONTEXT.md` is
+read by every session of that role automatically, at start, before anything else. When the two
+disagree, the context file wins on reach — so the weaker document is the one this ADR was
+relying on.
+
+The CMO omission was found by a dead-date audit across all four repos, **not** by reading this
+ADR's consequences list. That is the honest provenance and it is the finding: the consequences
+list was not sufficient to identify who the decision bound, and there is no check that would
+have caught the difference. Tracked as a work request rather than solved here, because the
+obvious fix — a `policy` check comparing role context files against ratified decisions — is a
+new gate, and a gate whose cost to the person who did nothing wrong has not been thought
+through is how four of the COO's checks landed on other roles first.
+
+One thing this did **not** cost, checked rather than assumed: the live public `overboard-web`
+site carries no 2026-08-03, no Monday launch date and no stability claim. Nothing wrong was
+published.
