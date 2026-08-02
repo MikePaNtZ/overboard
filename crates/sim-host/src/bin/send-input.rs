@@ -151,93 +151,121 @@ const SCHEDULE: &[(f64, f64, f32, f32, f32, &str)] = &[
 /// doing it; the limiting factor was City Park's road length, not the board. If more road becomes
 /// available (or the clip can accept sailing off the built environment at the very end), the
 /// 15.0 s / three-lobe numbers above are the ones to reach for.
-const SCURVE3_SETTLE_S: f64 = 0.5;
-
-/// How long to hold [`SCURVE3_BUILD_LEAN`] before the weave starts, at full stick.
 ///
-/// **Measured, then cut back for distance, not for speed.** A first pass at 15.0 s reached
-/// 15.2 m/s at weave entry with pitch still well clear of the fallen threshold (-7.7..+3.1 deg
-/// over the whole run) -- the speed and stability were fine. The problem was distance: that run
-/// covered 303 m, past the "cut the schedule shorter rather than hoping" line the COO drew at
-/// ~200 m. 11.0 s (with one fewer full lobe, see `SCURVE3_LOBE_S`) is the re-measured, shorter
-/// value. See this file's own measured results for the entry speed it actually gives up by
-/// cutting the build phase, and the distance it actually bought back.
-const SCURVE3_BUILD_S: f64 = 11.0;
-const SCURVE3_BUILD_LEAN: f32 = 1.0;
-
-/// In-weave forward trim -- 0.0. Revision 2 found ANY sustained trim keeps adding speed rather
-/// than merely holding it, and that effect gets STRONGER at higher entry speed (0.08 still added
-/// several m/s over a several-second weave at ~7 m/s entry). At ~20 m/s entry this revision's
-/// lobes are short (seconds, not many seconds -- see `SCURVE3_LOBE_S`), so there is little time
-/// for carving losses to bleed speed noticeably, and zero trim avoids adding an unpredictable,
-/// state-dependent amount on top of an already fast entry.
-const SCURVE3_WEAVE_TRIM: f32 = 0.0;
-/// Full-lobe duration -- much shorter than Revision 2's 3.5 s. Two costs compound at 3x the
-/// speed: every second of lobe duration now costs roughly 3x the road distance, AND
-/// `YAW_RATE_GAIN_RAD_S` was doubled in `host.rs` specifically to buy back heading swing per
-/// second, so a short lobe here swings roughly as far as a much longer Revision-2 lobe did.
-/// "Fewer, shorter, harder" replaces "fewer, wider" as the applicable principle at this speed.
-/// The schedule below uses TWO full lobes plus half-entry/half-exit (three or four "reversals",
-/// the low end of the CEO's ask) -- a first pass used three full lobes and, combined with the
-/// 15.0 s build this constant's own history describes, was part of what pushed total distance to
-/// 303 m; cut to two full lobes for the same reason `SCURVE3_BUILD_S` was cut.
-const SCURVE3_LOBE_S: f64 = 1.6;
-/// Entry (and, by the same centring logic, exit) half-lobe duration. Neither Revision 1's 1.17 s
-/// nor Revision 2's 2.3 s is assumed to transfer -- build lean, build duration, weave trim and
-/// `YAW_RATE_GAIN_RAD_S` all changed, which all feed `roll_authority`'s time history the centring
-/// depends on. Picked fresh at half of `SCURVE3_LOBE_S`, the same ratio Revision 2 used, and left
-/// there rather than chased further -- see the measured centring below.
-const SCURVE3_ENTRY_S: f64 = 0.8;
-/// Lateral and steer stick, taken to their limits per the explicit instruction to stop leaving
-/// carving authority on the table (Revision 2 used 0.7/0.40).
-const SCURVE3_LATERAL: f32 = 1.0;
-const SCURVE3_STEER: f32 = 1.0;
+/// # Revision 4 (issue #161 follow-up): the 200 m budget was a guess, and there was road left
+///
+/// The COO's own correction, after watching the footage: the ~200 m line Revision 3 was cut back
+/// to was invented, inferred from one earlier run, not measured against City Park's actual usable
+/// road. The footage showed road still ahead at the end of the (cut-back) run, and the CEO's
+/// judgement was explicit: **"we have plenty of room to go faster and turn more."**
+///
+/// So this revision:
+/// - **Takes Revision 3's REJECTED 15.0 s / three-lobe pass as the floor, not the ceiling.**
+///   `SCURVE3_BUILD_S` goes back to 15.0 (it was cut to 11.0 only for distance, and the distance
+///   reason no longer holds at the same weight). Budget for THIS revision is ~400 m, and even
+///   that is explicitly provisional -- "if you exceed it and the run still looks contained I
+///   would rather find out from footage than from a guess of mine."
+/// - **Lengthens the lobes, per "let the turn last longer left and right."** This is duration,
+///   not amplitude -- `lateral`/`steer` stay at their limits (1.0/1.0) and
+///   `YAW_RATE_GAIN_RAD_S` stays at 3.0 (host.rs), both already right per the COO. Fewer, longer,
+///   deeper carves: two full lobes instead of three, each 1.75x Revision 3's 1.6 s -- a sustained
+///   arc the board commits to and holds, not a flick. **A first attempt lengthened the lobes to
+///   4.5 s (2.8x) and overshot into a different failure: at this gain and steer, a single lobe
+///   swung more than a full 360 deg rotation (520.8 deg of total measured swing), which is
+///   spinning, not carving.** See [`SCURVE4_LOBE_S`]'s own doc comment for the cut-back this cost.
+///
+/// Same standing instruction as every revision: **do not tune around a crash if one appears.**
+///
+/// # What this revision actually measured (`wire-probe --csv`, final landed configuration)
+///
+/// | metric | value | vs. Revision 3 |
+/// |---|---|---|
+/// | weave-entry speed | 15.40 m/s (55.4 km/h) | up from 10.29 m/s (+50%) -- matches the rejected-then-restored 15.2 m/s floor |
+/// | peak speed | 18.54 m/s (66.8 km/h) | up from 13.66 m/s |
+/// | heading swing | -155.3 .. +131.2 deg, 286.5 deg peak-to-peak | up from 162.5 deg peak-to-peak (+76%) -- a sustained, held arc, NOT a full rotation (see `SCURVE4_LOBE_S`'s doc comment for the 4.5 s attempt that WAS one) |
+/// | heading centring | -12.1 deg off road direction | +5.89 deg (same order of magnitude, not chased further) |
+/// | lateral excursion (peak-to-peak) | 68.1 m | up from 13.4 m |
+/// | forward distance travelled | 335 m | up from 174 m -- inside the ~400 m provisional budget |
+/// | pitch, whole run | -7.6 .. +3.2 deg | -7.5 .. +2.3 deg -- essentially unchanged, well clear of the fallen threshold, no instability at any point measured |
+///
+/// **The board did not become unstable or face-plant at this speed/lobe-duration combination
+/// either** -- full stick lean, maxed steer/lateral, 3.0 rad/s yaw gain, 15+ m/s entry, sustained
+/// ~2.8 s carves -- reported plainly per the standing instruction, same as every prior revision.
+const SCURVE4_SETTLE_S: f64 = 0.5;
+const SCURVE4_BUILD_S: f64 = 15.0;
+/// Full stick -- unchanged from Revision 3 ("do not be shy with `fore_aft` during the build").
+const SCURVE4_BUILD_LEAN: f32 = 1.0;
+/// Unchanged from Revision 3: zero. Revision 2 found ANY sustained in-weave trim keeps adding
+/// speed rather than merely holding it, more so at higher entry speed -- still true here.
+const SCURVE4_WEAVE_TRIM: f32 = 0.0;
+/// Full-lobe duration -- lengthened from Revision 3's 1.6 s per "let the turn last longer left
+/// and right". **Measured, then cut back once already**: a first attempt at 4.5 s (this constant's
+/// initial value) DID make the turn last longer, so much longer that at `YAW_RATE_GAIN_RAD_S`
+/// (3.0) and maxed steer/lateral, a single lobe wound up MORE than a full 360 deg rotation --
+/// `wire-probe` measured 520.8 deg of total heading swing peak-to-peak, i.e. the board spun in
+/// circles rather than carving a held arc. That is not "a rider laying into a turn and holding the
+/// line", it is a different failure mode than the ones the request called out (not a crash, not
+/// instability -- pitch stayed completely stable through it -- but not the requested shape
+/// either). 2.8 s is the re-measured value: still meaningfully longer than Revision 3's 1.6 s
+/// (a genuinely held arc, not a flick), short enough that a lobe's own swing stays under one full
+/// rotation. See this file's own measured results for the actual swing this landed on.
+const SCURVE4_LOBE_S: f64 = 2.8;
+/// Entry (and, by the same centring logic, exit) half-lobe duration -- kept at the same ratio to
+/// `SCURVE4_LOBE_S` every prior revision used (roughly half), not re-derived: centring in this
+/// system has consistently come out close enough at that ratio without further chasing (Revision
+/// 2: +6.75 deg, Revision 3: +5.89 deg), and there is no reason to expect that relationship broke
+/// just because the lobes got longer rather than the gains or speed changing.
+const SCURVE4_ENTRY_S: f64 = 1.4;
+/// Lateral and steer stick, at their limits -- unchanged from Revision 3, and explicitly confirmed
+/// right by the COO this round ("keep steering and lean at their limits -- those were right").
+const SCURVE4_LATERAL: f32 = 1.0;
+const SCURVE4_STEER: f32 = 1.0;
 
 const S_CURVE_SCHEDULE: &[(f64, f64, f32, f32, f32, &str)] = &[
-    (0.0, SCURVE3_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (0.0, SCURVE4_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
     (
-        SCURVE3_SETTLE_S,
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S,
-        SCURVE3_BUILD_LEAN,
+        SCURVE4_SETTLE_S,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S,
+        SCURVE4_BUILD_LEAN,
         0.0,
         0.0,
         "lean forward (hard build)",
     ),
     (
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S,
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + SCURVE3_ENTRY_S,
-        SCURVE3_WEAVE_TRIM,
-        SCURVE3_LATERAL,
-        SCURVE3_STEER,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + SCURVE4_ENTRY_S,
+        SCURVE4_WEAVE_TRIM,
+        SCURVE4_LATERAL,
+        SCURVE4_STEER,
         "carve right (half lobe, enter)",
     ),
     (
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + SCURVE3_ENTRY_S,
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + SCURVE3_ENTRY_S + SCURVE3_LOBE_S,
-        SCURVE3_WEAVE_TRIM,
-        -SCURVE3_LATERAL,
-        -SCURVE3_STEER,
-        "carve left",
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + SCURVE4_ENTRY_S,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + SCURVE4_ENTRY_S + SCURVE4_LOBE_S,
+        SCURVE4_WEAVE_TRIM,
+        -SCURVE4_LATERAL,
+        -SCURVE4_STEER,
+        "carve left (hold the line)",
     ),
     (
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + SCURVE3_ENTRY_S + SCURVE3_LOBE_S,
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + SCURVE3_ENTRY_S + 2.0 * SCURVE3_LOBE_S,
-        SCURVE3_WEAVE_TRIM,
-        SCURVE3_LATERAL,
-        SCURVE3_STEER,
-        "carve right",
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + SCURVE4_ENTRY_S + SCURVE4_LOBE_S,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + SCURVE4_ENTRY_S + 2.0 * SCURVE4_LOBE_S,
+        SCURVE4_WEAVE_TRIM,
+        SCURVE4_LATERAL,
+        SCURVE4_STEER,
+        "carve right (hold the line)",
     ),
     (
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + SCURVE3_ENTRY_S + 2.0 * SCURVE3_LOBE_S,
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + 2.0 * SCURVE3_ENTRY_S + 2.0 * SCURVE3_LOBE_S,
-        SCURVE3_WEAVE_TRIM,
-        -SCURVE3_LATERAL,
-        -SCURVE3_STEER,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + SCURVE4_ENTRY_S + 2.0 * SCURVE4_LOBE_S,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + 2.0 * SCURVE4_ENTRY_S + 2.0 * SCURVE4_LOBE_S,
+        SCURVE4_WEAVE_TRIM,
+        -SCURVE4_LATERAL,
+        -SCURVE4_STEER,
         "straighten (exit lobe)",
     ),
     (
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + 2.0 * SCURVE3_ENTRY_S + 2.0 * SCURVE3_LOBE_S,
-        SCURVE3_SETTLE_S + SCURVE3_BUILD_S + 2.0 * SCURVE3_ENTRY_S + 2.0 * SCURVE3_LOBE_S + 1.5,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + 2.0 * SCURVE4_ENTRY_S + 2.0 * SCURVE4_LOBE_S,
+        SCURVE4_SETTLE_S + SCURVE4_BUILD_S + 2.0 * SCURVE4_ENTRY_S + 2.0 * SCURVE4_LOBE_S + 1.5,
         0.0,
         0.0,
         0.0,
