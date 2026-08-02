@@ -14,7 +14,8 @@
 //! through the selected schedule.
 //!
 //! ```text
-//! send-input [--target ADDR] [--scenario default|s-curve] [--kick-at SECONDS]
+//! send-input [--target ADDR] [--scenario default|s-curve]
+//!            [--kick-at SECONDS] [--reset-at SECONDS]
 //! ```
 //!
 //! # Pacing: absolute deadlines, and why that turned out to matter a lot
@@ -42,7 +43,9 @@
 //! simulated time with no socket and no staleness gate at all.
 
 use sim_host::scenario::{self, Schedule};
-use sim_host::wire::{InputIn, INPUT_FLAG_KICK, INPUT_MAGIC, INPUT_SCHEMA_VERSION};
+use sim_host::wire::{
+    InputIn, INPUT_FLAG_KICK, INPUT_FLAG_RESET, INPUT_MAGIC, INPUT_SCHEMA_VERSION,
+};
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
@@ -51,6 +54,7 @@ fn main() {
     let mut schedule: Schedule = scenario::DEFAULT_SCHEDULE;
     let mut schedule_name = "default";
     let mut kick_at: Option<f64> = None;
+    let mut reset_at: Option<f64> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
@@ -74,6 +78,23 @@ fn main() {
                 });
                 kick_at = Some(v.parse::<f64>().unwrap_or_else(|_| {
                     eprintln!("send-input: --kick-at value '{v}' is not a number");
+                    std::process::exit(1);
+                }));
+                i += 2;
+            }
+            // The other half of `--kick-at`: triggers `wire::INPUT_FLAG_RESET`
+            // (also a rising edge, also debounced host-side) at the given
+            // schedule time. `--kick-at T --reset-at T+n` is the whole
+            // knock-it-over-then-stand-it-back-up verification in one run,
+            // which is the only way to check that a reset FROM A GENUINE
+            // FALLEN STATE settles rather than respawning into another fall.
+            "--reset-at" => {
+                let v = args.get(i + 1).cloned().unwrap_or_else(|| {
+                    eprintln!("send-input: --reset-at needs a value");
+                    std::process::exit(1);
+                });
+                reset_at = Some(v.parse::<f64>().unwrap_or_else(|_| {
+                    eprintln!("send-input: --reset-at value '{v}' is not a number");
                     std::process::exit(1);
                 }));
                 i += 2;
@@ -115,9 +136,10 @@ fn main() {
     // If --kick-at lands after the schedule would otherwise end, extend the
     // run so there is time left afterward to watch the outcome rather than
     // the process exiting mid-fall.
-    let duration = kick_at.map_or(scenario::total_duration_s(schedule), |ka| {
-        scenario::total_duration_s(schedule).max(ka + 3.0)
-    });
+    let duration = [kick_at, reset_at]
+        .iter()
+        .flatten()
+        .fold(scenario::total_duration_s(schedule), |d, &t| d.max(t + 3.0));
     eprintln!(
         "send-input: sending to {target} for {duration:.1}s per the '{schedule_name}' schedule"
     );
@@ -127,6 +149,7 @@ fn main() {
     let mut seq: u64 = 0;
     let mut last_label = "";
     let mut kick_logged = false;
+    let mut reset_logged = false;
     let mut late_packets: u64 = 0;
     // Absolute deadline, advanced by exactly one period per packet -- never
     // `sleep(period)`, which would silently accumulate every scheduler
@@ -153,7 +176,19 @@ fn main() {
             eprintln!("send-input: t={t:6.2}s -> KICK");
             kick_logged = true;
         }
-        let flags = if in_kick_window { INPUT_FLAG_KICK } else { 0 };
+        // Same 40 ms one-shot window as the kick, for the same reason.
+        let in_reset_window = reset_at.is_some_and(|ra| (ra..ra + 0.04).contains(&t));
+        if in_reset_window && !reset_logged {
+            eprintln!("send-input: t={t:6.2}s -> RESET");
+            reset_logged = true;
+        }
+        let mut flags = 0;
+        if in_kick_window {
+            flags |= INPUT_FLAG_KICK;
+        }
+        if in_reset_window {
+            flags |= INPUT_FLAG_RESET;
+        }
         let pkt = InputIn {
             magic: INPUT_MAGIC,
             schema_version: INPUT_SCHEMA_VERSION,

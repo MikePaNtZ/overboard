@@ -225,3 +225,15 @@ void plant_mujoco_set_qpos_range(void* data, int adr, const double* src, int n) 
 void plant_mujoco_set_qvel_range(void* data, int adr, const double* src, int n) {
   memcpy(((mjData*)data)->qvel + adr, src, (size_t)n * sizeof(double));
 }
+
+// `mjModel::qpos0` -- the model's own reference configuration, i.e. exactly
+// the state mj_resetData would restore. Read rather than reconstructed so a
+// spawn reset (issue #161 follow-up: the RESET bit) cannot drift from what
+// the MJCF actually declares: axle height, joint zeros and the free joint's
+// identity quaternion all come from the compiled model, not from constants
+// duplicated on the Rust side.
+//
+// Ownership: `out` must point to at least `n` writable doubles (`n` = nq).
+void plant_mujoco_get_qpos0(void* model, double* out, int n) {
+  memcpy(out, ((mjModel*)model)->qpos0, (size_t)n * sizeof(double));
+}

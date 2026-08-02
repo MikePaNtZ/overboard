@@ -62,6 +62,7 @@ extern "C" {
     fn plant_mujoco_joint_dofadr(model: *mut c_void, joint_id: c_int) -> c_int;
     fn plant_mujoco_set_qpos_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
+    fn plant_mujoco_get_qpos0(model: *mut c_void, out: *mut f64, n: c_int);
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -301,6 +302,25 @@ impl Plant {
                 values.len() as c_int,
             )
         };
+    }
+
+    /// `mjModel::qpos0` -- the model's own reference configuration, exactly
+    /// the `qpos` `mj_resetData` would restore. Added for the RESET bit
+    /// (issue #161 follow-up).
+    ///
+    /// Read from the compiled model rather than reconstructed on the Rust
+    /// side, so a spawn reset cannot drift from what the MJCF declares: the
+    /// axle height, every joint zero and the free joint's identity quaternion
+    /// all come from the model. Unlike [`Plant::reset`] (`mj_resetData`) this
+    /// is just the numbers -- the caller decides what to write and, crucially,
+    /// does NOT have to send `mjData::time` back to zero, which would make
+    /// simulated time run backwards on anything downstream.
+    pub fn qpos0(&self) -> Vec<f64> {
+        let mut out = vec![0.0f64; self.nq()];
+        // SAFETY: `self.model` is non-null and owned for the life of `self`;
+        // `out` has exactly `nq` elements, matching the `n` passed.
+        unsafe { plant_mujoco_get_qpos0(self.model, out.as_mut_ptr(), out.len() as c_int) };
+        out
     }
 
     /// `mjModel::opt.timestep`, seconds -- issue #107 (I1c) AC2: `hal`'s

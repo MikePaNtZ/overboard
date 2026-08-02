@@ -799,15 +799,69 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             ),
         };
 
-        // `arm`/`reset` bits: accepted and tracked, logged on change rather
-        // than every tick. Neither gates anything yet -- the host self-arms
-        // unconditionally (see the comment on `backend.arm()` above), and
-        // there is no reset implementation to wire `reset` into. `stale`
-        // zeroes both the same way it zeroes weight_shift/steer.
+        // `arm` bit: accepted and tracked, logged on change rather than every
+        // tick, but still not wired to anything -- the host self-arms
+        // unconditionally (see the comment on `backend.arm()` above), so the
+        // board is effectively permanently armed. `stale` zeroes it the same
+        // way it zeroes weight_shift/steer.
         let input_armed_bit = !stale && latest_input.armed_bit;
+
+        // --- RESET (issue #161 follow-up) -------------------------------
+        //
+        // Rising-edge triggered, so holding the button does not re-reset every
+        // tick -- a held reset would pin the board at the spawn point and look
+        // exactly like a hang.
+        //
+        // Applied HERE, before this tick's `wait_observe`, so the very next
+        // observation -- and therefore the next state-out packet -- is of the
+        // board already standing up. Resetting after the step would publish
+        // one more frame of the fall first.
+        //
+        // **The plant is only half of it.** `SimBackend::reset_plant_state`
+        // puts `qpos`/`qvel` back to the model's spawn state, but this loop
+        // carries its own integrators alongside the plant, and every one of
+        // them is meaningless (or actively dangerous) against a board that has
+        // just teleported:
+        //
+        // - `estimator` is the important one. The complementary filter has
+        //   spent the fall converging on a pitch near 180 deg. Left alone it
+        //   would take ~`ESTIMATOR_TAU_S` to unwind that, and the regulator
+        //   would spend those two seconds commanding full current against an
+        //   attitude the board no longer has -- i.e. the reset would knock the
+        //   board straight back over. Rebuilt from scratch, which also clears
+        //   `last_t_ns`/`initialised` so it re-seeds off the next sample.
+        // - `last_amps` feeds the command feedforward; a pre-fall value would
+        //   bias the first estimate after respawn.
+        // - `yaw_rad` is the heading baked into the plant, and the plant's
+        //   heading is now `qpos0`'s, i.e. zero. These two must not disagree,
+        //   or `body_pitch_roll_rad` de-rotates by the wrong angle and reports
+        //   a tilt the board does not have.
+        // - `wheel_angle_rad`, `last_forward_speed_m_s`, `truth_pos_*`,
+        //   `prev_outside_corridor` are all integrals or one-cycle-lagged
+        //   copies of state that no longer exists.
+        // - `fall_kick_window_start_s` is cleared so a reset pressed DURING a
+        //   fall kick does not get shoved again by the tail of that window.
+        //
+        // `FALLEN` needs no explicit clearing: it is recomputed every tick
+        // from truth pitch, so it falls away by itself once the board is
+        // upright. That is asserted by measurement, not assumed -- see this
+        // file's own reset measurements.
         let input_reset_bit = !stale && latest_input.reset_bit;
         if input_reset_bit && !prev_reset_bit {
-            eprintln!("sim-host: input reset bit set -- not implemented yet, ignoring");
+            eprintln!(
+                "sim-host: RESET -- returning the board to the model's spawn state \
+                 (was at ({truth_pos_x_m:.1}, {truth_pos_y_m:.1}) m)"
+            );
+            backend.reset_plant_state();
+            estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
+            last_amps = 0.0;
+            yaw_rad = 0.0;
+            wheel_angle_rad = 0.0;
+            last_forward_speed_m_s = 0.0;
+            truth_pos_x_m = 0.0;
+            truth_pos_y_m = 0.0;
+            prev_outside_corridor = false;
+            fall_kick_window_start_s = None;
         }
         if input_armed_bit != prev_armed_bit {
             eprintln!(

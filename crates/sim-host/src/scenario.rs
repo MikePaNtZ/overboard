@@ -171,9 +171,65 @@ pub const S_CURVE_SCHEDULE: Schedule = &[
     (E2, E2 + 1.5, 0.0, 0.0, 0.0, "release (coast)"),
 ];
 
+/// A MEASUREMENT schedule, not a viewing one: build a modest speed, then hold
+/// one steady full-authority turn long enough to sweep well past 180 deg, so
+/// the achieved turn RADIUS can be fitted off the ground track instead of
+/// being quoted from `1 / (steer * k)` and hoped for.
+///
+/// It exists because the CEO's steering feedback is about a radius ("too wide
+/// by maybe 2x to turn around completely") and nothing in this repo produced
+/// one. `default`'s turn phase happens while the board is reversing at low
+/// speed, and `s-curve` flips before it ever reaches its carve (issue #190,
+/// ADR-0011) -- neither can answer "what radius does full stick actually
+/// give?".
+///
+/// **Lean is deliberately held at 0.6, not 1.0.** Full-stick lean is exactly
+/// what issue #190's flip needs: the current to hold the frame saturates the
+/// 40 A envelope at ~6.5 m/s and the board is inverted 1.55 s later. A
+/// measurement scenario that flipped would measure nothing, and ADR-0011 has
+/// the launch held on that defect. 0.6 is `DEFAULT_SCHEDULE`'s own
+/// already-validated accelerating value.
+///
+/// Lateral and steer ARE at full stick: the radius being measured is the
+/// tightest one the board offers, which is the number the feedback is about.
+const TURNAROUND_BUILD_S: f64 = 4.0;
+const TURNAROUND_SETTLE_S: f64 = 1.0;
+const TURNAROUND_HOLD_S: f64 = 12.0;
+const TURNAROUND_BUILD_LEAN: f32 = 0.6;
+pub const TURNAROUND_SCHEDULE: Schedule = &[
+    (0.0, TURNAROUND_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        TURNAROUND_SETTLE_S,
+        TURNAROUND_SETTLE_S + TURNAROUND_BUILD_S,
+        TURNAROUND_BUILD_LEAN,
+        0.0,
+        0.0,
+        "build speed (straight, no steer)",
+    ),
+    (
+        TURNAROUND_SETTLE_S + TURNAROUND_BUILD_S,
+        TURNAROUND_SETTLE_S + TURNAROUND_BUILD_S + TURNAROUND_HOLD_S,
+        0.0,
+        1.0,
+        1.0,
+        "hold full steer + full lean (measure the radius)",
+    ),
+    (
+        TURNAROUND_SETTLE_S + TURNAROUND_BUILD_S + TURNAROUND_HOLD_S,
+        TURNAROUND_SETTLE_S + TURNAROUND_BUILD_S + TURNAROUND_HOLD_S + 1.5,
+        0.0,
+        0.0,
+        0.0,
+        "release (coast)",
+    ),
+];
+
 /// Every schedule a `--scenario`/`--scripted-scenario` flag accepts, by name.
-pub const BY_NAME: &[(&str, Schedule)] =
-    &[("default", DEFAULT_SCHEDULE), ("s-curve", S_CURVE_SCHEDULE)];
+pub const BY_NAME: &[(&str, Schedule)] = &[
+    ("default", DEFAULT_SCHEDULE),
+    ("s-curve", S_CURVE_SCHEDULE),
+    ("turnaround", TURNAROUND_SCHEDULE),
+];
 
 /// Looks up a schedule by its command-line name.
 pub fn by_name(name: &str) -> Option<Schedule> {

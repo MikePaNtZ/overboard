@@ -417,6 +417,55 @@ impl SimBackend {
         // 3. Body-frame angular velocity (qvel[vadr + 3 ..= vadr + 5]): NOT
         //    touched, on purpose. See this method's doc comment.
     }
+
+    /// Restores the plant to the model's own spawn state -- `mjModel::qpos0`
+    /// and zero velocity everywhere -- **without touching `mjData::time`**.
+    /// This is what the RESET bit on the input wire does (issue #161
+    /// follow-up): put the board back upright, at the origin, at rest, so a
+    /// fall is recoverable without relaunching the stack.
+    ///
+    /// **Deliberately not `mj_resetData`.** That would also send `mjData::time`
+    /// back to zero, and this host publishes `mjData::time` as `sim_time_s` on
+    /// the state-out wire, where it is a monotonic clock a renderer
+    /// interpolates against and the fall-kick window is measured in. A clock
+    /// that jumps backwards mid-session is a far worse bug than the one a
+    /// reset is fixing. Everything else `mj_resetData` would restore is either
+    /// re-derived by the next `mj_step` (`xpos`/`xquat`/`sensordata`) or
+    /// cleared here explicitly.
+    ///
+    /// `qpos0` is read from the compiled model, not reconstructed, so the
+    /// spawn attitude and the axle height come from the MJCF and cannot drift
+    /// from it.
+    ///
+    /// Also clears this backend's own in-flight actuation: a current commanded
+    /// on the tick before a reset must not be delivered to a board that has
+    /// just been stood back up, which would shove it the instant it respawned.
+    /// The ballast targets are NOT cleared -- the host rewrites those from the
+    /// live stick every cycle regardless (see
+    /// [`SimBackend::set_ballast_targets`]).
+    ///
+    /// `qacc_warmstart` is left as it is. It is the constraint solver's
+    /// initial guess, not state: a stale guess after a teleport costs solver
+    /// iterations on one step, never correctness.
+    ///
+    /// Call this BEFORE `wait_observe`, so the next observation is of the
+    /// reset board rather than one more step of the old one.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn reset_plant_state(&mut self) {
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("reset_plant_state: backend is not open");
+        let qpos0 = plant.qpos0();
+        plant.set_qpos_range(0, &qpos0);
+        let zeros = vec![0.0f64; plant.nv()];
+        plant.set_qvel_range(0, &zeros);
+        plant.set_xfrc_applied(self.frame_body, [0.0; 3], [0.0; 3]);
+        self.pending_current_a = None;
+        self.applied_current_a = 0.0;
+    }
 }
 
 /// Hamilton product of two `[w, x, y, z]` quaternions, `a` then `b` read
