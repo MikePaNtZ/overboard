@@ -1,0 +1,67 @@
+# Overboard Stage-0B boot configuration.
+#
+# Based on the stock Raspberry Pi OS config.txt. Everything Overboard-specific
+# is in the two marked blocks at the bottom; the rest is stock and should be
+# diffed against upstream rather than hand-edited.
+
+# Automatically load overlays for detected DSI displays
+display_auto_detect=1
+
+# Automatically load initramfs files, if found
+auto_initramfs=1
+
+# Enable DRM VC4 V3D driver
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+disable_fw_kms_setup=1
+
+# Disable compensation for displays with overscan
+disable_overscan=1
+
+# Run as fast as firmware / board allows
+arm_boost=1
+
+# Deliberately NOT enabled, against the stock file: camera_auto_detect and
+# dtparam=audio. Neither is used by a balance board, both probe hardware at
+# boot, and Stage 0B's whole output is a latency distribution -- every
+# unnecessary driver is another IRQ source in the tail.
+
+[pi5]
+BOOT_UART=1
+
+# ===========================================================================
+# OVERBOARD: kernel selection  (issue #182 I2, design Q12)
+# ===========================================================================
+# Pi 5 firmware defaults to loading kernel_2712.img. There is NO rpt-2712-rt
+# package, so the real-time kernel we install is the generic v8 one, which
+# ships as kernel8.img -- confirmed present in the spike's build output.
+# Without this line the firmware would load a kernel we did not install, or
+# fail to boot.
+#
+# ⚠️ UNVERIFIED ON HARDWARE. This is the design's own Q12, described there as
+# "operational, not architectural -- but it is the difference between a card
+# that boots and one that does not". It is a reasoned first attempt, not a
+# confirmed answer, and the restore test (AC-11) is what settles it. If the
+# board does not boot, THIS LINE IS THE FIRST THING TO CHANGE.
+kernel=kernel8.img
+
+# ===========================================================================
+# OVERBOARD: CAN  (issue #182 I3)
+# ===========================================================================
+# Waveshare 2-Channel Isolated CAN FD HAT: MCP2518FD controller + MCP2562FD
+# transceiver, so the mainline `mcp251xfd` driver is correct. Confirmed
+# against the board on 2026-08-02.
+#
+# CAN_0 only. The HAT's second channel is deliberately NOT enabled here:
+# both channels share SPI0, and concurrent traffic on CAN_1 roughly doubles
+# SPI0 load, which would invalidate the AC-9 tail analysis. CAN_1 is for the
+# hardware-loopback self-test, enabled by hand for that purpose and never
+# during a timed run.
+dtparam=spi=on
+dtoverlay=mcp251xfd,spi0-0,interrupt=25
+
+# The IMU must NOT share this SPI bus (ICD §4.3). The Pi 5 has three SPI
+# controllers, so this is a wiring choice, not a constraint -- recorded here
+# because config.txt is where someone would otherwise casually add it.

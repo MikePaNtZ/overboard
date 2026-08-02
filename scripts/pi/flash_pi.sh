@@ -187,7 +187,7 @@ fi
 # Stage credentials onto the FAT32 boot partition.
 #
 # The boot partition, because the rootfs is ext4 and macOS cannot mount it.
-# firstboot_install.sh (shipped in the image) moves these onto the rootfs with
+# overboard-firstboot (shipped in the image) moves these onto the rootfs with
 # correct ownership and permissions on first boot, then shreds them.
 # ---------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 0 ]; then

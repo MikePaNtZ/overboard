@@ -1,0 +1,83 @@
+# METABEGIN
+# X-Env-Layer-Name: overboard-base
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Category: overboard
+# X-Env-Layer-Desc: Stage-0B bench payload -- measurement tooling, CAN
+#  userspace, and the first-boot credential installer.
+# X-Env-Layer-Requires: debian-trixie-arm64-slim,
+#  rpi-debian-trixie,
+#  rpi-misc-skel,
+#  systemd-net-min,
+#  systemd-timesyncd
+# METAEND
+#
+# Files ship via the sibling `overboard-base.rootfs-overlay/` directory,
+# which rpi-image-gen applies automatically -- the convention its own
+# family-secpolicy-base layer uses. No asset-dir plumbing and no install
+# hooks: fewer places for a path to be wrong, which on this workstream has
+# been the dominant failure mode.
+---
+mmdebstrap:
+  architectures:
+    - arm64
+  packages:
+    # AC-5's instrument. cyclictest measures the KERNEL; overboard-loop-profile
+    # measures OUR loop on that kernel. Both ship, because them disagreeing is
+    # informative -- cyclictest clean and the profiler dirty means the problem
+    # is ours.
+    - rt-tests
+    # candump/cansend/cangen, plus `ip link` to bring can0 up.
+    - can-utils
+    - iproute2
+    # AC-5's load generator. A jitter number taken on an idle box is not what
+    # the criterion asks for -- it says "under representative CPU and network
+    # load".
+    - stress-ng
+    # Consumes the keyfile connection profiles flash_pi.sh stages on the boot
+    # partition.
+    - network-manager
+    # Key-only SSH is how the board is reached; there is no console user.
+    - openssh-server
+
+  customize-hooks:
+    # -----------------------------------------------------------------------
+    # AC-4: provenance, every field non-empty.
+    #
+    # Hooks run on the HOST with $1 as the rootfs path, so the kernel facts
+    # are read back through `chroot` rather than echoed from a build
+    # variable. That distinction is the point: a manifest that repeats the
+    # intention agrees with itself while being wrong, and the only useful
+    # manifest is one that reports what is actually installed.
+    # -----------------------------------------------------------------------
+    - |
+      set -eu
+      kpkg="$(chroot "$1" dpkg-query -W -f='${Package}' 'linux-image-*-rt' 2>/dev/null || echo unknown)"
+      kver="$(chroot "$1" dpkg-query -W -f='${Version}' 'linux-image-*-rt' 2>/dev/null || echo unknown)"
+      cat > "$1/etc/overboard-image.json" <<EOF
+      {
+        "schema_version": 1,
+        "image_name": "${IGconf_image_name:-overboard-stage0b}",
+        "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "git_sha": "${OVERBOARD_GIT_SHA:-unknown}",
+        "ci_run_url": "${OVERBOARD_CI_RUN_URL:-unknown}",
+        "kernel_package": "$kpkg",
+        "kernel_version": "$kver",
+        "debian_suite": "trixie",
+        "architecture": "arm64"
+      }
+      EOF
+
+    # AC-3: a package manifest beside the image, so two builds diff reviewably
+    # even when they are not identical -- and they will not be.
+    # archive.raspberrypi.com has no snapshot service, so a rebuild next month
+    # resolves different packages. Claiming bit-for-bit reproducibility would
+    # be exactly the confident-and-wrong statement the design forbids.
+    - |
+      set -eu
+      chroot "$1" dpkg-query -W -f='${Package}=${Version}\n' | sort > "$1/etc/overboard-packages.txt"
+
+    # enable-units rather than `chroot systemctl enable`: the idiomatic helper
+    # here, and it works when the chroot's systemd cannot be run natively.
+    - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-firstboot
+    - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-can0
+    - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-vcan0

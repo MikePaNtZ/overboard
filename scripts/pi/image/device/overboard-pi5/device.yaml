@@ -1,0 +1,82 @@
+# METABEGIN
+# X-Env-Layer-Name: overboard-pi5
+# X-Env-Layer-Category: device
+# X-Env-Layer-Desc: Raspberry Pi 5 running the PREEMPT_RT v8 kernel, with the
+#  MCP2518FD CAN HAT wired in and one core isolated for the control loop.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: rpi-device-base,overboard-linux-v8-rt
+# X-Env-Layer-Provides: device,rpi-device
+#
+# X-Env-VarPrefix: device
+#
+# X-Env-Var-class: pi5
+# X-Env-Var-class-Desc: Device class
+# X-Env-Var-class-Required: n
+# X-Env-Var-class-Valid: keywords:pi5
+# X-Env-Var-class-Set: y
+#
+# X-Env-Var-storage_type: sd
+# X-Env-Var-storage_type-Desc: Storage the image is written to
+# X-Env-Var-storage_type-Required: n
+# X-Env-Var-storage_type-Valid: sd,nvme,usb
+# X-Env-Var-storage_type-Set: y
+#
+# X-Env-Var-assetdir: ${DIRECTORY}
+# X-Env-Var-assetdir-Desc: Device asset directory (config.txt lives here)
+# X-Env-Var-assetdir-Required: n
+# X-Env-Var-assetdir-Valid: dir
+# X-Env-Var-assetdir-Set: y
+# METAEND
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS INSTEAD OF THE STOCK `rpi5` LAYER
+#
+# rpi-image-gen ships a perfectly good Pi 5 device layer. We cannot use it,
+# for exactly one reason: it declares
+#
+#     X-Env-Layer-Requires: rpi-device-base,rpi-linux-2712
+#
+# and `rpi-linux-2712` is the 16K-page, Pi-5-tuned kernel -- the flavour that
+# has NO REAL-TIME BUILD in the archive. Requiring it would quietly put a
+# non-RT kernel on a card whose entire purpose is measuring real-time latency,
+# and the image would build green while being wrong.
+#
+# So this layer is the stock one with the kernel requirement swapped, and it
+# is the single place design section 4's accepted tradeoff becomes a file.
+# ---------------------------------------------------------------------------
+---
+mmdebstrap:
+  customize-hooks:
+    # config.txt is the device's, not the base layer's: it carries the CAN
+    # overlay and the kernel selection, and neither can be expressed as a
+    # package.
+    - mkdir -p $1/boot/firmware
+    - install -m 644 ${IGconf_device_assetdir}/config.txt $1/boot/firmware/config.txt
+
+    # -----------------------------------------------------------------------
+    # cmdline.txt is APPENDED TO, never replaced.
+    #
+    # It carries the root= parameter that the image layer's storage binder
+    # generates, and that value is not knowable here. Shipping a whole
+    # cmdline.txt from an asset dir -- which the stock `slim` example does --
+    # would overwrite it and produce a card that does not boot. Appending one
+    # parameter cannot.
+    #
+    # isolcpus=3 hands core 3 to the 500 Hz loop. CONFIG_CPU_ISOLATION=y is
+    # set in this kernel (verified by scripts/pi/verify_kernel.sh), so this
+    # works -- but CONFIG_NO_HZ_FULL is NOT set, so the isolated core still
+    # takes the 250 Hz tick. `nohz_full=` is therefore deliberately absent:
+    # passing it would be silently ignored and would read like a guarantee we
+    # do not have. Design section 4 calls that a floor, not a knob.
+    # -----------------------------------------------------------------------
+    - |
+      set -eu
+      cl="$1/boot/firmware/cmdline.txt"
+      if [ -f "$cl" ]; then
+        if ! grep -q 'isolcpus=' "$cl"; then
+          sed -i 's/[[:space:]]*$/ isolcpus=3/' "$cl"
+        fi
+        echo "cmdline.txt: $(cat "$cl")"
+      else
+        echo "WARNING: no cmdline.txt to append isolcpus to; the control core will not be isolated" >&2
+      fi
