@@ -18,7 +18,7 @@
 //! send-input [--target ADDR]
 //! ```
 
-use sim_host::wire::{InputIn, INPUT_MAGIC, SCHEMA_VERSION};
+use sim_host::wire::{InputIn, INPUT_MAGIC, INPUT_SCHEMA_VERSION};
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
@@ -98,7 +98,7 @@ fn main() {
         }
         let pkt = InputIn {
             magic: INPUT_MAGIC,
-            schema_version: SCHEMA_VERSION,
+            schema_version: INPUT_SCHEMA_VERSION,
             flags: 0,
             seq,
             weight_shift_fore_aft: fore_aft,

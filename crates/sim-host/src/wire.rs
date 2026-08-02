@@ -23,8 +23,16 @@ use std::net::SocketAddr;
 pub const STATE_MAGIC: u32 = 0x4F42_5731;
 /// `magic` for [`InputIn`] -- ASCII "OBI1".
 pub const INPUT_MAGIC: u32 = 0x4F42_4931;
-/// The only schema version either struct has spoken so far.
-pub const SCHEMA_VERSION: u16 = 1;
+/// [`StateOut`]'s schema version -- bumped to 2 for the rider-position
+/// fields (issue #161 follow-up). `sim-host` always sends 2; the renderer is
+/// being told to accept 1 (treating it as "no rider data, rider neutral")
+/// and 2, so a one-sided deploy in either direction cannot produce a dead
+/// window. This crate has no v1 sender left to keep around, so
+/// [`StateOut::from_bytes`] only accepts 2 -- see that method's doc comment.
+pub const STATE_SCHEMA_VERSION: u16 = 2;
+/// [`InputIn`]'s schema version. Unchanged by the v2 state-out bump --
+/// `InputIn` is explicitly untouched (issue #161 wire v2 follow-up).
+pub const INPUT_SCHEMA_VERSION: u16 = 1;
 
 /// `StateOut::flags` bit 0.
 pub const STATE_FLAG_ARMED: u16 = 1 << 0;
@@ -43,7 +51,11 @@ pub const STATE_OUT_ADDR: &str = "127.0.0.1:9601";
 /// Host BINDS/LISTENS for input here.
 pub const INPUT_IN_ADDR: &str = "127.0.0.1:9602";
 
-/// One tick of board state, host -> Unreal (issue #161 wire v1).
+/// One tick of board state, host -> Unreal (issue #161 wire, v2 as of the
+/// rider-position follow-up). v1's fields are unchanged, in the same order;
+/// v2 appends `rider_fore_aft_m`/`rider_lateral_m` at the end -- ADR-0010's
+/// own "Consequences" section calls this out as the designed-for case
+/// ("Adding a field is a version bump, which is cheap by construction").
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StateOut {
@@ -87,11 +99,25 @@ pub struct StateOut {
     /// side has a heading to render with in W1.
     pub yaw_rad: f32,
     pub motor_current_a: f32,
+    /// **v2.** ACTUAL `ballast_fa` joint position, metres, signed -- NOT the
+    /// commanded target. The ballast is rate-limited (`overboard_rider.xml`'s
+    /// `timeconst`), so it lags a step change in `weight_shift_fore_aft`;
+    /// sending the real joint position means that lag is visible to the
+    /// renderer, honestly, rather than hidden behind an instantaneous
+    /// commanded value. Small by construction -- +/-0.05 m range, ~0.04 m
+    /// achieved at 0.8 stick (measured, issue #161 follow-up) -- and this
+    /// crate does NOT amplify it for legibility; a renderer that wants a
+    /// more visible pose does that itself, as its own declared non-physical
+    /// channel, not one faked at the source.
+    pub rider_fore_aft_m: f32,
+    /// **v2.** ACTUAL `ballast_lat` joint position, metres, signed. Same
+    /// status as `rider_fore_aft_m` in every respect but axis.
+    pub rider_lateral_m: f32,
 }
 
 impl StateOut {
     /// The exact on-wire byte count -- also asserted at compile time below.
-    pub const WIRE_SIZE: usize = 72;
+    pub const WIRE_SIZE: usize = 80;
 
     #[allow(clippy::too_many_arguments)]
     pub fn to_bytes(&self) -> [u8; Self::WIRE_SIZE] {
@@ -120,13 +146,18 @@ impl StateOut {
         put!(self.pitch_rad);
         put!(self.yaw_rad);
         put!(self.motor_current_a);
+        put!(self.rider_fore_aft_m);
+        put!(self.rider_lateral_m);
         debug_assert_eq!(off, Self::WIRE_SIZE);
         buf
     }
 
     /// Parses a received datagram. Fails loudly (returns [`WireError`])
     /// rather than misreading a mismatched magic/version as a float --
-    /// per issue #161's explicit instruction.
+    /// per issue #161's explicit instruction. Accepts ONLY
+    /// [`STATE_SCHEMA_VERSION`] (2): this crate has no v1 sender to stay
+    /// compatible with (`sim-host` always sends 2 -- see that constant's doc
+    /// comment) -- v1 tolerance is the renderer's job, in a different repo.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, WireError> {
         if buf.len() != Self::WIRE_SIZE {
             return Err(WireError::WrongSize {
@@ -151,9 +182,9 @@ impl StateOut {
                 got: magic,
             });
         }
-        if schema_version != SCHEMA_VERSION {
+        if schema_version != STATE_SCHEMA_VERSION {
             return Err(WireError::BadVersion {
-                expected: SCHEMA_VERSION,
+                expected: STATE_SCHEMA_VERSION,
                 got: schema_version,
             });
         }
@@ -167,6 +198,8 @@ impl StateOut {
         let pitch_rad = take!(f32);
         let yaw_rad = take!(f32);
         let motor_current_a = take!(f32);
+        let rider_fore_aft_m = take!(f32);
+        let rider_lateral_m = take!(f32);
         debug_assert_eq!(off, Self::WIRE_SIZE);
         Ok(StateOut {
             magic,
@@ -181,6 +214,8 @@ impl StateOut {
             pitch_rad,
             yaw_rad,
             motor_current_a,
+            rider_fore_aft_m,
+            rider_lateral_m,
         })
     }
 }
@@ -253,9 +288,9 @@ impl InputIn {
                 got: magic,
             });
         }
-        if schema_version != SCHEMA_VERSION {
+        if schema_version != INPUT_SCHEMA_VERSION {
             return Err(WireError::BadVersion {
-                expected: SCHEMA_VERSION,
+                expected: INPUT_SCHEMA_VERSION,
                 got: schema_version,
             });
         }
@@ -325,8 +360,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn state_out_is_exactly_72_bytes() {
-        assert_eq!(core::mem::size_of::<StateOut>(), 72);
+    fn state_out_is_exactly_80_bytes() {
+        assert_eq!(core::mem::size_of::<StateOut>(), 80);
     }
 
     #[test]
@@ -337,7 +372,7 @@ mod tests {
     fn sample_state() -> StateOut {
         StateOut {
             magic: STATE_MAGIC,
-            schema_version: SCHEMA_VERSION,
+            schema_version: STATE_SCHEMA_VERSION,
             flags: STATE_FLAG_ARMED | STATE_FLAG_VALID,
             seq: 42,
             sim_time_s: 1.5,
@@ -348,6 +383,8 @@ mod tests {
             pitch_rad: -0.05,
             yaw_rad: 0.3,
             motor_current_a: 4.5,
+            rider_fore_aft_m: 0.021,
+            rider_lateral_m: -0.013,
         }
     }
 
@@ -393,10 +430,29 @@ mod tests {
         );
     }
 
+    /// This crate always sends v2 (issue #161 follow-up); a genuine
+    /// 72-byte v1 packet -- correct magic, `schema_version = 1`, the OLD
+    /// (pre-rider-fields) size -- must still be refused, by size, before
+    /// `schema_version` is even inspected. v1/v2 coexistence tolerance is
+    /// the renderer's job, in a different repo, not `StateOut::from_bytes`'s.
+    #[test]
+    fn state_out_rejects_a_genuine_v1_sized_packet() {
+        let mut v1_bytes = [0u8; 72];
+        v1_bytes[0..4].copy_from_slice(&STATE_MAGIC.to_le_bytes());
+        v1_bytes[4..6].copy_from_slice(&1u16.to_le_bytes()); // schema_version = 1
+        assert_eq!(
+            StateOut::from_bytes(&v1_bytes),
+            Err(WireError::WrongSize {
+                expected: StateOut::WIRE_SIZE,
+                got: 72,
+            })
+        );
+    }
+
     fn sample_input() -> InputIn {
         InputIn {
             magic: INPUT_MAGIC,
-            schema_version: SCHEMA_VERSION,
+            schema_version: INPUT_SCHEMA_VERSION,
             flags: INPUT_FLAG_ARM,
             seq: 7,
             weight_shift_fore_aft: 0.5,

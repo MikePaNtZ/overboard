@@ -57,6 +57,8 @@ extern "C" {
     fn plant_mujoco_get_body_xpos(data: *mut c_void, body_id: c_int, out: *mut f64);
     fn plant_mujoco_get_body_xquat(data: *mut c_void, body_id: c_int, out: *mut f64);
     fn plant_mujoco_actuator_id(model: *mut c_void, name: *const c_char) -> c_int;
+    fn plant_mujoco_joint_id(model: *mut c_void, name: *const c_char) -> c_int;
+    fn plant_mujoco_joint_qposadr(model: *mut c_void, joint_id: c_int) -> c_int;
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -347,6 +349,28 @@ impl Plant {
         } else {
             Some(id as usize)
         }
+    }
+
+    /// `mjModel::jnt_qposadr` for the joint named `name`, or `None` if the
+    /// model has no such joint -- the index into `Plant::qpos()`'s vector
+    /// where that joint's own generalized coordinate(s) start. Exists for
+    /// issue #161 wire v2: the state-out wire needs the ballast joints'
+    /// ACTUAL position, and there is no sensor declared for them (no model
+    /// change this pass). Correct for any 1-DOF joint (e.g. the `slide`
+    /// joints `overboard_rider.xml`'s ballast uses); a multi-DOF joint (a
+    /// `free` or `ball` joint) would need more than one address, which this
+    /// method does not attempt to return.
+    pub fn joint_qposadr(&self, name: &str) -> Option<usize> {
+        let name_c = CString::new(name).expect("joint name must not contain a NUL byte");
+        // SAFETY: `self.model` is non-null and owned for the life of `self`;
+        // `name_c` is a valid NUL-terminated string kept alive for the call.
+        let id = unsafe { plant_mujoco_joint_id(self.model, name_c.as_ptr()) };
+        if id < 0 {
+            return None;
+        }
+        // SAFETY: `id` was just resolved against this same model.
+        let adr = unsafe { plant_mujoco_joint_qposadr(self.model, id) };
+        Some(adr as usize)
     }
 
     /// `mjData::xmat[body_id]`, row-major, exactly `data.xmat[body].reshape(3,

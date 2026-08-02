@@ -590,6 +590,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         dr_pos_y_m += (forward_speed_m_s * heading_y) as f64 * DT_S;
         let pos = [dr_pos_x_m as f32, dr_pos_y_m as f32, pos_f64[2] as f32];
 
+        // Wire v2 (issue #161 follow-up): the ACTUAL ballast joint
+        // positions -- CEO feedback was "there is no rider, and the turn
+        // is not discernible", and a renderer cannot pose a rider from data
+        // it does not have. NOT the commanded target (`weight_shift_*` *
+        // BALLAST_RANGE_M`) -- the actuator is rate-limited
+        // (`overboard_rider.xml`'s `timeconst`), so it lags a step change,
+        // and sending the real joint value means that lag is visible
+        // honestly rather than hidden behind an instantaneous command. Small
+        // by construction (measured ~0.04 m at 0.8 stick) -- this host does
+        // NOT amplify it for legibility; that is the renderer's job, as its
+        // own declared non-physical channel, not this crate's to fake.
+        let (rider_fore_aft_m, rider_lateral_m) = backend.truth_ballast_positions();
+
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
         if pitch_rad.abs() > FALLEN_PITCH_RAD {
             flags |= wire::STATE_FLAG_FALLEN;
@@ -597,7 +610,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
 
         let state = StateOut {
             magic: wire::STATE_MAGIC,
-            schema_version: wire::SCHEMA_VERSION,
+            schema_version: wire::STATE_SCHEMA_VERSION,
             flags,
             seq: ticks,
             sim_time_s: obs.t_recv_ns as f64 * 1e-9,
@@ -608,6 +621,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             pitch_rad,
             yaw_rad,
             motor_current_a: obs.motor_current_a,
+            rider_fore_aft_m,
+            rider_lateral_m,
         };
         out_socket.send_to(&state.to_bytes(), cfg.state_out_addr)?;
 

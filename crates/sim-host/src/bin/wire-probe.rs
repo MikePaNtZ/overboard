@@ -23,7 +23,7 @@
 //! `sim-host`'s dead-reckoned game path, NOT raw MuJoCo x/y -- see
 //! `sim_host::wire::StateOut::pos`'s doc comment.
 
-use sim_host::wire::{StateOut, SCHEMA_VERSION, STATE_MAGIC};
+use sim_host::wire::{StateOut, STATE_MAGIC, STATE_SCHEMA_VERSION};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -87,6 +87,10 @@ struct CsvRow {
     yaw_rad: f32,
     wheel_rate_rad_s: f32,
     motor_current_a: f32,
+    /// v2: ACTUAL ballast joint position, metres -- see
+    /// `sim_host::wire::StateOut::rider_fore_aft_m`'s doc comment.
+    rider_fore_aft_m: f32,
+    rider_lateral_m: f32,
 }
 
 fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
@@ -150,6 +154,10 @@ fn main() {
     let mut pitch_min = f32::INFINITY;
     let mut pitch_max = f32::NEG_INFINITY;
     let mut pitch_final: f32 = f32::NAN;
+    let mut rider_fore_aft_min = f32::INFINITY;
+    let mut rider_fore_aft_max = f32::NEG_INFINITY;
+    let mut rider_lateral_min = f32::INFINITY;
+    let mut rider_lateral_max = f32::NEG_INFINITY;
     let mut first_seq: Option<u64> = None;
     let mut last_seq: Option<u64> = None;
     // Buffered in memory and written once at the end, not appended live:
@@ -167,6 +175,12 @@ fn main() {
                     pitch_min = pitch_min.min(pitch);
                     pitch_max = pitch_max.max(pitch);
                     pitch_final = pitch;
+                    let (rider_fore_aft, rider_lateral) =
+                        (state.rider_fore_aft_m, state.rider_lateral_m);
+                    rider_fore_aft_min = rider_fore_aft_min.min(rider_fore_aft);
+                    rider_fore_aft_max = rider_fore_aft_max.max(rider_fore_aft);
+                    rider_lateral_min = rider_lateral_min.min(rider_lateral);
+                    rider_lateral_max = rider_lateral_max.max(rider_lateral);
                     let seq = state.seq;
                     first_seq.get_or_insert(seq);
                     last_seq = Some(seq);
@@ -181,6 +195,8 @@ fn main() {
                             yaw_rad: state.yaw_rad,
                             wheel_rate_rad_s: state.wheel_rate_rad_s,
                             motor_current_a: state.motor_current_a,
+                            rider_fore_aft_m: rider_fore_aft,
+                            rider_lateral_m: rider_lateral,
                         });
                     }
                 }
@@ -263,12 +279,20 @@ fn main() {
         pitch_max.to_degrees(),
         pitch_final.to_degrees()
     );
+    println!(
+        "rider_fore_aft_m: min={rider_fore_aft_min:.6} max={rider_fore_aft_max:.6} \
+         (v2 -- ACTUAL ballast_fa joint position, not the commanded target)"
+    );
+    println!(
+        "rider_lateral_m: min={rider_lateral_min:.6} max={rider_lateral_max:.6} \
+         (v2 -- ACTUAL ballast_lat joint position, not the commanded target)"
+    );
 
     if total_received == 0 {
         println!("confirmation: NO PACKETS RECEIVED -- nothing to confirm");
     } else if invalid_count == 0 {
         println!(
-            "confirmation: magic ({STATE_MAGIC:#010x}) + schema_version ({SCHEMA_VERSION}) \
+            "confirmation: magic ({STATE_MAGIC:#010x}) + schema_version ({STATE_SCHEMA_VERSION}) \
              parsed correctly on all {valid_count}/{total_received} received packets"
         );
     } else {
@@ -280,11 +304,11 @@ fn main() {
 
     if let Some(path) = &args.csv {
         let mut out = String::from(
-            "seq,sim_time_s,pos_x_m,pos_y_m,pitch_rad,yaw_rad,wheel_rate_rad_s,motor_current_a\n",
+            "seq,sim_time_s,pos_x_m,pos_y_m,pitch_rad,yaw_rad,wheel_rate_rad_s,motor_current_a,rider_fore_aft_m,rider_lateral_m\n",
         );
         for r in &csv_rows {
             out.push_str(&format!(
-                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
                 r.seq,
                 r.sim_time_s,
                 r.pos_x_m,
@@ -292,7 +316,9 @@ fn main() {
                 r.pitch_rad,
                 r.yaw_rad,
                 r.wheel_rate_rad_s,
-                r.motor_current_a
+                r.motor_current_a,
+                r.rider_fore_aft_m,
+                r.rider_lateral_m
             ));
         }
         match std::fs::write(path, out) {
