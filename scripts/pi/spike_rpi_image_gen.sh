@@ -93,15 +93,40 @@ else
   echo "<no install_deps.sh - skipping>"
 fi
 
+section "entrypoint usage"
+# Run 1 of this spike guessed `./build.sh` and found no such file. The
+# unconditional dump above is what turned that into a one-line fix rather than
+# another cycle: the real entrypoint is `bin/idp.sh` (image definition
+# processor) and stock configs live under `examples/*/config`.
+IDP="./bin/idp.sh"
+if [ -x "$IDP" ]; then
+  "$IDP" --help 2>&1 | head -60 || "$IDP" -h 2>&1 | head -60 || true
+else
+  echo "MISSING: $IDP - the layout changed again; re-read the sections above"
+fi
+
 section "BUILD ATTEMPT"
 build_rc=1
-if [ -x ./build.sh ]; then
-  echo "$ ./build.sh"
-  ./build.sh 2>&1 | tail -120
-  build_rc="${PIPESTATUS[0]}"
+# `slim` is the smallest stock config, so this asks the narrowest possible
+# version of the question -- does the toolchain run here at all -- rather than
+# also testing whatever a fat example happens to pull in.
+CONFIG="examples/slim/config"
+[ -e "$CONFIG" ] || CONFIG="test/configurations/config"
+
+if [ -x "$IDP" ]; then
+  # Two documented-looking invocations rather than one. Still a guess; the
+  # usage dump above is what makes the next correction cheap if both are
+  # wrong, and trying two costs seconds.
+  for attempt in "build -c $CONFIG" "-c $CONFIG"; do
+    echo "$ $IDP $attempt"
+    # shellcheck disable=SC2086
+    "$IDP" $attempt 2>&1 | tail -80
+    build_rc="${PIPESTATUS[0]}"
+    echo "  -> exit $build_rc"
+    [ "$build_rc" -eq 0 ] && break
+  done
 else
-  echo "no ./build.sh found - the entrypoint guess was wrong."
-  echo "See 'candidate entrypoints' above for what this repo actually ships."
+  echo "no runnable entrypoint found."
 fi
 echo "build exit: $build_rc"
 

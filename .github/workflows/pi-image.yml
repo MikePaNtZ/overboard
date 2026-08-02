@@ -101,9 +101,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NOT `continue-on-error`. Run 1 had it, and the job reported GREEN while
+      # the script inside it printed "SPIKE RESULT: RED" -- a check saying the
+      # opposite of what happened, which is the one thing a check must never
+      # do. Nothing in this workflow is a required status check, so an honest
+      # red here blocks nothing and misleads nobody.
       - name: Build rpi-image-gen's stock config in our CI shape
         id: spike
-        continue-on-error: true
         run: |
           docker run --privileged --rm \
             -v "$PWD:/work" -w /work \
