@@ -176,7 +176,7 @@ const ESTIMATOR_TAU_S: f32 = 2.0;
 /// `shuttle_run.py`'s tuned controller relies on this same FFI fallback
 /// rather than passing its own gain, so this host does too, duplicated here
 /// because this host does not link `control-ffi`.
-const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
+const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0650;
 
 /// `weight_shift_fore_aft` / `weight_shift_lateral`, both clamped to
 /// `[-1, 1]` on the wire, map linearly onto this range -- the SAME +/-0.05 m
