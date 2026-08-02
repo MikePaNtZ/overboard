@@ -226,7 +226,15 @@ const YAW_AUTHORITY_FLOOR: f32 = 0.35;
 /// 50 control cycles (100 ms at 500 Hz): generous relative to any plausible
 /// Unreal send rate, tight relative to a human's reaction time. A documented
 /// default, not a bench-tuned number.
-const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
+///
+/// **Not as generous as that reasoning assumed** (issue #190): this crate's
+/// own `send-input`, which claimed 50 Hz, was measured delivering 7-13 Hz on
+/// a loaded dev laptop -- straddling this threshold, so a run-varying
+/// fraction of every scripted run silently ran with the input zeroed. That is
+/// fixed in the sender (absolute-deadline pacing) rather than by widening
+/// this timeout, which is a safety property and stays where it is. Public
+/// so a harness can quote the number it has to beat.
+pub const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Placeholder threshold for the state-out FALLEN bit.
 /// `sim/scenarios/disturbance_envelope.py` derives the REAL nose-strike
@@ -355,6 +363,12 @@ const STARTUP_KICK_FORCE_N: [f64; 3] = [-(20.0 / STARTUP_KICK_DURATION_S), 0.0, 
 const FALL_KICK_DURATION_S: f64 = 0.05;
 const FALL_KICK_FORCE_N: [f64; 3] = [-(400.0 / FALL_KICK_DURATION_S), 0.0, 0.0];
 
+/// How much simulated time a scripted run keeps stepping for after its
+/// schedule has finished, so the outcome of the last phase is visible rather
+/// than the process exiting mid-manoeuvre. Same intent as `send-input`'s own
+/// `--kick-at` tail.
+const SCRIPTED_RUN_TAIL_S: f64 = 3.0;
+
 /// Default path for the host's own missed-deadline/tick counters -- internal
 /// tooling for `wire-probe`, NOT part of the Unreal wire (issue #161's wire
 /// table has no room for either, and must not grow one for our own
@@ -378,6 +392,32 @@ pub struct HostConfig {
     /// Applies the one-time startup disturbance if true. See
     /// [`STARTUP_KICK_T0_S`]'s doc comment for why this defaults to false.
     pub startup_kick: bool,
+    /// **Verification only.** When set, the host plays this
+    /// [`crate::scenario`] schedule itself, indexed on SIMULATED time, and
+    /// ignores the input socket entirely for `weight_shift_*`/`steer`.
+    ///
+    /// # Why this exists (issue #190)
+    ///
+    /// The scripted scenarios were previously only playable through
+    /// `send-input`, which indexed them on a WALL clock and shipped them over
+    /// UDP into a 100 ms staleness gate. On a loaded, non-realtime dev host
+    /// that made the effective input sequence a function of machine load:
+    /// the same command produced a materially different run each time, and
+    /// "this scenario is stable" was being concluded from a de-rated
+    /// delivery of it (see [`crate::scenario`]'s header for the measured
+    /// numbers).
+    ///
+    /// Indexing on `sim_time_s` removes the wall clock, the socket, the
+    /// sender process and the staleness gate in one move. The plant is a
+    /// fixed-timestep RK4 integrator with no stochastic terms, so with the
+    /// input schedule pinned to tick count the whole run becomes repeatable
+    /// -- which is what makes "does this schedule flip the board?" a question
+    /// with an answer, rather than a coin flip.
+    ///
+    /// This is NOT how a deployed host runs, and it is not a substitute for
+    /// `send-input`: the UDP path is the one Unreal actually uses, and only
+    /// `send-input` exercises it.
+    pub scripted_scenario: Option<crate::scenario::Schedule>,
 }
 
 impl Default for HostConfig {
@@ -388,6 +428,7 @@ impl Default for HostConfig {
             duration: None,
             stats_path: Some(PathBuf::from(DEFAULT_STATS_PATH)),
             startup_kick: false,
+            scripted_scenario: None,
         }
     }
 }
@@ -530,6 +571,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
 
     let mut latest_input = LatestInput::default();
     let mut latest_input_at: Option<Instant> = None;
+    // Last logged scripted-schedule phase label, so a scripted run announces
+    // phase changes once rather than every tick (issue #190).
+    let mut scripted_label: &'static str = "";
     let mut prev_armed_bit = false;
     let mut prev_reset_bit = false;
     let mut prev_kick_bit = false;
@@ -585,6 +629,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 break;
             }
         }
+        // A scripted run also stops on SIMULATED time (issue #190), so its
+        // length is a property of the schedule rather than of how fast the
+        // laptop happened to be -- the same reason the schedule itself is
+        // indexed on sim time. `cfg.duration`, if set, still applies as a
+        // wall-clock backstop.
+        if let Some(sched) = cfg.scripted_scenario {
+            if t_known_s > crate::scenario::total_duration_s(sched) + SCRIPTED_RUN_TAIL_S {
+                break;
+            }
+        }
 
         // Drain every pending datagram; only the most recent VALID one
         // matters (issue #161: "Use the most recent packet received").
@@ -621,17 +675,29 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             .map(|t| t.elapsed() > INPUT_STALENESS_TIMEOUT)
             .unwrap_or(true);
         // weight_shift_*/steer hold last, then zero after the staleness
-        // timeout (issue #161).
-        let steer = if stale { 0.0 } else { latest_input.steer };
-        let weight_shift_fore_aft = if stale {
-            0.0
-        } else {
-            latest_input.weight_shift_fore_aft
-        };
-        let weight_shift_lateral = if stale {
-            0.0
-        } else {
-            latest_input.weight_shift_lateral
+        // timeout (issue #161) -- UNLESS a scripted scenario is driving this
+        // run (issue #190), in which case the schedule is read straight off
+        // SIMULATED time and the socket's stick values are ignored entirely.
+        // The flag bits (arm/reset/kick) still come from the wire either way,
+        // so an on-demand kick can still be injected into a scripted run.
+        let (steer, weight_shift_fore_aft, weight_shift_lateral) = match cfg.scripted_scenario {
+            Some(sched) => {
+                let (fa, lat, st, label) = crate::scenario::value_at(sched, t_known_s);
+                if label != scripted_label {
+                    eprintln!(
+                        "sim-host: scripted sim_t={t_known_s:6.2}s -> {label} \
+                         (fore_aft={fa:+.2} lateral={lat:+.2} steer={st:+.2})"
+                    );
+                    scripted_label = label;
+                }
+                (st, fa, lat)
+            }
+            None if stale => (0.0, 0.0, 0.0),
+            None => (
+                latest_input.steer,
+                latest_input.weight_shift_fore_aft,
+                latest_input.weight_shift_lateral,
+            ),
         };
 
         // `arm`/`reset` bits: accepted and tracked, logged on change rather

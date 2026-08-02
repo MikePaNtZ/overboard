@@ -20,6 +20,7 @@
 
 pub mod host;
 pub mod pacer;
+pub mod scenario;
 pub mod wire;
 
 pub use host::{run, spawn, HostConfig, HostError, RunSummary, CYCLE_NS};

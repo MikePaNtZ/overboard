@@ -8,6 +8,7 @@
 //! ```text
 //! sim-host [--duration-secs SECONDS] [--startup-kick]
 //!          [--state-out-addr ADDR] [--input-in-addr ADDR]
+//!          [--scripted-scenario default|s-curve] [--stats-path PATH|none]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
 //! it, stops after that many seconds and exits -- used for verification runs
@@ -54,6 +55,26 @@ fn main() -> ExitCode {
                 cfg.startup_kick = true;
                 i += 1;
             }
+            // Verification only -- see HostConfig::scripted_scenario. Plays
+            // one of `sim_host::scenario`'s schedules from inside the host,
+            // indexed on SIMULATED time, instead of taking stick values off
+            // the socket. Deterministic and repeatable; NOT how a deployed
+            // host or an Unreal session runs.
+            "--scripted-scenario" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --scripted-scenario needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Some(sched) = sim_host::scenario::by_name(v) else {
+                    eprintln!(
+                        "sim-host: unknown scenario '{v}' (want: {})",
+                        sim_host::scenario::names()
+                    );
+                    return ExitCode::FAILURE;
+                };
+                cfg.scripted_scenario = Some(sched);
+                i += 2;
+            }
             "--state-out-addr" => {
                 let Some(v) = args.get(i + 1) else {
                     eprintln!("sim-host: --state-out-addr needs a value");
@@ -64,6 +85,24 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 cfg.state_out_addr = addr;
+                i += 2;
+            }
+            // Companion to --state-out-addr/--input-in-addr: an isolated
+            // verification run must not stomp a live session's stats file
+            // either. `sim-host`'s own counters go to a single fixed path by
+            // default, so two hosts running at once (a capture session on
+            // 9601/9602 and a verification run on throwaway ports) silently
+            // overwrite each other's tick/missed-deadline counts.
+            "--stats-path" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --stats-path needs a value");
+                    return ExitCode::FAILURE;
+                };
+                cfg.stats_path = if v == "none" {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(v))
+                };
                 i += 2;
             }
             "--input-in-addr" => {
@@ -86,8 +125,13 @@ fn main() -> ExitCode {
     }
 
     eprintln!(
-        "sim-host: starting -- state out to {}, input in on {}, duration={:?}, startup_kick={}",
-        cfg.state_out_addr, cfg.input_in_addr, cfg.duration, cfg.startup_kick
+        "sim-host: starting -- state out to {}, input in on {}, duration={:?}, \
+         startup_kick={}, scripted={}",
+        cfg.state_out_addr,
+        cfg.input_in_addr,
+        cfg.duration,
+        cfg.startup_kick,
+        cfg.scripted_scenario.is_some()
     );
 
     let handle = sim_host::spawn(cfg);
