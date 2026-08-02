@@ -183,3 +183,16 @@ void plant_mujoco_get_body_xquat(void* data, int body_id, double* out) {
 int plant_mujoco_actuator_id(void* model, const char* name) {
   return mj_name2id((const mjModel*)model, mjOBJ_ACTUATOR, name);
 }
+
+// Joint lookup by NAME, and its qpos address -- issue #161 wire v2: the
+// state-out wire needs the ballast joints' ACTUAL (not commanded) position,
+// and there is no sensor declared for them (no model change this pass), so
+// this reads mjModel::jnt_qposadr directly. Same by-name-not-offset
+// reasoning as plant_mujoco_sensor_id.
+int plant_mujoco_joint_id(void* model, const char* name) {
+  return mj_name2id((const mjModel*)model, mjOBJ_JOINT, name);
+}
+
+int plant_mujoco_joint_qposadr(void* model, int joint_id) {
+  return ((mjModel*)model)->jnt_qposadr[joint_id];
+}

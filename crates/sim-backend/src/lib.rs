@@ -131,6 +131,13 @@ pub struct SimBackend {
     /// reset to zero on every `open()`.
     ballast_fa_target_m: f32,
     ballast_lateral_target_m: f32,
+    /// `mjModel::jnt_qposadr` for the `ballast_fa`/`ballast_lat` joints, if
+    /// the open model declares them -- `None` for the driverless onewheel
+    /// model. Resolved once in `open()`; used by
+    /// [`SimBackend::truth_ballast_positions`], the ACTUAL (not commanded)
+    /// joint position issue #161 wire v2 puts on the state-out wire.
+    ballast_fa_qposadr: Option<usize>,
+    ballast_lateral_qposadr: Option<usize>,
     cycle: u64,
     open: bool,
     armed: bool,
@@ -274,6 +281,35 @@ impl SimBackend {
             .expect("truth_frame_xquat: backend is not open");
         plant.body_xquat(self.frame_body)
     }
+
+    /// Ground-truth ballast joint positions, metres, signed -- the ACTUAL
+    /// `ballast_fa`/`ballast_lat` `qpos`, not the commanded target
+    /// (issue #161 wire v2: "send the real joint position ... the ballast
+    /// is rate-limited so it lags the command, and that lag is honest").
+    /// `(0.0, 0.0)` on a model that declares neither joint (e.g. the
+    /// driverless onewheel model) -- same tolerance
+    /// [`SimBackend::set_ballast_targets`] has, not a panic: a caller on the
+    /// driverless plant gets an honest "no ballast" reading, not an error
+    /// for a channel that was never claimed to exist there.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_ballast_positions(&self) -> (f32, f32) {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("truth_ballast_positions: backend is not open");
+        let qpos = plant.qpos();
+        let fore_aft = self
+            .ballast_fa_qposadr
+            .map(|adr| qpos[adr] as f32)
+            .unwrap_or(0.0);
+        let lateral = self
+            .ballast_lateral_qposadr
+            .map(|adr| qpos[adr] as f32)
+            .unwrap_or(0.0);
+        (fore_aft, lateral)
+    }
 }
 
 impl BoardObserve for SimBackend {
@@ -337,6 +373,11 @@ impl BoardObserve for SimBackend {
         // issue #161 W2) does not depend on ctrl-array position.
         self.ballast_fa_actuator = plant.actuator_id("ballast_fa");
         self.ballast_lateral_actuator = plant.actuator_id("ballast_lat");
+        // Same joint names the actuators above drive; resolved separately
+        // because a qpos address is a property of the JOINT, not the
+        // actuator that happens to drive it (issue #161 wire v2).
+        self.ballast_fa_qposadr = plant.joint_qposadr("ballast_fa");
+        self.ballast_lateral_qposadr = plant.joint_qposadr("ballast_lat");
 
         self.plant = Some(plant);
         self.cycle = 0;
