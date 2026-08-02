@@ -8,7 +8,12 @@
 //! ```text
 //! sim-host [--duration-secs SECONDS] [--startup-kick]
 //!          [--state-out-addr ADDR] [--input-in-addr ADDR]
-//!          [--scripted-scenario default|s-curve] [--stats-path PATH|none]
+//!          [--scripted-scenario default|s-curve|full-stick|stick-reversal]
+//!          [--stats-path PATH|none]
+//!          [--free-run] [--max-sim-secs SECONDS]
+//!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
+//!          [--cmd-reserve FRACTION]
+//!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
 //! it, stops after that many seconds and exits -- used for verification runs
@@ -103,6 +108,120 @@ fn main() -> ExitCode {
                 } else {
                     Some(std::path::PathBuf::from(v))
                 };
+                i += 2;
+            }
+            // --- ADR-0011 acceptance instrumentation -------------------
+            // All verification-only, all documented on HostConfig. Their
+            // reason for existing on the command line rather than in a test
+            // fixture is that an acceptance number nobody else can re-take
+            // is not a measurement, it is an assertion.
+            "--free-run" => {
+                cfg.free_run = true;
+                i += 1;
+            }
+            "--max-sim-secs" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --max-sim-secs needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(secs) = v.parse::<f64>() else {
+                    eprintln!("sim-host: --max-sim-secs value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                cfg.max_sim_time_s = Some(secs);
+                i += 2;
+            }
+            // ADR-0011 criterion (f): "every pass must hold with the
+            // estimator bias removed". `truth` is the measured-WORSE case on
+            // this plant, not the better one -- see HostConfig::pitch_source.
+            "--pitch-source" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --pitch-source needs a value");
+                    return ExitCode::FAILURE;
+                };
+                cfg.pitch_source = match v.as_str() {
+                    "estimator" => sim_host::host::PitchSource::Estimator,
+                    "truth" => sim_host::host::PitchSource::PlantTruth,
+                    other => {
+                        eprintln!(
+                            "sim-host: unknown --pitch-source '{other}' (want: estimator, truth)"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                };
+                i += 2;
+            }
+            // ADR-0011 criterion (f), the robustness form: a worst-case
+            // STATIC estimator error injected on top of the real signal
+            // path. See HostConfig::pitch_bias_deg for why this is a
+            // different question from --pitch-source truth.
+            "--pitch-bias-deg" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --pitch-bias-deg needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(deg) = v.parse::<f32>() else {
+                    eprintln!("sim-host: --pitch-bias-deg value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                cfg.pitch_bias_deg = deg;
+                i += 2;
+            }
+            // Overrides CMD_ENVELOPE_RESERVE. Sweeping this IS that
+            // constant's provenance measurement; see its doc comment.
+            "--cmd-reserve" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --cmd-reserve needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(scale) = v.parse::<f32>() else {
+                    eprintln!("sim-host: --cmd-reserve value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if !(0.0..=1.0).contains(&scale) {
+                    eprintln!("sim-host: --cmd-reserve must be within [0, 1], got {scale}");
+                    return ExitCode::FAILURE;
+                }
+                cfg.cmd_envelope_reserve = Some(scale);
+                i += 2;
+            }
+            // `t0,duration,fx,fy,fz,tx,ty,tz` -- world frame, SI. The kerb
+            // strike of ADR-0011's criterion (a) matrix is fed in this way
+            // rather than derived here; see HostConfig::disturbance for why
+            // the derivation stays in `sim/scenarios/plant.py`.
+            "--disturbance" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --disturbance needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let parts: Result<Vec<f64>, _> =
+                    v.split(',').map(|p| p.trim().parse::<f64>()).collect();
+                let Ok(p) = parts else {
+                    eprintln!("sim-host: --disturbance '{v}' has a non-numeric field");
+                    return ExitCode::FAILURE;
+                };
+                if p.len() != 8 {
+                    eprintln!(
+                        "sim-host: --disturbance wants 8 comma-separated numbers \
+                         (t0,duration,fx,fy,fz,tx,ty,tz), got {}",
+                        p.len()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                cfg.disturbance = Some(sim_host::host::Disturbance {
+                    t0_s: p[0],
+                    duration_s: p[1],
+                    force_n: [p[2], p[3], p[4]],
+                    torque_nm: [p[5], p[6], p[7]],
+                });
+                i += 2;
+            }
+            "--trace-csv" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --trace-csv needs a value");
+                    return ExitCode::FAILURE;
+                };
+                cfg.trace_path = Some(std::path::PathBuf::from(v));
                 i += 2;
             }
             "--input-in-addr" => {

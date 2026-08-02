@@ -196,6 +196,13 @@ jobs:
       - name: Build the Rust-hosted impulse-response binary
         run: cargo build --release -p board-app-driverless --bin impulse-response-rust
 
+      # ADR-0011: tests/test_cmd_envelope_reserve.py shells out to this binary
+      # for the command-envelope-reserve acceptance matrix. Same "fail rather
+      # than skip" rule as above -- that file's first test asserts the binary
+      # exists, so a missing build is a red gate rather than a quiet one.
+      - name: Build the sim host
+        run: cargo build --release -p sim-host --bin sim-host
+
       - name: Scenario acceptance gate
         run: pytest tests/ -v
 
@@ -315,6 +322,13 @@ jobs:
       # because this job is not a required status check.
       - name: Build the Rust-hosted impulse-response binary
         run: cargo build --release -p board-app-driverless --bin impulse-response-rust
+
+      # ADR-0011: tests/test_cmd_envelope_reserve.py shells out to this binary
+      # for the command-envelope-reserve acceptance matrix. Same "fail rather
+      # than skip" rule as above -- that file's first test asserts the binary
+      # exists, so a missing build is a red gate rather than a quiet one.
+      - name: Build the sim host
+        run: cargo build --release -p sim-host --bin sim-host
 
       # Only tests that PASS contribute a claim (docs/design-claims-manifest.md,
       # issue #61). A red run here still writes a manifest of whatever passed,

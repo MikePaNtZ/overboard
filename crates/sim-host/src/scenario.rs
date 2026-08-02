@@ -171,9 +171,104 @@ pub const S_CURVE_SCHEDULE: Schedule = &[
     (E2, E2 + 1.5, 0.0, 0.0, 0.0, "release (coast)"),
 ];
 
+// --- ADR-0011 exit criterion (a): the named acceptance matrix ------------
+//
+// "The board does not invert across a named test matrix" -- the ADR names
+// three entries, because "from any starting state" was untestable as
+// written. Two of the three are below; the third (full stick during a kerb
+// strike) is `FULL_STICK_SCHEDULE` plus a `HostConfig::disturbance`, since a
+// kerb is a disturbance and not an input schedule.
+//
+// All three are STRAIGHT-LINE, `steer = 0`, `lateral = 0`. That is not a
+// simplification: the flip these exist to catch happens on the straight, and
+// carving into them would add a yaw channel this crate's own header calls
+// non-physical to a measurement that has to stand up.
+
+/// Settle time before any acceptance schedule starts driving. Matches
+/// [`SCURVE4_SETTLE_S`] so the two are comparable tick for tick.
+pub const ACCEPTANCE_SETTLE_S: f64 = 0.5;
+
+/// Criterion (a) entry 1: **full stick from rest**, held. The defect issue
+/// #190 root-caused, reduced to the shortest schedule that reproduces it --
+/// no carve, no lateral, nothing to argue about.
+///
+/// 15 s of hold, matching [`SCURVE4_BUILD_S`]: the measured divergence is
+/// ~5.4 s in, and a hold that outlasts it by 3x leaves no room for "it was
+/// about to recover".
+pub const FULL_STICK_SCHEDULE: Schedule = &[
+    (0.0, ACCEPTANCE_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        ACCEPTANCE_SETTLE_S,
+        ACCEPTANCE_SETTLE_S + 15.0,
+        1.0,
+        0.0,
+        0.0,
+        "full stick from rest (hold)",
+    ),
+];
+
+/// Criterion (a) entry 2: **full stick reversal at speed** -- the ADR's
+/// worst case, and the one it records as NEVER TESTED.
+///
+/// Why it is the worst case, in the ADR's words: *commanded deceleration and
+/// gravity load the same side*. Two further mechanisms make it worse than
+/// that summary suggests, both visible in this host's own code:
+///
+/// 1. **The speed cap does not attenuate it.** The cap only withdraws
+///    authority when the stick and the current motion have the SAME sign
+///    (`accelerating_same_direction`). A reversal is by definition
+///    opposite-signed, so it passes through at full authority at any speed
+///    -- including above the 8.34 m/s onset where every surviving run in the
+///    ADR's data was being unloaded by that cap.
+/// 2. **It is a step, not a ramp.** The ballast actuator's `timeconst` is
+///    0.15 s and the stick goes from one rail to the other in one tick.
+///
+/// The schedule runs the reversal in BOTH directions, in one deterministic
+/// run, because the ADR names the reverse-to-forward one and the
+/// forward-to-reverse one is the entry condition for it:
+///
+/// - build forward at full stick to the speed cap,
+/// - slam to full reverse (forward-to-reverse, at speed),
+/// - hold through zero and back up to speed in reverse,
+/// - slam to full forward (**reverse-to-forward, at speed** -- the ADR's
+///   named case),
+/// - release.
+pub const STICK_REVERSAL_SCHEDULE: Schedule = &[
+    (0.0, ACCEPTANCE_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        ACCEPTANCE_SETTLE_S,
+        10.5,
+        1.0,
+        0.0,
+        0.0,
+        "full stick forward (build to the cap)",
+    ),
+    (
+        10.5,
+        20.5,
+        -1.0,
+        0.0,
+        0.0,
+        "SLAM full reverse (forward-to-reverse reversal at speed)",
+    ),
+    (
+        20.5,
+        30.5,
+        1.0,
+        0.0,
+        0.0,
+        "SLAM full forward (reverse-to-forward reversal at speed)",
+    ),
+    (30.5, 32.5, 0.0, 0.0, 0.0, "release"),
+];
+
 /// Every schedule a `--scenario`/`--scripted-scenario` flag accepts, by name.
-pub const BY_NAME: &[(&str, Schedule)] =
-    &[("default", DEFAULT_SCHEDULE), ("s-curve", S_CURVE_SCHEDULE)];
+pub const BY_NAME: &[(&str, Schedule)] = &[
+    ("default", DEFAULT_SCHEDULE),
+    ("s-curve", S_CURVE_SCHEDULE),
+    ("full-stick", FULL_STICK_SCHEDULE),
+    ("stick-reversal", STICK_REVERSAL_SCHEDULE),
+];
 
 /// Looks up a schedule by its command-line name.
 pub fn by_name(name: &str) -> Option<Schedule> {
