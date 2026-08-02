@@ -99,6 +99,24 @@ double plant_mujoco_timestep(void* model) {
   return ((mjModel*)model)->opt.timestep;
 }
 
+// `mjModel::opt.gravity`, m/s^2, world frame.
+//
+// Read AND write, because ADR-0011's world-authoring constraint needs the
+// incline the board tolerates to be a MEASURED number, and a slope is exactly
+// a rotated gravity vector: a flat plane under gravity tilted by phi is the
+// same rigid-body problem as a plane inclined by phi under vertical gravity,
+// rotated. Tilting gravity rather than the ground geom keeps the measurement
+// out of `sim/models/` (Sr. Mechanical & Systems' fidelity contract) and
+// applies the along-slope component to EVERY body's own mass, which an
+// external force on one body cannot do.
+void plant_mujoco_get_gravity(void* model, double* out) {
+  memcpy(out, ((mjModel*)model)->opt.gravity, 3 * sizeof(double));
+}
+
+void plant_mujoco_set_gravity(void* model, const double* g) {
+  memcpy(((mjModel*)model)->opt.gravity, g, 3 * sizeof(double));
+}
+
 // The pre-loop priming call the CONTROLLED scenarios make (AC8 / issue #107's
 // carried-forward criterion): populates sensordata and qacc_warmstart for the
 // controller's first cycle, in the same position relative to the first

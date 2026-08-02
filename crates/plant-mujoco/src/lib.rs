@@ -46,6 +46,8 @@ extern "C" {
     fn plant_mujoco_get_qpos(data: *mut c_void, out: *mut f64, n: c_int);
     fn plant_mujoco_get_qvel(data: *mut c_void, out: *mut f64, n: c_int);
     fn plant_mujoco_timestep(model: *mut c_void) -> f64;
+    fn plant_mujoco_get_gravity(model: *mut c_void, out: *mut f64);
+    fn plant_mujoco_set_gravity(model: *mut c_void, g: *const f64);
     fn plant_mujoco_forward(model: *mut c_void, data: *mut c_void);
     fn plant_mujoco_sensor_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_sensor_adr(model: *mut c_void, sensor_id: c_int) -> c_int;
@@ -311,6 +313,43 @@ impl Plant {
     pub fn timestep(&self) -> f64 {
         // SAFETY: `self.model` is non-null and owned for the life of `self`.
         unsafe { plant_mujoco_timestep(self.model) }
+    }
+
+    /// `mjModel::opt.gravity`, m/s^2, world frame.
+    pub fn gravity(&self) -> [f64; 3] {
+        let mut out = [0.0f64; 3];
+        // SAFETY: `self.model` is non-null and owned for the life of `self`;
+        // `out` is exactly the 3 doubles the shim copies.
+        unsafe { plant_mujoco_get_gravity(self.model, out.as_mut_ptr()) };
+        out
+    }
+
+    /// Overwrites `mjModel::opt.gravity` -- **verification only**, and the
+    /// only supported way to put this plant on a slope.
+    ///
+    /// A ground plane inclined by `phi` under vertical gravity and a flat
+    /// ground plane under gravity tilted by `phi` are the same rigid-body
+    /// problem in two frames, so this measures a real incline rather than
+    /// approximating one. It is done here rather than by editing the model's
+    /// `<geom type="plane">` because ground geometry is the fidelity
+    /// contract's (`sim/models/` is Sr. Mechanical & Systems' turf) and
+    /// because a *model* edit would change every scenario, not one run.
+    ///
+    /// Must be called before the first [`Plant::step`]: `opt.gravity` is read
+    /// every step, so changing it mid-run is a step disturbance rather than an
+    /// incline, and the caller almost never means that.
+    ///
+    /// # Panics
+    /// If called after any [`Plant::step`].
+    pub fn set_gravity(&mut self, g: [f64; 3]) {
+        assert!(
+            self.time() == 0.0,
+            "Plant::set_gravity must be called before the first Plant::step (mjData::time is \
+             {:.6}, not 0) -- a mid-run change is a disturbance, not an incline",
+            self.time()
+        );
+        // SAFETY: see `gravity`; `g` is 3 doubles the shim only reads.
+        unsafe { plant_mujoco_set_gravity(self.model, g.as_ptr()) };
     }
 
     /// `mj_forward` -- issue #107 (I1c) AC8, carried forward from I1b. Every

@@ -12,7 +12,7 @@
 //!          [--stats-path PATH|none]
 //!          [--free-run] [--max-sim-secs SECONDS]
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
-//!          [--cmd-reserve FRACTION]
+//!          [--cmd-reserve FRACTION] [--incline-deg DEGREES]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -183,6 +183,26 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 cfg.cmd_envelope_reserve = Some(scale);
+                i += 2;
+            }
+            // A constant ground slope, degrees, positive uphill. ADR-0011's
+            // second ratification needs the tolerated incline as a MEASURED
+            // number before the authored world can carry a checkable asset
+            // rule; see HostConfig::incline_deg.
+            "--incline-deg" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --incline-deg needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(deg) = v.parse::<f64>() else {
+                    eprintln!("sim-host: --incline-deg value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if !(-45.0..=45.0).contains(&deg) {
+                    eprintln!("sim-host: --incline-deg must be within [-45, 45], got {deg}");
+                    return ExitCode::FAILURE;
+                }
+                cfg.incline_deg = deg;
                 i += 2;
             }
             // `t0,duration,fx,fy,fz,tx,ty,tz` -- world frame, SI. The kerb

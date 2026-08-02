@@ -294,11 +294,10 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 ///
 /// Holding full forward stick from rest inverts this board in ~6.5 s
 /// (issue #190). The flip boundary was measured between 0.95 and 0.97 of
-/// full stick, and **tuning to that boundary is forbidden**: it rests
-/// partly on an accidental ~1 deg nose-down estimator bias that happens to
-/// act as nose-up trim, and partly on `wheel_hinge`'s undocumented
-/// `damping="0.08"`. A constant sitting on either is a constant that moves
-/// when somebody fixes a bug.
+/// full stick, and **tuning to that boundary is forbidden**: it rests partly
+/// on the estimator's operating trim and partly on `wheel_hinge`'s
+/// undocumented `damping="0.08"`. A constant sitting on either is a constant
+/// that moves when somebody changes something unrelated.
 ///
 /// The derivation instead runs off the actuator envelope, per the
 /// command-map rule ADR-0011 propagates to the hardware spec -- *the
@@ -317,6 +316,28 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 ///    **0.80**. Pinned as executable arithmetic by
 ///    `the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_
 ///    measured_slope`, not merely written down here.
+///
+/// # TRIM-DERIVED, not geometry-derived -- read this before porting it
+///
+/// The step above says "measured", and the word is load-bearing in a way the
+/// phrase *derived from the actuator envelope* can easily be read past.
+/// [`PEAK_DEMAND_A_PER_UNIT_STICK`] was measured **at the estimator's current
+/// operating trim**, and it is a property of that trim, not of the vehicle.
+/// Measured in `test_f2_the_peak_demand_slope_is_trim_derived_not_geometry_
+/// derived`: shifting the trim by 0.10 deg moves the slope by ~5.2%, which
+/// is already outside the 5% band its own provenance check allows.
+///
+/// So this constant is honest for the frozen trim and for nothing else. It
+/// does not travel to hardware, to a retuned filter, or to a different
+/// operating point on its own authority. Describing it as geometry-derived --
+/// as something the actuator envelope alone fixes -- would be a
+/// rationalisation, and ADR-0011's second ratification says so in those
+/// words. The trim it rests on is pinned by
+/// `test_f1_the_estimator_trim_is_pinned_so_a_retune_cannot_move_it_silently`
+/// precisely so this constant cannot go stale quietly; ADR-0011 names any
+/// retune that moves that band as a blocking prerequisite for the
+/// headroom-based fix, which is the version of this that would NOT be
+/// trim-derived.
 ///
 /// # What it buys, measured
 ///
@@ -348,9 +369,11 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 ///
 /// - **Criterion (f) -- fed MuJoCo truth -- fails at every value.** Sweeping
 ///   this constant from 1.00 down to 0.05 moves time-to-inversion from 4.42 s
-///   to 28.67 s and never removes it; only exactly zero stick survives. With
-///   the estimator bias removed a sustained forward lean has no equilibrium,
-///   so the reserve buys TIME, not survival.
+///   to 28.67 s and never removes it; only exactly zero stick survives.
+///   Feeding the regulator truth deletes the acceleration reference the lean
+///   is generated from, so a sustained forward lean has no equilibrium and
+///   the reserve buys TIME, not survival. ADR-0011's second ratification
+///   replaces this criterion with freeze-and-pin for exactly that reason.
 /// - **Criterion (a)'s kerb-strike entry fails** above roughly a 1 mm lip
 ///   struck at the worst point of a full-stick hold.
 ///
@@ -758,18 +781,23 @@ pub struct HostConfig {
     /// This is the robustness test ADR-0011 criterion (f) was reaching for.
     /// The ADR asks for acceptance "with the estimator bias removed" and
     /// implements that as "feed the regulator MuJoCo truth" -- but the
-    /// measured `est - truth` residual is not a static bias at all: it
-    /// regresses on unaided specific force at 5.7-6.1 deg per m/s^2, which is
-    /// 1 radian per g, i.e. it is the complementary filter reading the
-    /// APPARENT VERTICAL. Replacing it with truth therefore does not remove
-    /// an error, it deletes an acceleration reference and leaves a
-    /// pitch-only regulator (see `PitchSource::PlantTruth`).
+    /// measured `est - truth` residual is not a static bias at all: settled,
+    /// it is `atan(a_unaided / g)` to within 3%, i.e. 1 radian per g, i.e.
+    /// the complementary filter reading the APPARENT VERTICAL. Replacing it
+    /// with truth therefore does not remove an error, it deletes an
+    /// acceleration reference and leaves a pitch-only regulator (see
+    /// `PitchSource::PlantTruth`).
     ///
     /// Injecting a worst-case STATIC bias on top of the real signal path is
     /// the test that actually asks "does this margin survive an estimator
     /// that is wrong?" without silently changing which controller is under
     /// test. Both are run and both are reported;
     /// `tests/test_cmd_envelope_reserve.py` has the results.
+    ///
+    /// Second use, ADR-0011 (f2): a small offset here MOVES THE OPERATING
+    /// TRIM while changing nothing else, which is how the peak-demand slope
+    /// behind [`CMD_ENVELOPE_RESERVE`] is shown to be trim-derived rather
+    /// than geometric.
     pub pitch_bias_deg: f32,
 
     /// **Verification only.** Runs the loop as fast as the CPU allows,
@@ -802,6 +830,23 @@ pub struct HostConfig {
     /// behaviour.
     pub disturbance: Option<Disturbance>,
 
+    /// **Verification only.** Ground incline, DEGREES, positive uphill in the
+    /// board's forward direction. Zero is flat and leaves the plant's gravity
+    /// untouched.
+    ///
+    /// ADR-0011's second ratification makes the authored world one of the
+    /// three conditions the launch hold exits on: *the authored world is
+    /// constrained to what the controller survives, and the constraint is
+    /// encoded as a checkable asset rule.* An asset rule needs a number, the
+    /// number is an incline, and this is how it gets measured
+    /// (`tests/test_incline_tolerance.py`). It is deliberately a MEASUREMENT
+    /// knob and not a scenario parameter: no shipped configuration sets it.
+    ///
+    /// Applied by [`sim_backend::SimBackend::set_incline_deg`], which rotates
+    /// `mjModel::opt.gravity` rather than the ground geom -- see there for why
+    /// that is the same problem and not an approximation of it.
+    pub incline_deg: f64,
+
     /// **Verification only.** Writes one CSV row per control cycle to this
     /// path when the run ends. Buffered in memory and written once, never
     /// during the loop: a 500 Hz control thread does not do file I/O per
@@ -812,13 +857,24 @@ pub struct HostConfig {
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
 ///
 /// The default is the only one a deployed host may use. `PlantTruth` exists
-/// because the ADR requires every acceptance pass to hold **with the
-/// estimator bias removed**, and on this plant that is the measured-WORSE
-/// case, not the better one: the complementary filter's ~1 deg nose-down
-/// error acts as nose-up trim, so feeding the controller MuJoCo truth makes
-/// the board flip EARLIER. That is accidental model error, not a designed
-/// safety property, and criterion (f) exists precisely so no acceptance
-/// number is allowed to rest on it.
+/// because the ADR's FIRST ratification required every acceptance pass to
+/// hold **with the estimator bias removed**, and on this plant that is the
+/// measured-WORSE case, not the better one: feeding the controller MuJoCo
+/// truth makes the board flip EARLIER.
+///
+/// **The reason is not an accidental bias, and the ADR's second ratification
+/// corrects that reading.** The `est - truth` residual is the apparent
+/// vertical, `atan(a/g)` -- 1 radian per g, which is the same 5.84 deg per
+/// m/s^2 the ADR derives geometrically as the lean this board must hold to
+/// sustain acceleration `a`, because it is the same physics. The estimator is
+/// supplying the textbook balance-vehicle lean. Substituting truth therefore
+/// does not de-bias the loop, it deletes the only mechanism generating that
+/// lean and leaves a pitch-only regulator -- a different controller, not a
+/// cleaner one. What criterion (f) was right about is that nothing designed
+/// this and nothing held it in place; (f1)/(f2) fix that by pinning it
+/// (`tests/test_cmd_envelope_reserve.py`), and (f3) makes it explicit as a
+/// `theta_ref = atan(a_des / g)` feedforward, at which point this instrument
+/// becomes meaningful again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PitchSource {
     /// The `ComplementaryFilter`, fed raw IMU through `hal` -- the real
@@ -869,6 +925,7 @@ impl Default for HostConfig {
             free_run: false,
             cmd_envelope_reserve: None,
             disturbance: None,
+            incline_deg: 0.0,
             trace_path: None,
         }
     }
@@ -1082,6 +1139,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     };
 
     let mut backend = SimBackend::with_model_path(params, rider_model_path());
+    // Before `open()`, which is where the tilt is applied -- see
+    // `HostConfig::incline_deg`.
+    backend.set_incline_deg(cfg.incline_deg);
     backend.open().map_err(HostError::Backend)?;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
@@ -1495,8 +1555,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // On a deployed run this is the `Estimator` arm and the regulator
         // sees exactly what it always saw. On an acceptance run it is
         // `PlantTruth`, and the regulator sees MuJoCo -- which on this plant
-        // is the measured-WORSE case, because the filter's ~1 deg nose-down
-        // error acts as nose-up trim. See `PitchSource`.
+        // is the measured-WORSE case, because it deletes the apparent-vertical
+        // lean the estimate carries rather than de-biasing it. See
+        // `PitchSource`.
         let (source_pitch_rad, regulated_pitch_rate_rad_s) = match cfg.pitch_source {
             PitchSource::Estimator => (attitude.pitch_rad, attitude.pitch_rate_rad_s),
             PitchSource::PlantTruth => (pitch_rad, truth_pitch_rate_rad_s),
