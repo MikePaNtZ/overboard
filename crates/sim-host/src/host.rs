@@ -236,6 +236,79 @@ const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
 /// clearly down", not precise enough to gate a published claim.
 const FALLEN_PITCH_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
 
+/// Soft, host-side drivable-corridor bounds in the DEAD-RECKONED frame
+/// (`dr_pos_x_m`/`dr_pos_y_m` -- see the PARTIALLY SYNTHETIC POSITION block
+/// below), NOT MuJoCo collision geometry -- issue #161 follow-up, item 4:
+/// the CEO wants the board to stop passing through walls, curbs and map
+/// boundaries.
+///
+/// **Why MuJoCo-frame collision geometry cannot work here (Option A per the
+/// COO, not Option B, and NOT today):** since the dead-reckoning fix
+/// (issue #161/#169, PR #172), `pos`'s x/y on the wire -- and therefore
+/// what the renderer shows on screen -- are dead-reckoned from real forward
+/// speed projected along the SYNTHETIC yaw heading. MuJoCo's own plant
+/// never turns; it only ever translates along its own -X axis. So the
+/// position MuJoCo's physics engine actually occupies bears no relation to
+/// where the board appears on screen, and collision geometry added to the
+/// MJCF would be tested against the WRONG position entirely -- the board
+/// would bounce off invisible walls in the wrong place and pass through
+/// the visible ones anyway. This is the accumulated cost of the
+/// yaw-as-overlay design (the right call at the time; it got a launch demo
+/// shipped), and boundaries are where it stops paying for free.
+///
+/// The real fix (Option B, the COO's own framing) is making yaw physical --
+/// the board genuinely turning in MuJoCo so its true position is 2D and
+/// collision geometry can be tested against it directly. That would ALSO
+/// delete the dead-reckoning `Playable Sim` declaration line entirely,
+/// since the path would stop being invented -- an honesty improvement, not
+/// just an engineering one. It is also a change to how the plant moves,
+/// the day before launch, against a control law tuned for the 1-D case --
+/// explicitly NOT attempted here. This corridor is the stopgap (Option A):
+/// when the dead-reckoned position leaves it, arrest forward motion. Not
+/// real collision -- the board still passes through the VISUAL geometry --
+/// but it stops travelling further away from the road, which is the
+/// visible problem this fixes today.
+///
+/// Derived from the actual UE <-> MuJoCo origin mapping the COO supplied
+/// (`OB_City`'s `BoardActor`, printed on launch: "MuJoCo origin -> UE
+/// (-3880.0, -7450.0, -275.0) cm, yaw 90.0 deg"), not guessed outright, for
+/// the ONE figure this repo already has independent measurement for: the
+/// lateral half-width reuses `send-input`'s own already-measured value for
+/// the SAME spawn point ("the road at OB_City's spawn carries road-level
+/// surface to ~8.6 m either side" -- that crate's Revision 3 doc comments).
+/// The longitudinal bounds have no equivalent measured figure anywhere in
+/// this repo, so they are a deliberately generous placeholder -- wide
+/// enough that no run measured so far against this issue (the longest,
+/// 335 m, `send-input`'s Revision 4) comes close to it in either direction.
+/// **Named constants specifically so the COO can tighten or widen them
+/// from footage**, per their own explicit instruction.
+///
+/// **Verified the enforcement itself, not just the arithmetic** (`wire-probe
+/// --csv`): since no scripted scenario on hand reaches these production
+/// bounds (see above), `CORRIDOR_X_MIN_M` was temporarily tightened to -3.0
+/// m for the measurement run and `send-input`'s `default` schedule (the
+/// stable, already-validated AC schedule -- not `s-curve`) driven straight
+/// at it. The edge-triggered log fired exactly once, at `(-3.0, 0.0)`;
+/// `dr_pos_x_m` then overshot to -10.3 m under residual momentum before the
+/// brake arrested it, settling to a steady -9.4..-10.3 m band for the rest
+/// of the run rather than continuing to run away -- an active brake against
+/// momentum, not a teleport back to the line, exactly as designed. Pitch
+/// stayed within -5.8..+6.4 deg throughout: the corridor brake itself did
+/// not destabilize the board. Bound reverted to -700.0 after the
+/// measurement.
+const CORRIDOR_X_MIN_M: f64 = -700.0;
+const CORRIDOR_X_MAX_M: f64 = 50.0;
+const CORRIDOR_HALF_WIDTH_M: f64 = 8.6;
+
+/// Fore/aft lean the corridor forces once the board is outside
+/// [`CORRIDOR_X_MIN_M`]/[`CORRIDOR_X_MAX_M`]/[`CORRIDOR_HALF_WIDTH_M`],
+/// opposing whatever direction it was travelling -- an actual brake, not
+/// merely "stop accelerating further", which alone would let the board
+/// coast on out of the corridor under its own residual speed. Same order
+/// of magnitude as `send-input.rs`'s own `SCHEDULE`'s "lean back
+/// (decelerate)" value (0.6); not bench-tuned.
+const CORRIDOR_BRAKE_LEAN: f32 = 0.6;
+
 /// A ONE-TIME startup disturbance, applied near the beginning of a run when
 /// [`HostConfig::startup_kick`] is set. Not a general disturbance API -- the
 /// input wire carries no such field (issue #161) -- and OFF BY DEFAULT
@@ -427,6 +500,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut latest_input_at: Option<Instant> = None;
     let mut prev_armed_bit = false;
     let mut prev_reset_bit = false;
+    let mut prev_outside_corridor = false;
     let mut yaw_rad: f32 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
     // Previous tick's ground speed, m/s, signed (positive = forward) -- used
@@ -556,13 +630,48 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             weight_shift_fore_aft
         };
 
+        // Corridor boundary (issue #161 follow-up, item 4) -- see
+        // CORRIDOR_X_MIN_M's doc comment for why this exists instead of
+        // MuJoCo collision geometry, and where the bounds come from.
+        // Checked against dr_pos_x_m/dr_pos_y_m as they stood at the END of
+        // the PREVIOUS tick (this tick's own dead-reckoning update runs
+        // later in this same loop body) -- the same one-cycle lag the speed
+        // cap above uses, and for the same reason.
+        let outside_corridor = !(CORRIDOR_X_MIN_M..=CORRIDOR_X_MAX_M).contains(&dr_pos_x_m)
+            || dr_pos_y_m.abs() > CORRIDOR_HALF_WIDTH_M;
+        if outside_corridor && !prev_outside_corridor {
+            eprintln!(
+                "sim-host: LEFT THE DRIVABLE CORRIDOR at ({dr_pos_x_m:.1}, {dr_pos_y_m:.1}) m \
+                 -- arresting forward lean"
+            );
+        } else if prev_outside_corridor && !outside_corridor {
+            eprintln!("sim-host: back inside the drivable corridor");
+        }
+        prev_outside_corridor = outside_corridor;
+        // Overrides the speed cap's own result, not just `weight_shift_
+        // fore_aft` -- an active brake against whatever direction the
+        // board was travelling, not merely "stop accelerating further"
+        // (which alone would let it coast on out under residual speed).
+        // Lateral/steer are untouched -- only forward travel is arrested.
+        let corridor_enforced_fore_aft = if outside_corridor {
+            if last_forward_speed_m_s > 0.0 {
+                -CORRIDOR_BRAKE_LEAN
+            } else if last_forward_speed_m_s < 0.0 {
+                CORRIDOR_BRAKE_LEAN
+            } else {
+                0.0
+            }
+        } else {
+            capped_weight_shift_fore_aft
+        };
+
         // Ballast targets -- weight_shift_fore_aft/lateral drive
         // overboard_rider.xml's two ballast actuators DIRECTLY AND
         // PHYSICALLY (see this file's header). Set every cycle, mirroring
         // apply_external_force's own "call every cycle or a stale value
         // persists" convention.
         backend.set_ballast_targets(
-            capped_weight_shift_fore_aft * BALLAST_RANGE_M,
+            corridor_enforced_fore_aft * BALLAST_RANGE_M,
             weight_shift_lateral * BALLAST_RANGE_M,
         );
 
