@@ -526,7 +526,7 @@ mod tests {
             kp_nm_per_rad: 56.0,
             kd_nm_per_rad_s: 7.7,
             kt_nm_per_a: 0.7,
-            max_current_a: 40.0,
+            max_current_a: 60.0,
             kp_v_rad_per_m_s: 0.0,
             ki_v_rad_per_m: 0.0,
             max_pitch_ref_rad: 0.087,

@@ -80,7 +80,7 @@ const FORCE_N: [f64; 3] = [-(NOMINAL_IMPULSE_NS / DURATION_S), 0.0, 0.0];
 const KP_NM_PER_RAD: f32 = 56.0;
 const KD_NM_PER_RAD_S: f32 = 7.7;
 const KT_NM_PER_A: f32 = 0.7;
-const MAX_CURRENT_A: f32 = 40.0;
+const MAX_CURRENT_A: f32 = 60.0;
 const ESTIMATOR_TAU_S: f32 = 1.0;
 /// `RustController()`'s own default (`sim/scenarios/rust_controller.py`,
 /// `wheel_accel_tau_s`) -- kept identical here so both hosts filter the wheel

@@ -89,7 +89,7 @@ class ImperfectionProfile:
     wheel_rate_update_hz: float = 0.0
 
     #: Current cap, amps. Chosen so saturation is reachable.
-    max_current_a: float = 40.0
+    max_current_a: float = 60.0
 
     # -- proportional cutback ---------------------------------------------
     #

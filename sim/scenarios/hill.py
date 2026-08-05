@@ -136,7 +136,7 @@ class HillParams:
     ramp_s: float = 2.0
     ballast_mass_kg: float = 70.0
     ballast_height_m: float = 0.75
-    max_current_a: float = 40.0
+    max_current_a: float = 60.0
     #: Estimator crossover. The handoff's recommended config is tau = 2 s with
     #: command feedforward, and this scenario defaults to it because a hill run
     #: on truth pitch cannot show the failure that makes hills dangerous.

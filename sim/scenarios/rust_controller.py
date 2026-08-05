@@ -52,7 +52,7 @@ DEFAULT_KD_NM_PER_RAD_S = 7.7
 DEFAULT_KT_NM_PER_A = KT_NM_PER_A
 
 #: Envelope clamp, amps. Matches the model's derived ctrlrange (40 A * kt).
-DEFAULT_MAX_CURRENT_A = 40.0
+DEFAULT_MAX_CURRENT_A = 60.0
 
 #: Loaded rolling radius, m (ICD 10.5). Stage-0 will measure the real, loaded
 #: figure; until then this is pinned to the sim model's actual tire geometry

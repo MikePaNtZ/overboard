@@ -58,7 +58,7 @@ mod law {
     pub const KP_NM_PER_RAD: f32 = 140.0;
     pub const KD_NM_PER_RAD_S: f32 = 21.0;
     pub const KT_NM_PER_A: f32 = 0.7;
-    pub const MAX_CURRENT_A: f32 = 40.0;
+    pub const MAX_CURRENT_A: f32 = 60.0;
     pub const ESTIMATOR_TAU_S: f32 = 2.0;
     pub const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
     /// Zero disables the accel trust gate, matching `sim-host`'s own

@@ -445,7 +445,7 @@ mod tests {
         // Issue #137 AC3: the 40 A clamp expressed as a torque ceiling.
         let p = Params {
             kt_nm_per_a: 0.7,
-            max_current_a: 40.0,
+            max_current_a: 60.0,
             ..Params::default()
         };
         assert!((p.tau_max_nm() - 28.0).abs() < 1e-4);
@@ -466,12 +466,12 @@ mod tests {
         // The whole point of issue #137: kt moves headroom, not loop gain.
         let low = Params {
             kt_nm_per_a: 0.5,
-            max_current_a: 40.0,
+            max_current_a: 60.0,
             ..Params::default()
         };
         let high = Params {
             kt_nm_per_a: 0.9,
-            max_current_a: 40.0,
+            max_current_a: 60.0,
             ..Params::default()
         };
         assert!(high.tau_max_nm() > low.tau_max_nm());

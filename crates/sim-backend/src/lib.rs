@@ -801,7 +801,7 @@ mod tests {
 
     fn opened() -> SimBackend {
         let mut b = SimBackend::with_params(Params {
-            max_current_a: 40.0,
+            max_current_a: 60.0,
             ..Params::default()
         });
         b.open().unwrap();

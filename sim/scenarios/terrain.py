@@ -131,7 +131,7 @@ class TerrainParams:
     ramp_s: float = 2.0
     ballast_mass_kg: float = 70.0
     ballast_height_m: float = 0.75
-    max_current_a: float = 40.0
+    max_current_a: float = 60.0
     estimator_tau_s: float = 2.0
     use_estimator: bool = True
     accel_ff_current_source: int = 0

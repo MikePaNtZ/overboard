@@ -212,7 +212,7 @@
        CTRL IS TORQUE IN N*m, NOT AMPS. `gear="1"` means MuJoCo takes ctrl as
        the joint torque directly. The controller speaks amps, so the scenario
        multiplies by KT_NM_PER_A before writing here. ctrlrange is therefore
-       derived, not chosen: 40 A limit x 0.7 N*m/A = 28 N*m.
+       derived, not chosen: 60 A limit x 0.7 N*m/A = 42 N*m (Onewheel-XR-class peak, issue: realistic-motor).
 
        An earlier revision of this comment claimed pitch was nose-down-positive
        while also writing the law as -K*pitch, which in that convention is
@@ -220,7 +220,7 @@
        comment that contradicts itself about a sign is worse than none, because
        it eventually gets believed. -->
   <actuator>
-    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-28 28" ctrllimited="true"/>
+    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-42 42" ctrllimited="true"/>
   </actuator>
 
   <!-- Sensor set mirrors the real board's IMU + drive telemetry, so the

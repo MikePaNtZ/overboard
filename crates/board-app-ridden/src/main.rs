@@ -132,7 +132,7 @@ fn main() -> ExitCode {
     );
 
     let params = Params {
-        max_current_a: 40.0,
+        max_current_a: 60.0,
         max_abs_pitch_rad: 0.5,
         ..Params::default()
     };

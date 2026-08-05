@@ -200,7 +200,7 @@
   </worldbody>
 
   <actuator>
-    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-28 28" ctrllimited="true"/>
+    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-42 42" ctrllimited="true"/>
 
     <!--
       Ballast position actuators. `timeconst` gives the raw `ctrl` value
