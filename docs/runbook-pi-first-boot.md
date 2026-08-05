@@ -5,7 +5,7 @@ covers:
   - scripts/pi/flash_pi.sh
   - scripts/pi/pins.env
   - crates/loop-profiler/src/lib.rs
-reconciled: 1618e9f
+reconciled: 725c00c
 -->
 
 **Owned by: Senior Controls.** **Executed by: the CEO**, at a desk, with a monitor and a
@@ -117,9 +117,21 @@ input to every latency number Stage 0B produces that no image pin can capture, a
 `scripts/pi/pins.env` does not currently name it. Update it while the card is disposable, then
 record the version so the number is attributable.
 
-**Follow-up, not done here:** add the bootloader version to `pins.env` alongside the kernel pin,
-for the same reason the kernel is pinned — two numbers taken across a bootloader change are not
-obviously comparable, and nothing in the data says so.
+**Record three things, not one** — the version hash alone is not enough to reproduce the state:
+
+| Field | Example (CEO's Pi 5 Rev 1.1, 2026-08-05) |
+|---|---|
+| Version hash | `086b83e3332dfc8927c56762771d082f3077a1ae` |
+| Firmware build timestamp | `1779807685` (2026-05-26T15:01:25Z) |
+| **Release channel** | **`default`**, not `latest` |
+
+The channel matters as much as the hash: `rpi-eeprom-update` resolves "latest" differently on the
+two channels, so a version recorded without its channel is not reproducible. `default` is the
+correct choice here — it is the stable channel and what a fresh Pi ships with.
+
+**Follow-up, not done here:** add the bootloader version *and channel* to `pins.env` alongside the
+kernel pin, for the same reason the kernel is pinned — two numbers taken across a bootloader
+change are not obviously comparable, and nothing in the data says so. Tracked in issue #222.
 
 ---
 
@@ -192,9 +204,24 @@ problem is ours.
 AC-5 asks for p99.9 wakeup latency ≤ 150 µs and max ≤ 500 µs. A stock non-RT kernel will very
 likely miss that, **and that is the expected result rather than a bad sign.** But:
 
-1. **This is not a clean control.** The delta from here to the image changes **two** variables at
-   once — non-RT → RT, *and* 2712/16K-page → v8/4K-page. Treat it as a sanity floor, not as an
-   isolated measurement of what PREEMPT_RT bought.
+1. **This is not a clean control — it moves four variables at once.** Measured on the CEO's Pi 5
+   Rev 1.1 on 2026-08-05, stock Raspberry Pi OS against the pinned image:
+
+   | | Baseline (stock) | Stage-0B image |
+   |---|---|---|
+   | Preemption | `PREEMPT` | `PREEMPT_RT` |
+   | Flavour / page size | `rpi-2712`, 16K | `rpi-v8`, 4K |
+   | Kernel line | **6.18.34** | **6.12.75** (`pins.env`) |
+   | Userspace | full desktop | `base-slim`, headless |
+
+   The kernel-line row is the one most easily missed: stock ships 6.18.34 — **the exact version
+   `pins.env` predicted the floating metapackage would resolve to** — while the pin deliberately
+   holds the longer-supported 6.12 line for the `mcp251xfd` fix. So this is not one kernel built
+   two ways; it is two different kernels.
+
+   Consequence, stated so it does not have to be discovered in the AC-5 record: **this comparison
+   cannot support a claim of the form "PREEMPT_RT bought us X µs."** It is a sanity floor and
+   nothing more. Attributing the delta needs a controlled run, which needs the image.
 2. **If stock already meets AC-5, that is the interesting outcome.** It would materially weaken
    the case for the RT-kernel path and the 16K-page cost the design accepts in §4, and it should
    be escalated rather than filed.
