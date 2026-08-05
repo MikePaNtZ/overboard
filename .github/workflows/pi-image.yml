@@ -128,10 +128,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          mkdir -p /tmp/overboard-image
           docker run --privileged --rm \
             -e OVERBOARD_GIT_SHA="${{ github.sha }}" \
             -e OVERBOARD_CI_RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             -v "$PWD:/work" -w /work \
+            -v /tmp/overboard-image:/tmp/overboard-image \
             debian:trixie \
             bash scripts/pi/build_image.sh 2>&1 | tee /tmp/build.log
 
