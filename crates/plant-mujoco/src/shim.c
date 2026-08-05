@@ -117,6 +117,23 @@ void plant_mujoco_set_gravity(void* model, const double* g) {
   memcpy(((mjModel*)model)->opt.gravity, g, 3 * sizeof(double));
 }
 
+// `mjModel::dof_damping[dofadr]` -- the passive damping coefficient MuJoCo
+// applies to the degree of freedom at `dofadr` (from
+// plant_mujoco_joint_dofadr).
+//
+// Read AND write, for the same reason opt.gravity is: ADR-0011 criterion (g)
+// needs `wheel_hinge`'s `damping="0.08"` sweepable at runtime (0.5x-2x) for
+// the acceptance matrix, and dof_damping is exactly the array that MJCF
+// attribute compiles into. Scaling the resolved value rather than replacing
+// it with a literal keeps this generic across whichever model is open.
+double plant_mujoco_get_dof_damping(void* model, int dofadr) {
+  return ((mjModel*)model)->dof_damping[dofadr];
+}
+
+void plant_mujoco_set_dof_damping(void* model, int dofadr, double value) {
+  ((mjModel*)model)->dof_damping[dofadr] = value;
+}
+
 // The pre-loop priming call the CONTROLLED scenarios make (AC8 / issue #107's
 // carried-forward criterion): populates sensordata and qacc_warmstart for the
 // controller's first cycle, in the same position relative to the first

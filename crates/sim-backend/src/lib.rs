@@ -165,6 +165,12 @@ pub struct SimBackend {
     /// value, so a run with no incline is bit-identical to one built before
     /// this knob existed.
     incline_deg: f64,
+    /// **Verification only.** Multiplies `wheel_hinge`'s resolved
+    /// `dof_damping` at `open()` when `Some`. `None` (the default) leaves it
+    /// exactly as the open model declares it -- so a run that never calls
+    /// [`SimBackend::set_damping_scale`] is bit-identical to one built before
+    /// this knob existed. See [`SimBackend::set_damping_scale`].
+    damping_scale: Option<f64>,
 }
 
 impl SimBackend {
@@ -234,6 +240,24 @@ impl SimBackend {
     /// an estimator fault.
     pub fn set_incline_deg(&mut self, incline_deg: f64) {
         self.incline_deg = incline_deg;
+    }
+
+    /// **Verification only.** Scales `wheel_hinge`'s `dof_damping` by `scale`,
+    /// taking effect at the next `open()`. `scale = 1.0` is a no-op (checked
+    /// in `open()`, not merely mathematically): a run that never calls this,
+    /// or calls it with `1.0`, is bit-identical to one that predates this
+    /// knob.
+    ///
+    /// ADR-0011 criterion (g): "every pass must hold across a damping sweep of
+    /// 0.5x-2x on the wheel-hinge `damping="0.08"`" -- `damping="0.08"` is
+    /// otherwise undocumented and unmeasured, so this is the instrument that
+    /// measurement needs. Modelled on [`SimBackend::set_incline_deg`]: the
+    /// value is stored, not applied, until `open()` resolves the joint by
+    /// name and reads its CURRENT `dof_damping` rather than assuming the MJCF
+    /// literal, so the scale stays correct no matter what the open model
+    /// actually declares.
+    pub fn set_damping_scale(&mut self, scale: f64) {
+        self.damping_scale = Some(scale);
     }
 
     /// The current the plant is seeing. Exposed for tests.
@@ -553,6 +577,19 @@ impl BoardObserve for SimBackend {
             let mag = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
             let (s, c) = self.incline_deg.to_radians().sin_cos();
             plant.set_gravity([mag * s, 0.0, -mag * c]);
+        }
+
+        // The damping scale, if any, goes on here too -- before the first
+        // step, same reasoning as the incline above (dof_damping is read
+        // every step, so a mid-run change would be a step disturbance, not a
+        // sweep point). `None`, or an explicit `1.0`, leaves `wheel_hinge`'s
+        // dof_damping exactly as the open model declares it.
+        if let Some(scale) = self.damping_scale.filter(|&s| s != 1.0) {
+            let dofadr = plant
+                .joint_dofadr("wheel_hinge")
+                .expect("model must declare a wheel_hinge joint");
+            let base = plant.dof_damping(dofadr);
+            plant.set_dof_damping(dofadr, base * scale);
         }
 
         // AC8 (issue #107, carried forward from I1b/#106): the CONTROLLED
@@ -1049,6 +1086,69 @@ mod tests {
     fn run_metadata_reports_the_control_rate_actually_used() {
         let b = opened();
         assert_eq!(b.run_metadata().control_rate_hz, 500.0);
+    }
+
+    /// ADR-0011 criterion (g)'s instrument (issue #229): a run that never
+    /// calls [`SimBackend::set_damping_scale`] must be bit-identical to one
+    /// that calls it with `1.0` -- the same no-op guarantee
+    /// [`SimBackend::set_incline_deg`] makes at `0.0`. Compared over several
+    /// cycles of an actual disturbance (not a settled board), since a bug
+    /// that only applies the scale AFTER the first step would otherwise hide
+    /// behind an already-static trajectory.
+    #[test]
+    fn damping_scale_of_one_is_bit_identical_to_leaving_it_unset() {
+        let mut default_scale = SimBackend::with_params(Params {
+            max_current_a: TEST_MAX_CURRENT_A,
+            ..Params::default()
+        });
+        default_scale.open().unwrap();
+
+        let mut explicit_one = SimBackend::with_params(Params {
+            max_current_a: TEST_MAX_CURRENT_A,
+            ..Params::default()
+        });
+        explicit_one.set_damping_scale(1.0);
+        explicit_one.open().unwrap();
+
+        for _ in 0..30 {
+            default_scale.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            explicit_one.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            default_scale.wait_observe().unwrap();
+            explicit_one.wait_observe().unwrap();
+            assert_eq!(
+                default_scale.truth_qpos(),
+                explicit_one.truth_qpos(),
+                "--damping-scale 1.0 perturbed a run that never set it"
+            );
+        }
+    }
+
+    /// Positive control for the instrument itself: a scale away from 1.0 must
+    /// measurably change the trajectory, or the whole sweep this exists for
+    /// (`tests/test_damping_sweep.py`) would be measuring nothing.
+    #[test]
+    fn damping_scale_measurably_changes_the_trajectory() {
+        let mut baseline = opened();
+
+        let mut doubled = SimBackend::with_params(Params {
+            max_current_a: TEST_MAX_CURRENT_A,
+            ..Params::default()
+        });
+        doubled.set_damping_scale(2.0);
+        doubled.open().unwrap();
+
+        for _ in 0..30 {
+            baseline.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            doubled.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            baseline.wait_observe().unwrap();
+            doubled.wait_observe().unwrap();
+        }
+        assert_ne!(
+            baseline.truth_qpos(),
+            doubled.truth_qpos(),
+            "doubling wheel_hinge damping had no measurable effect -- the \
+             instrument is not reaching the plant"
+        );
     }
 
     // --- new for issue #107 (I1c): real-plant-specific properties ---------

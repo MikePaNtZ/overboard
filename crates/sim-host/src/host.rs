@@ -1075,6 +1075,24 @@ pub struct HostConfig {
     /// that is the same problem and not an approximation of it.
     pub incline_deg: f64,
 
+    /// **Verification only.** Multiplies the model's `wheel_hinge`
+    /// `damping="0.08"` by this factor, taking effect at the next `open()`.
+    /// `1.0` (the default) leaves it exactly as the MJCF declares it -- no
+    /// shipped configuration sets this to anything else.
+    ///
+    /// ADR-0011 criterion (g): "every pass must hold across a damping sweep
+    /// of 0.5x-2x on the wheel-hinge `damping="0.08"`" (issue #229). That
+    /// constant is the only load-bearing one in the MJCF with no provenance
+    /// comment, so this is the instrument the sweep needs -- there was
+    /// previously no way to change it without editing `sim/models/`, which is
+    /// Sr. Mechanical & Systems' fidelity contract, not a per-run knob.
+    ///
+    /// Applied by [`sim_backend::SimBackend::set_damping_scale`], which
+    /// scales the joint's CURRENT resolved `dof_damping` rather than
+    /// asserting a literal, the same reasoning [`HostConfig::incline_deg`]
+    /// follows for gravity.
+    pub damping_scale: f64,
+
     /// **Verification only.** Writes one CSV row per control cycle to this
     /// path when the run ends. Buffered in memory and written once, never
     /// during the loop: a 500 Hz control thread does not do file I/O per
@@ -1155,6 +1173,7 @@ impl Default for HostConfig {
             cmd_envelope_reserve_braking: None,
             disturbance: None,
             incline_deg: 0.0,
+            damping_scale: 1.0,
             trace_path: None,
         }
     }
@@ -1418,6 +1437,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // Before `open()`, which is where the tilt is applied -- see
     // `HostConfig::incline_deg`.
     backend.set_incline_deg(cfg.incline_deg);
+    // Same reasoning, same timing -- see `HostConfig::damping_scale`.
+    backend.set_damping_scale(cfg.damping_scale);
     backend.open().map_err(HostError::Backend)?;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own

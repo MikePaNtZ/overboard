@@ -14,7 +14,7 @@
 //!          [--free-run] [--max-sim-secs SECONDS]
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
-//!          [--incline-deg DEGREES]
+//!          [--incline-deg DEGREES] [--damping-scale FACTOR]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -224,6 +224,27 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 cfg.incline_deg = deg;
+                i += 2;
+            }
+            // ADR-0011 criterion (g): "every pass must hold across a damping
+            // sweep of 0.5x-2x on the wheel-hinge damping=0.08" (issue #229).
+            // A scale rather than a literal, so the same flag stays correct
+            // if the MJCF's own constant ever moves -- see
+            // `HostConfig::damping_scale`.
+            "--damping-scale" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --damping-scale needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(scale) = v.parse::<f64>() else {
+                    eprintln!("sim-host: --damping-scale value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if scale.is_nan() || scale <= 0.0 {
+                    eprintln!("sim-host: --damping-scale must be > 0, got {scale}");
+                    return ExitCode::FAILURE;
+                }
+                cfg.damping_scale = scale;
                 i += 2;
             }
             // `t0,duration,fx,fy,fz,tx,ty,tz` -- world frame, SI. The kerb

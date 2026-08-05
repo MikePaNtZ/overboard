@@ -48,6 +48,8 @@ extern "C" {
     fn plant_mujoco_timestep(model: *mut c_void) -> f64;
     fn plant_mujoco_get_gravity(model: *mut c_void, out: *mut f64);
     fn plant_mujoco_set_gravity(model: *mut c_void, g: *const f64);
+    fn plant_mujoco_get_dof_damping(model: *mut c_void, dofadr: c_int) -> f64;
+    fn plant_mujoco_set_dof_damping(model: *mut c_void, dofadr: c_int, value: f64);
     fn plant_mujoco_forward(model: *mut c_void, data: *mut c_void);
     fn plant_mujoco_sensor_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_sensor_adr(model: *mut c_void, sensor_id: c_int) -> c_int;
@@ -494,6 +496,44 @@ impl Plant {
         Some(adr as usize)
     }
 
+    /// `mjModel::dof_damping[dofadr]` -- the passive damping coefficient
+    /// MuJoCo applies to the degree of freedom at `dofadr` (from
+    /// [`Plant::joint_dofadr`]). Read AND write, for the same reason
+    /// [`Plant::gravity`]/[`Plant::set_gravity`] are: ADR-0011 criterion (g)
+    /// needs `wheel_hinge`'s `damping="0.08"` sweepable at runtime rather than
+    /// edited in the MJCF, and `dof_damping` is exactly the array that
+    /// attribute compiles into.
+    ///
+    /// # Panics
+    /// If `dofadr` is not less than [`Plant::nv`].
+    pub fn dof_damping(&self, dofadr: usize) -> f64 {
+        assert!(
+            dofadr < self.nv(),
+            "dof_damping: dofadr {dofadr} out of range (nv={})",
+            self.nv()
+        );
+        // SAFETY: `self.model` is non-null and owned for the life of `self`;
+        // `dofadr` was just checked against `nv()`.
+        unsafe { plant_mujoco_get_dof_damping(self.model, dofadr as c_int) }
+    }
+
+    /// Overwrites `mjModel::dof_damping[dofadr]` -- **verification only**, the
+    /// runtime hook ADR-0011 criterion (g)'s damping sweep needs. Like
+    /// [`Plant::set_gravity`], scales a resolved value rather than replacing
+    /// it with a literal, so it stays generic across whichever model is open.
+    ///
+    /// # Panics
+    /// If `dofadr` is not less than [`Plant::nv`].
+    pub fn set_dof_damping(&mut self, dofadr: usize, value: f64) {
+        assert!(
+            dofadr < self.nv(),
+            "set_dof_damping: dofadr {dofadr} out of range (nv={})",
+            self.nv()
+        );
+        // SAFETY: see `dof_damping`.
+        unsafe { plant_mujoco_set_dof_damping(self.model, dofadr as c_int, value) };
+    }
+
     /// `mjData::xmat[body_id]`, row-major, exactly `data.xmat[body].reshape(3,
     /// 3)` on the Python side. Exists so the I1c Rust-hosted impulse harness
     /// (AC6) can compute ground-truth pitch with
@@ -731,6 +771,29 @@ mod tests {
         let plant = Plant::open(&model_path()).expect("the onewheel model should load");
         assert!(plant.body_id("frame").is_some());
         assert_eq!(plant.body_id("no_such_body"), None);
+    }
+
+    /// ADR-0011 criterion (g)'s instrument (issue #229): `wheel_hinge`'s
+    /// declared `damping="0.08"` must round-trip through `dof_damping`/
+    /// `set_dof_damping` exactly, or `sim-backend`'s damping sweep would be
+    /// scaling a value that was never the MJCF's own.
+    #[test]
+    fn dof_damping_reads_the_wheel_hinges_declared_value_and_set_dof_damping_scales_it() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        let dofadr = plant
+            .joint_dofadr("wheel_hinge")
+            .expect("model must declare a wheel_hinge joint");
+        let base = plant.dof_damping(dofadr);
+        assert!(
+            (base - 0.08).abs() < 1e-9,
+            "wheel_hinge's declared damping should be 0.08, got {base}"
+        );
+
+        plant.set_dof_damping(dofadr, base * 2.0);
+        assert!(
+            (plant.dof_damping(dofadr) - 0.16).abs() < 1e-9,
+            "set_dof_damping did not persist the scaled value"
+        );
     }
 
     #[test]
