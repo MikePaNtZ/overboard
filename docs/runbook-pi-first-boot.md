@@ -5,7 +5,7 @@ covers:
   - scripts/pi/flash_pi.sh
   - scripts/pi/pins.env
   - crates/loop-profiler/src/lib.rs
-reconciled: 1618e9f
+reconciled: 725c00c
 -->
 
 **Owned by: Senior Controls.** **Executed by: the CEO**, at a desk, with a monitor and a
@@ -151,12 +151,46 @@ uname -r
 **Pass:** the Pi boots and `uname -r` reports the v8 flavour rather than 2712. Q12 is then closed
 by observation, and the image build knows exactly what `config.txt` must contain.
 
-**Fail (does not boot):** put the card in the host laptop and restore `config.txt` from
-`config.txt.bak` on the FAT boot partition — this is why §0 lists a card reader. **A failure here
-is a significant finding, not a mishap:** it means the image as designed would ship a card that
-does not boot, and it must reach Senior Controls before I1 goes green.
+**Fail:** the Pi does not boot — no login prompt, no SSH. **This is a significant finding, not a
+mishap:** it means the image as designed would ship a card that does not boot, and it must reach
+Senior Controls before I1 goes green. Recover with §5.1 and report it.
 
 Record the outcome either way. A confirmed pass is as load-bearing as a fail.
+
+### 5.1 Recovery — only if the Pi did NOT boot
+
+**On a pass, skip this section entirely.** It is a repair procedure for a failure, not a further
+step of the test.
+
+**If the Pi still boots, you do not need the card reader.** Undo the change over a normal shell:
+
+```sh
+ls -la /boot/firmware/config.txt*          # confirm the .bak is there
+sudo cp /boot/firmware/config.txt.bak /boot/firmware/config.txt
+sudo reboot
+```
+
+**Only if there is no way in at all** — no console, no SSH — go via the card:
+
+1. Power down. `sudo shutdown -h now` if a shell exists; otherwise pull power once the activity
+   LED settles.
+2. Move the microSD to the host laptop's reader.
+3. macOS mounts the FAT boot partition as **`/Volumes/bootfs`**. It is the *only* partition that
+   appears — the rootfs is ext4 and macOS cannot read it. Expected, not a fault.
+4. Restore the file. No `sudo`: FAT32 carries no Unix permissions.
+   ```sh
+   ls /Volumes/bootfs/config.txt*
+   cp /Volumes/bootfs/config.txt.bak /Volumes/bootfs/config.txt
+   ```
+5. **No `.bak`?** Edit in place and delete the offending line with `nano /Volumes/bootfs/config.txt`
+   — **not** TextEdit, which can save rich text and corrupt a file the firmware then cannot parse.
+6. Eject cleanly: `diskutil eject /Volumes/bootfs`. Pulling the card mid-flush turns a config
+   problem into a re-flash.
+7. Card back in the Pi, power on.
+
+**Restoring after a pass is optional.** The card is scratch and the Stage-0B image overwrites it.
+The only reason to go back to 2712 is to capture the second §6/§7 baseline — and since **v8 is the
+flavour the image ships**, a single baseline is better taken on v8.
 
 ---
 
