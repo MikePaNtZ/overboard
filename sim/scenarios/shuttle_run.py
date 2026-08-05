@@ -41,7 +41,14 @@ import numpy as np
 
 from .imperfections import STAGE0_PLACEHOLDER, ImperfectionProfile, ImperfectionState
 from .impulse_response import KT_NM_PER_A, frame_pitch_rad
-from .plant import MODEL_PATH, build_model, imu_readings, plant_summary
+from .plant import (
+    MODEL_PATH,
+    build_model,
+    imu_readings,
+    plant_summary,
+    spawn_at_sprung_equilibrium,
+    wheel_dof,
+)
 from .rust_controller import DEFAULT_R_EFF_M as R_EFF_M
 
 #: Cruise speed for every leg, m/s. Modest on purpose: the outer loop's pitch
@@ -336,6 +343,10 @@ def run(
     # 3.15 deg peak error, identical across every noise profile and crossover,
     # which is the signature of a transient rather than a sensor problem.
     mujoco.mj_forward(model, data)
+    # Same failure class, resurrected through real physics: a sprung wheel
+    # spawned above its static sag free-falls onto the spring, and a free-fall
+    # accelerometer seeds the same garbage attitude. Sit on the sag instead.
+    spawn_at_sprung_equilibrium(model, data)
 
     # Post-delay, post-lag current -- see the note in impulse_response.run.
     flowing_a = 0.0
@@ -343,6 +354,7 @@ def run(
     states: list[np.ndarray] = []
     commanded_pos = 0.0
     hold_anchor: float | None = None
+    wheel_dof_idx = wheel_dof(model)
 
     with controller_factory(vprofile) as ctl:
         for _ in range(n_steps):
@@ -350,7 +362,7 @@ def run(
             # Corrupted signals to the controller; truth to the trajectory.
             pitch = frame_pitch_rad(model, data)
             rate = imp.gyro(float(data.qvel[4]))
-            wheel = imp.wheel_rate(float(data.qvel[6]), t)
+            wheel = imp.wheel_rate(float(data.qvel[wheel_dof_idx]), t)
 
             # The RAW IMU, which an estimator needs and the truth-fed pitch
             # above does not. Omitting these is not a missing feature but a
@@ -374,7 +386,7 @@ def run(
 
             commanded_pos += vprofile.v_ref(t) * dt
             fwd = float(-(data.xpos[frame][0] - x0))
-            v = float(data.qvel[6]) * R_EFF_M
+            v = float(data.qvel[wheel_dof_idx]) * R_EFF_M
 
             ts.append(float(data.time))
             pos.append(fwd)

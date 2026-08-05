@@ -294,6 +294,85 @@ def tilt_ground(xml: str, grade_pct: float) -> str:
     return out.replace(_FRAME_BODY, raised)
 
 
+def wheel_dof(model) -> int:
+    """The qvel index of the wheel hinge -- resolved by NAME, not position.
+
+    It used to be safe to assume `qvel[6]`: the free joint claims dofs 0-5 and
+    the wheel hinge was the very next one. That stopped being true the moment
+    `tyre_deflect` -- a slide joint standing in for tyre compliance -- was
+    added between them in `overboard_onewheel.xml`. A hard-coded 6 now reads
+    the suspension's velocity, not the wheel's, and does so silently: no
+    exception, just a wheel-rate channel that is quietly wrong. Resolving the
+    joint by name and reading its `jnt_dofadr` is immune to wherever the model
+    puts it next.
+    """
+    import mujoco
+
+    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "wheel_hinge")
+    if jid < 0:
+        raise ValueError("model has no joint named 'wheel_hinge'")
+    return int(model.jnt_dofadr[jid])
+
+
+def spawn_at_sprung_equilibrium(model, data) -> float:
+    """Start the board ON its tyre-spring equilibrium instead of above it.
+
+    The scenarios spawn the frame so the wheel exactly touches the ground.
+    With a rigid wheel that was also the rest state. With `tyre_deflect` in
+    the model it no longer is: the spring starts relaxed, so for the first few
+    milliseconds the frame is in FREE FALL onto its own suspension (the wheel
+    is held by the ground, the frame has nothing under it but an uncompressed
+    spring). An accelerometer in free fall reads ~zero specific force, and the
+    estimator SNAPS its attitude to the first accelerometer sample it sees --
+    so it seeds atan2-of-residuals garbage and spends ~tau unwinding it while
+    the controller acts on a phantom pitch. That is the same fixed ~3.15 deg
+    transient the "populate sensordata BEFORE the first read" mj_forward calls
+    already killed once, resurrected through real physics instead of
+    uninitialised sensordata. Measured on the rolling-terrain default: the
+    phantom pitch drives the board backwards off the crest and it noses in at
+    3.2 s. With this spawn correction the same ride completes.
+
+    The correction is DERIVED, not tuned: static sag = m_sprung * g / k, all
+    three read off the compiled model (m_sprung = everything the spring
+    carries, i.e. the frame subtree minus the wheel subtree). The frame drops
+    by the sag and the slide takes it up, so the wheel stays exactly where the
+    scenario placed it -- touching the ground -- and the spring force already
+    balances the weight at t = 0. Gravity's vertical component is the right
+    projection even for `hill.py`'s rotated-gravity trick, because the slide
+    axis is vertical at spawn.
+
+    No-op (returns 0.0) on models without a `tyre_deflect` joint, so callers
+    do not need to know which plant they were handed. Ends with `mj_forward`
+    so sensordata reflects the corrected pose before the first read.
+    """
+    import mujoco
+
+    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "tyre_deflect")
+    if jid < 0:
+        return 0.0
+    free = [j for j in range(model.njnt)
+            if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE]
+    if len(free) != 1:
+        raise ValueError(
+            f"expected exactly one free joint to lower onto the spring, "
+            f"found {len(free)}"
+        )
+    frame_body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
+    wheel_body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "wheel")
+    if frame_body < 0 or wheel_body < 0:
+        raise ValueError("model is missing the 'frame' or 'wheel' body")
+    sprung_kg = float(
+        model.body_subtreemass[frame_body] - model.body_subtreemass[wheel_body]
+    )
+    k = float(model.jnt_stiffness[jid])
+    g = -float(model.opt.gravity[2])
+    sag_m = sprung_kg * g / k
+    data.qpos[model.jnt_qposadr[jid]] += sag_m
+    data.qpos[model.jnt_qposadr[free[0]] + 2] -= sag_m
+    mujoco.mj_forward(model, data)
+    return sag_m
+
+
 def strike_angles_deg(model, grade_pct: float = 0.0) -> dict:
     """Pitch at which each bumper first reaches the ground, from geometry.
 

@@ -74,7 +74,14 @@ from .impulse_response import (
     frame_pitch_rad,
     nose_strike_angle_deg,
 )
-from .plant import MODEL_PATH, build_model, imu_readings, plant_summary
+from .plant import (
+    MODEL_PATH,
+    build_model,
+    imu_readings,
+    plant_summary,
+    spawn_at_sprung_equilibrium,
+    wheel_dof,
+)
 from .rust_controller import DEFAULT_R_EFF_M as R_EFF_M
 
 G = 9.81
@@ -291,6 +298,9 @@ def run(
 
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
+    # Sit ON the tyre spring, not 4-5 mm above it -- a free-fall first sample
+    # seeds the estimator with a phantom pitch. See the helper's docstring.
+    spawn_at_sprung_equilibrium(model, data)
     frame = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
     ground = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
     bumper_ids = {
@@ -334,13 +344,14 @@ def run(
     x0 = float(data.xpos[frame][0])
     flowing_a = 0.0
     m = HillMetrics()
+    wheel_dof_idx = wheel_dof(model)
 
     with controller_factory() as ctl:
         for _ in range(n_steps):
             t = float(data.time)
             pitch_rad = frame_pitch_rad(model, data)
             true_rate = float(data.qvel[4])
-            wheel_true = float(data.qvel[6])
+            wheel_true = float(data.qvel[wheel_dof_idx])
 
             sensed_rate = imp.gyro(true_rate)
             sensed_wheel = imp.wheel_rate(wheel_true, t)
@@ -369,7 +380,7 @@ def run(
 
             pitch_deg = math.degrees(frame_pitch_rad(model, data))
             est_deg = math.degrees(float(ctl.pitch_used_rad))
-            v = float(data.qvel[6]) * R_EFF_M
+            v = float(data.qvel[wheel_dof_idx]) * R_EFF_M
             fwd = float(-(data.xpos[frame][0] - x0))
 
             ts.append(float(data.time))

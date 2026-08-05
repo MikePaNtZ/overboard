@@ -62,7 +62,7 @@ import mujoco
 import numpy as np
 
 from .imperfections import STAGE0_PLACEHOLDER, ImperfectionProfile, ImperfectionState
-from .plant import KT_NM_PER_A, imu_readings
+from .plant import KT_NM_PER_A, imu_readings, spawn_at_sprung_equilibrium, wheel_dof
 
 MODEL_PATH = Path(__file__).resolve().parents[2] / "sim" / "models" / "overboard_onewheel.xml"
 
@@ -330,6 +330,10 @@ def run(
     # 3.15 deg peak error, identical across every noise profile and crossover,
     # which is the signature of a transient rather than a sensor problem.
     mujoco.mj_forward(model, data)
+    # Same failure class, resurrected through real physics: a sprung wheel
+    # spawned above its static sag free-falls onto the spring, and a free-fall
+    # accelerometer seeds the same garbage attitude. Sit on the sag instead.
+    spawn_at_sprung_equilibrium(model, data)
 
     ts, pitches, rates, wheel, travel, currents = [], [], [], [], [], []
     est_err: list[float] = []
@@ -345,6 +349,7 @@ def run(
     # the command: on hardware a VESC derates silently, and in sim the lag and
     # delay already separate the two.
     flowing_a = 0.0
+    wheel_dof_idx = wheel_dof(model)
 
     for _ in range(n_steps):
         data.xfrc_applied[frame] = 0.0
@@ -359,7 +364,7 @@ def run(
         pitch = frame_pitch_rad(model, data)
         true_rate = float(data.qvel[4])  # +omega_y = nose-up rate (ICD 10.1)
         sensed_rate = imp.gyro(true_rate)
-        sensed_wheel = imp.wheel_rate(float(data.qvel[6]), float(data.time))
+        sensed_wheel = imp.wheel_rate(float(data.qvel[wheel_dof_idx]), float(data.time))
 
         proposed = 0.0
         if controller is not None:
@@ -393,7 +398,7 @@ def run(
         ts.append(float(data.time))
         pitches.append(pitch_deg)
         rates.append(pitch_rate_dps)
-        wheel.append(float(data.qvel[6]))
+        wheel.append(float(data.qvel[wheel_dof_idx]))
         travel.append(fwd)
         currents.append(current)
         if capture_state:

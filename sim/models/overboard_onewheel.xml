@@ -173,7 +173,60 @@
         width, giving Iyy = m*a^2 and Ixx = Izz = m*a^2/2 + m*w^2/12.
         Its hinge IS the motor axis.
       -->
+      <!--
+        TYRE + RIDER COMPLIANCE, as a sprung DOF. AN ASSUMPTION, NOT A MEASUREMENT.
+
+        WHY IT IS HERE AND NOT IN THE GROUND CONTACT. The obvious version of
+        this is a soft `solref`/`solimp` on `wheel_geom`. It was built and
+        MEASURED, and it is strictly worse: it buys nothing on the impulse case
+        (peak pitch 18.64 -> 18.58 deg across the whole usable range) and it
+        breaks the rolling-terrain ride outright past solref ~0.021 -- the
+        board never gets going (peak speed 0.34 m/s vs 3.56), pins the motor at
+        40 A for 104 cycles where the baseline never saturates at all, and
+        noses in at 3.13 s having travelled backwards.
+
+        The reason is worth keeping, because it is ADR-0011's cliff and not a
+        MuJoCo quirk: **motor torque reaches the world through the contact
+        patch.** Softening that contact costs effective actuator authority, and
+        this board is already hard-bound at MAX_CURRENT_A * KT = 28 N*m. Any
+        authority the contact eats comes straight off a margin that ADR-0011
+        measured at zero. Saturation without the speed cap already unloading
+        the board is the documented unrecoverable case.
+
+        A VERTICAL slide does not sit in the torque path. The motor's reaction
+        still acts frame<->wheel through `wheel_hinge` directly, and ground
+        traction stays at MuJoCo's default stiff contact (~7.5 Hz, which the
+        arithmetic below shows is about right for the tyre anyway). The
+        compliance goes where the bump is, not where the torque is.
+
+        THE STIFFNESS IS ANCHORED, NOT PICKED. From the contact-patch
+        arithmetic in `wheel_geom`'s comment: 18 psi over an 82.5 kg loaded
+        mass gives 4.5 mm of static deflection, so k = W/d = 809/0.0045 =
+        180 kN/m. One constant serves both models correctly, because sag
+        follows load: this driverless frame (8 kg) settles 0.43 mm, and
+        overboard_rider.xml's ridden 82.5 kg settles the full 4.5 mm. A number
+        that lands right on two different loads is doing physics rather than
+        curve-fitting, which is the only reason to trust it this early.
+
+        Damping 2000 N*s/m is ~0.26 of critical on the ridden mass and ~0.83 on
+        this one. Pneumatic tyres are lightly damped, so the ridden figure is
+        the one that was aimed at.
+
+        STILL A FUDGE, AND DELIBERATELY SOFTER THAN A TYRE ALONE: the sprung
+        travel also stands in for the rider's ankles and knees, which this
+        model does not have at all (plant.py:81, "a rigid lump bolted to the
+        frame"). Replace both constants with a measured load-deflection curve
+        at the hardware gate. Until then NO ACCEPTANCE THRESHOLD MAY BE DERIVED
+        FROM THEM -- ADR-0011 criterion (f) exists to stop exactly that.
+
+        Both joints sit directly on the wheel body -- the slide is declared
+        before the hinge so the sprung DOF precedes the spin DOF -- with no
+        carrier body needed. `model.nu` must stay 1 (test_motor_and_imu_seam_exists),
+        so this is a PASSIVE joint spring and never an actuator.
+      -->
       <body name="wheel" pos="0 0 0">
+        <joint name="tyre_deflect" type="slide" axis="0 0 1"
+               stiffness="180000" damping="2000"/>
         <!--
           Hinge axis is -Y, not +Y, and that sign is load-bearing. It makes
           positive joint velocity = rolling FORWARD and positive motor torque =
