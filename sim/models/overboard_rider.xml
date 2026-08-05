@@ -71,7 +71,29 @@
   -->
   <compiler angle="degree" meshdir="meshes/openwheel"/>
 
-  <option gravity="0 0 -9.81" timestep="0.002" integrator="RK4"/>
+  <!--
+    density/viscosity activate MuJoCo's fluid-force model, which this file
+    uses for RIDER AERODYNAMIC DRAG -- see the `rider_aero_geom` comment
+    below for the geometry and the measured result. density is dry sea-level
+    air (1.225 kg/m^3, ISA standard atmosphere); viscosity is left at 0 so
+    only the quadratic (Newtonian, density-driven) drag term is active, not
+    the linear Stokes term -- at onewheel speeds (Re on the order of 1e5 for
+    a ~0.5 m rider silhouette) drag is inertia-dominated and the viscous term
+    is negligible, so omitting it is a simplification, not an error.
+
+    THIS ALSO ACTIVATES MUJOCO'S LEGACY PER-BODY ("inertia-box") FLUID MODEL
+    ON EVERY OTHER BODY IN THIS FILE, AUTOMATICALLY, INCLUDING ONES THAT
+    HAVE NO GEOM AT ALL -- that model derives an equivalent box from a
+    body's own mass/inertia and is not disabled by leaving a body alone.
+    Every body below except `frame` (which carries `rider_aero_geom` and
+    nothing else needs) is given an explicit zero-coefficient
+    `fluidshape="ellipsoid"` override for exactly this reason -- see each
+    site for the measured before/after. Skipping this step does not fail
+    loudly: it silently adds an unrelated, undocumented body-shaped drag
+    term to the wheel and the rider mass, on top of the two terms this file
+    already derives for them elsewhere.
+  -->
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="RK4" density="1.225" viscosity="0"/>
 
   <visual>
     <global offwidth="1280" offheight="720"/>
@@ -142,6 +164,56 @@
             group="2" condim="3" friction="0.6 0.005 0.0001"/>
 
       <!--
+        RIDER AERODYNAMIC DRAG -- the third of the three real drag terms
+        (see `wheel_hinge`'s comment on the `wheel` body below), and the one
+        that was ABSENT ENTIRELY before this change. Quadratic in speed, and
+        acts on the rider's BODY directly rather than through the
+        drivetrain -- a standing rider's own silhouette is most of a
+        onewheel's frontal area, so it belongs here, on `frame`, not on a
+        joint.
+
+        MECHANISM: this file's `<option density="1.225" viscosity="0">`
+        turns on MuJoCo's per-geom "ellipsoid" fluid model, activated on
+        this one geom only by `fluidshape="ellipsoid"`. `fluidcoef` is left
+        at MuJoCo's own default ("0.5 0.25 1.5 1.0 1.0") rather than
+        invented -- the default blunt-drag coefficient of 0.5 makes the
+        model's OWN quadratic-drag output equal to 1 x (frontal
+        cross-section area) at this speed regime (measured, not assumed --
+        see below), i.e. it assumes a drag coefficient of 1.0, a standard
+        textbook figure for an upright human body facing the flow. That
+        leaves exactly one number to choose: the frontal area, from this
+        geom's own y/z half-extents (size="0.15 0.3 0.8" -> a 0.6 m wide,
+        1.6 m tall bounding ellipse; x, the fore-aft depth, does not affect
+        drag along the direction of travel and is set to a plausible torso
+        depth only for visual/inertial plausibility). That silhouette gives
+        a frontal area of pi * 0.3 * 0.8 = 0.754 m^2, landing in the middle
+        of the 0.6-0.9 m^2 CdA band typically cited for an upright rider/
+        cyclist.
+
+        MEASURED, per the standing project rule against asserting a fluid
+        coefficient from config alone: isolating this geom's contribution
+        by holding the frame's free-joint linear velocity at various speeds
+        and reading `qfrc_passive` on that joint (no wheel spin, so no
+        cross-contamination from `wheel_hinge`'s own damping/frictionloss,
+        which live on a different degree of freedom) gives an EFFECTIVE
+        CdA = 2 * qfrc_passive / (density * v^2) of 0.753 m^2 at every
+        speed tested (1, 4, 8.34 m/s) to 3 significant figures -- see
+        `tests/test_rider_drag_model.py`. Confirms the geom is contributing
+        a clean quadratic term at the frontal area computed above, not
+        something else.
+
+        Positioned at the rider's approximate torso height (frame-local
+        z=0.9, i.e. ~1.05 m above the ground, spanning roughly knee to
+        above head) -- cosmetic only, since only the two semi-axes
+        perpendicular to the direction of travel affect the drag force.
+        Non-colliding (contype/conaffinity 0) and fully transparent
+        (rgba alpha 0): a physics-only geom, not a rendered rider.
+      -->
+      <geom name="rider_aero_geom" type="box" size="0.15 0.3 0.8" pos="0 0 0.9"
+            contype="0" conaffinity="0" group="1" rgba="0 0 0 0"
+            fluidshape="ellipsoid"/>
+
+      <!--
         Hub wheel -- WIDENED for playability, see this file's header. Radius
         0.1454 m is unchanged from overboard_onewheel.xml; half-width is
         doubled from 0.075 m to 0.15 m. Inertial recomputed for the new
@@ -150,10 +222,59 @@
         real tire this wide would weigh the same).
       -->
       <body name="wheel" pos="0 0 0">
-        <joint name="wheel_hinge" type="hinge" axis="0 -1 0" pos="0 0 0" damping="0.08"/>
+        <!--
+          WHEEL DRAG -- two terms, replacing an undocumented lumped
+          `damping="0.08"`. See `overboard_onewheel.xml`'s wheel_hinge
+          comment for the full method (both terms follow the same
+          derivation); this file differs only in the load the rolling-
+          resistance term multiplies, and in also carrying the third,
+          aerodynamic term -- on `rider_aero_geom` below, NOT here, because
+          it acts on the rider's body directly rather than through the
+          drivetrain.
+
+          ROLLING RESISTANCE -- `frictionloss`, CONSTANT (Coulomb).
+          Crr = 0.02 (same working band and citation as the driverless
+          file). Normal load is THIS model's own total mass at rest: frame
+          8.0 kg + wheel 4.5 kg + ballast carrier 0.5 kg + rider 70.0 kg =
+          83.0 kg -> 814.2 N at 9.81 m/s^2 (this option's own gravity).
+          Close to, but not identical to, the 82.5 kg / 809 N reference
+          figure quoted for this vehicle elsewhere -- the 0.5 kg carrier is
+          a linkage placeholder (see the ballast comment below), not part of
+          that external spec. Deriving from this model's OWN summed masses
+          rather than importing the external figure keeps the number
+          self-consistent with what is actually simulated; the gap is 0.6%,
+          well under this constant's own uncertainty.
+              frictionloss = Crr * W * r
+                           = 0.02 * 814.2 N * 0.1454 m = 2.368 N*m
+
+          BEARING + HUB-MOTOR IRON/WINDAGE LOSSES -- `damping`, LINEAR
+          (viscous), 0.009 N*m*s/rad. A drivetrain property, not a vehicle-
+          load one, so it is the SAME value as `overboard_onewheel.xml` --
+          see that file's comment for the 20-40 W / 0.006-0.012 N*m*s/rad
+          derivation.
+
+          WHAT WOULD REPLACE THIS AT THE HARDWARE GATE: see
+          `overboard_onewheel.xml` -- the same bench spin-down measurement
+          serves both files, since the bearing/motor term is shared and the
+          rolling-resistance term only needs a different load reading.
+        -->
+        <joint name="wheel_hinge" type="hinge" axis="0 -1 0" pos="0 0 0"
+               frictionloss="2.368" damping="0.009"/>
         <inertial pos="0 0 0" mass="4.5" diaginertia="0.0635 0.0595 0.0635"/>
+        <!--
+          `fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"` is NOT modelling
+          wheel aerodynamics -- it is a NULL override. This file's `<option>`
+          turns on MuJoCo's fluid-force model for `rider_aero_geom` below,
+          which activates the LEGACY per-body fluid model on every OTHER
+          body unless overridden (see the `<option>` comment). The wheel's
+          own drag is already fully accounted for by `wheel_hinge`'s
+          `frictionloss`/`damping` above; a second, undocumented body-shaped
+          drag term on top of that would double-count and was never
+          derived. Zero coefficients measurably zero the force -- verified
+          in `tests/test_rider_drag_model.py`.
+        -->
         <geom name="wheel_geom" type="cylinder" size="0.1454 0.15" euler="90 0 0"
-              material="tire_mat" condim="4"/>
+              material="tire_mat" condim="4" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
       </body>
 
       <!--
@@ -178,6 +299,22 @@
         <joint name="ballast_fa" type="slide" axis="-1 0 0" pos="0 0 0"
                range="-0.05 0.05" damping="600"/>
         <inertial pos="0 0 0" mass="0.5" diaginertia="0.001 0.001 0.001"/>
+        <!--
+          Another null fluid override, same reasoning as `wheel_geom`'s --
+          see this file's `<option>` comment. This body has no rendered
+          geometry of its own at all, so there is nothing else to attach the
+          override to; a near-invisible stub geom is added FOR NO PURPOSE
+          BUT to carry `fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"` and
+          null the legacy per-body drag MuJoCo would otherwise derive from
+          this body's mass/inertia. `size="0.001"` and non-colliding
+          (contype/conaffinity 0): it must not visibly render, collide, or
+          measurably change this body's own mass properties (it does not --
+          MuJoCo geoms declared alongside an explicit `<inertial>` never
+          contribute to that body's compiled inertia).
+        -->
+        <geom name="ballast_fa_carrier_fluid_null_geom" type="sphere" size="0.001"
+              contype="0" conaffinity="0" group="1" rgba="0 0 0 0"
+              fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
         <body name="ballast">
           <joint name="ballast_lat" type="slide" axis="0 1 0" pos="0 0 0"
                  range="-0.05 0.05" damping="600"/>
@@ -187,9 +324,20 @@
           <!-- Visual proxy only -- a rigid ballast is not a rider (no ankle/
                knee compliance), so this is a plain sphere, not a figure,
                the same honesty plant.py's own rider_geoms() docstring
-               argues for. contype/conaffinity 0: collides with nothing. -->
+               argues for. contype/conaffinity 0: collides with nothing.
+
+               Also carries a null fluid override -- same reasoning as
+               `wheel_geom`'s (see this file's `<option>` comment). This
+               sphere is a 0.12 m CoM marker, not a rider silhouette; the
+               real rider aerodynamic drag lives on `rider_aero_geom` on
+               `frame` instead, sized from an actual frontal silhouette
+               rather than from this proxy's radius. Without this override
+               MuJoCo's legacy per-body model would derive a SECOND,
+               undocumented drag term from this sphere's own radius,
+               double-counting on top of `rider_aero_geom`. -->
           <geom name="ballast_mass_geom" type="sphere" size="0.12" material="rider_mat"
-                contype="0" conaffinity="0" group="1"/>
+                contype="0" conaffinity="0" group="1"
+                fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
         </body>
       </body>
 

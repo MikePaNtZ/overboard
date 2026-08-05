@@ -15,6 +15,23 @@
     put the centre of mass at or below the axle. Instability here is driven by
     an external disturbance instead — see sim/scenarios/impulse_response.py.
 
+    NO AERODYNAMIC DRAG IN THIS FILE, DELIBERATELY. `overboard_rider.xml`
+    adds a rider-silhouette fluid-drag geom (CdA ~0.6-0.9 m^2 per that
+    file's comment) because a standing rider is most of a onewheel's
+    frontal area. This file has no rider, and a bare board's own frontal
+    area is a bumper/enclosure cross-section of well under 0.05 m^2 -- at
+    the same drag-coefficient assumption that is under a tenth of the
+    ridden CdA, smaller than the rolling-resistance term already on
+    `wheel_hinge` at any speed this file's harnesses (impulse response,
+    the Rust/Python replay-equivalence gate) run at. Modelling it would add
+    an invented per-geom fluid geometry to a file whose whole point is
+    topological fidelity to the real vehicle, for an effect below the
+    other terms' own uncertainty band. Add it here, sized to the bare
+    board, the day a driverless harness actually needs cruise-speed drag
+    fidelity — do not import the rider CdA onto this vehicle in the
+    meantime, which is the wrong-by-an-order-of-magnitude error this note
+    exists to prevent.
+
     GEOMETRY / MESH PROVENANCE
     Openwheel meshes (MIT — see meshes/openwheel/NOTICE.md) are authored in
     millimetres in a shared assembly frame centred on the wheel axle, so mesh
@@ -188,7 +205,61 @@
           this seam. Asserted by test_motor_sign_matches_icd; do not flip
           without changing the ICD.
         -->
-        <joint name="wheel_hinge" type="hinge" axis="0 -1 0" pos="0 0 0" damping="0.08"/>
+        <!--
+          WHEEL DRAG -- two terms, replacing an undocumented lumped
+          `damping="0.08"`. That single viscous coefficient was typed in
+          rather than derived, and real onewheel-class drag has THREE
+          physically distinct terms with three different speed-scalings
+          (constant, linear, quadratic); one coefficient cannot represent
+          more than one of them. Measured against a hoverboard-class-vehicle
+          "real total" drag table, the old lumped term was 3-5x too LOW at
+          low speed (missing the constant term entirely) and had no
+          provenance comment at all -- ADR-0011 named it "the only
+          load-bearing constant in the MJCF with no provenance comment".
+
+          Two of the three real terms belong on THIS joint -- rolling
+          resistance and bearing/motor drag both act as a resisting TORQUE
+          at the wheel. The third (rider aerodynamic drag, quadratic in
+          speed) acts on the frame/rider BODY directly, not through the
+          drivetrain, and does not belong on a hinge at all -- see
+          `overboard_rider.xml`'s wheel_hinge comment for where it lives on
+          that file, and this file's own header note (just above the
+          `wheel` body) for why it is DELIBERATELY ABSENT here.
+
+          ROLLING RESISTANCE -- `frictionloss`, CONSTANT (Coulomb).
+          Crr = 0.02, the centre of a 0.015-0.025 working band for an 18 psi
+          wide pneumatic tyre. Engineering Toolbox's generic pneumatic-tyre
+          table runs 0.007-0.02 and trends HIGHER as pressure drops; this
+          tyre is 18 psi and wide (the low-pressure, high-Crr end of that
+          table), so the band used here is shifted up from the generic one
+          rather than centred on it.
+          Normal load is THIS model's own total mass at rest -- frame 8.0 kg
+          + wheel 4.5 kg = 12.5 kg -> 122.6 N at this option's own gravity
+          (9.81 m/s^2). Driverless: no rider mass on this load. (Compare
+          overboard_rider.xml, where the same Crr multiplies the ridden
+          load instead.)
+              frictionloss = Crr * W * r
+                           = 0.02 * 122.6 N * 0.1454 m = 0.3565 N*m
+
+          BEARING + HUB-MOTOR IRON/WINDAGE LOSSES -- `damping`, LINEAR
+          (viscous). 20-40 W of such losses at top speed (8.34 m/s, i.e.
+          omega = v/r = 57.36 rad/s) implies a viscous coefficient of
+          P/omega^2 = 0.006-0.012 N*m*s/rad -- an ORDER OF MAGNITUDE below
+          the 0.08 this replaces, which was never derived from anything.
+          Centre of that band: 0.009 N*m*s/rad. This term is a property of
+          the drivetrain (bearings + motor), not of vehicle load, so it is
+          the SAME value in overboard_rider.xml.
+
+          WHAT WOULD REPLACE THIS AT THE HARDWARE GATE: a bench spin-down
+          measurement of the actual wheel assembly -- the same method
+          `sim/scenarios/bench_spinup.py` already fits `dof_damping`/
+          `dof_frictionloss` FROM (on the desk-scale identification rig,
+          not this board). This pair is a published-coefficient estimate,
+          not a measurement of the real part, and should be replaced by one
+          the moment a real wheel can be spun down on a bench.
+        -->
+        <joint name="wheel_hinge" type="hinge" axis="0 -1 0" pos="0 0 0"
+               frictionloss="0.3565" damping="0.009"/>
         <inertial pos="0 0 0" mass="4.5" diaginertia="0.0382 0.0595 0.0382"/>
         <geom name="wheel_geom" type="cylinder" size="0.1454 0.075" euler="90 0 0"
               material="tire_mat" condim="4"/>

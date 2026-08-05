@@ -196,6 +196,12 @@ pub struct SimBackend {
     /// value, so a run with no incline is bit-identical to one built before
     /// this knob existed.
     incline_deg: f64,
+    /// **Verification only.** Multiplies `wheel_hinge`'s resolved
+    /// `dof_frictionloss` at `open()` when `Some`. `None` (the default)
+    /// leaves it exactly as the open model declares it -- so a run that
+    /// never calls [`SimBackend::set_crr_scale`] is bit-identical to one
+    /// built before this knob existed. See [`SimBackend::set_crr_scale`].
+    crr_scale: Option<f64>,
 }
 
 impl SimBackend {
@@ -265,6 +271,32 @@ impl SimBackend {
     /// an estimator fault.
     pub fn set_incline_deg(&mut self, incline_deg: f64) {
         self.incline_deg = incline_deg;
+    }
+
+    /// **Verification only.** Scales `wheel_hinge`'s `dof_frictionloss` by
+    /// `scale`, taking effect at the next `open()`. `scale = 1.0` is a no-op
+    /// (checked in `open()`, not merely mathematically): a run that never
+    /// calls this, or calls it with `1.0`, is bit-identical to one that
+    /// predates this knob.
+    ///
+    /// ADR-0011 criterion (g), re-derived: the launch-hold sweep originally
+    /// varied the old lumped, undocumented `wheel_hinge damping="0.08"` by an
+    /// arbitrary 0.5x-2.0x. That constant no longer exists -- the physical
+    /// uncertainty it stood in for now lives in `frictionloss`'s own Crr
+    /// (rolling-resistance coefficient), which has PUBLISHED BOUNDS (see
+    /// `sim/models/overboard_rider.xml`'s `wheel_hinge` comment). This is the
+    /// instrument that re-derived sweep needs, sweeping `frictionloss`
+    /// directly rather than `damping` -- `damping`'s own band (bearing/motor
+    /// losses) is an order of magnitude smaller and not the term ADR-0011's
+    /// sweep was ever about.
+    ///
+    /// Modelled on [`SimBackend::set_incline_deg`]: the value is stored, not
+    /// applied, until `open()` resolves the joint by name and reads its
+    /// CURRENT `dof_frictionloss` rather than assuming the MJCF literal, so
+    /// the scale stays correct no matter what the open model actually
+    /// declares.
+    pub fn set_crr_scale(&mut self, scale: f64) {
+        self.crr_scale = Some(scale);
     }
 
     /// As [`SimBackend::with_params`], but with a non-default imperfection
@@ -598,6 +630,19 @@ impl BoardObserve for SimBackend {
             let mag = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
             let (s, c) = self.incline_deg.to_radians().sin_cos();
             plant.set_gravity([mag * s, 0.0, -mag * c]);
+        }
+
+        // The Crr scale, if any, goes on here too -- before the first step,
+        // same reasoning as the incline above (`dof_frictionloss` is read
+        // every step, so a mid-run change would be a step disturbance, not a
+        // sweep point). `None`, or an explicit `1.0`, leaves `wheel_hinge`'s
+        // dof_frictionloss exactly as the open model declares it.
+        if let Some(scale) = self.crr_scale.filter(|&s| s != 1.0) {
+            let dofadr = plant
+                .joint_dofadr("wheel_hinge")
+                .expect("model must declare a wheel_hinge joint");
+            let base = plant.dof_frictionloss(dofadr);
+            plant.set_dof_frictionloss(dofadr, base * scale);
         }
 
         // AC8 (issue #107, carried forward from I1b/#106): the CONTROLLED
@@ -1153,6 +1198,69 @@ mod tests {
     fn run_metadata_reports_the_control_rate_actually_used() {
         let b = opened();
         assert_eq!(b.run_metadata().control_rate_hz, 500.0);
+    }
+
+    /// ADR-0011 criterion (g), re-derived instrument: a run that never calls
+    /// [`SimBackend::set_crr_scale`] must be bit-identical to one that calls
+    /// it with `1.0` -- the same no-op guarantee [`SimBackend::set_incline_deg`]
+    /// makes at `0.0`. Compared over several cycles of an actual disturbance
+    /// (not a settled board), since a bug that only applies the scale AFTER
+    /// the first step would otherwise hide behind an already-static
+    /// trajectory.
+    #[test]
+    fn crr_scale_of_one_is_bit_identical_to_leaving_it_unset() {
+        let mut default_scale = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        default_scale.open().unwrap();
+
+        let mut explicit_one = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        explicit_one.set_crr_scale(1.0);
+        explicit_one.open().unwrap();
+
+        for _ in 0..30 {
+            default_scale.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            explicit_one.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            default_scale.wait_observe().unwrap();
+            explicit_one.wait_observe().unwrap();
+            assert_eq!(
+                default_scale.truth_qpos(),
+                explicit_one.truth_qpos(),
+                "--crr-scale 1.0 perturbed a run that never set it"
+            );
+        }
+    }
+
+    /// Positive control for the instrument itself: a scale away from 1.0
+    /// must measurably change the trajectory, or the whole sweep this exists
+    /// for would be measuring nothing.
+    #[test]
+    fn crr_scale_measurably_changes_the_trajectory() {
+        let mut baseline = opened();
+
+        let mut doubled = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        doubled.set_crr_scale(2.0);
+        doubled.open().unwrap();
+
+        for _ in 0..30 {
+            baseline.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            doubled.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            baseline.wait_observe().unwrap();
+            doubled.wait_observe().unwrap();
+        }
+        assert_ne!(
+            baseline.truth_qpos(),
+            doubled.truth_qpos(),
+            "doubling wheel_hinge frictionloss had no measurable effect -- the \
+             instrument is not reaching the plant"
+        );
     }
 
     // --- new for issue #107 (I1c): real-plant-specific properties ---------

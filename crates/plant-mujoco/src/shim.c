@@ -117,6 +117,23 @@ void plant_mujoco_set_gravity(void* model, const double* g) {
   memcpy(((mjModel*)model)->opt.gravity, g, 3 * sizeof(double));
 }
 
+// `mjModel::dof_frictionloss[dofadr]` -- the Coulomb (constant) friction
+// torque MuJoCo applies to the degree of freedom at `dofadr` (from
+// plant_mujoco_joint_dofadr).
+//
+// Read AND write, same reasoning as opt.gravity above and
+// plant_mujoco_get/set_dof_damping below: ADR-0011 criterion (g)'s re-derived
+// sweep needs `wheel_hinge`'s rolling-resistance term (`frictionloss`,
+// derived from Crr) sweepable at runtime over Crr's own published bounds,
+// and dof_frictionloss is exactly the array that attribute compiles into.
+double plant_mujoco_get_dof_frictionloss(void* model, int dofadr) {
+  return ((mjModel*)model)->dof_frictionloss[dofadr];
+}
+
+void plant_mujoco_set_dof_frictionloss(void* model, int dofadr, double value) {
+  ((mjModel*)model)->dof_frictionloss[dofadr] = value;
+}
+
 // The pre-loop priming call the CONTROLLED scenarios make (AC8 / issue #107's
 // carried-forward criterion): populates sensordata and qacc_warmstart for the
 // controller's first cycle, in the same position relative to the first

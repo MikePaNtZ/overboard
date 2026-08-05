@@ -996,6 +996,26 @@ pub struct HostConfig {
     /// that is the same problem and not an approximation of it.
     pub incline_deg: f64,
 
+    /// **Verification only.** Multiplies the model's `wheel_hinge`
+    /// `frictionloss` (the derived rolling-resistance term) by this factor,
+    /// taking effect at the next `open()`. `1.0` (the default) leaves it
+    /// exactly as the MJCF declares it -- no shipped configuration sets this
+    /// to anything else.
+    ///
+    /// ADR-0011 criterion (g), re-derived: the launch-hold sweep originally
+    /// varied the old lumped, undocumented `wheel_hinge damping="0.08"` by an
+    /// arbitrary 0.5x-2.0x. That drag model was replaced by a physically
+    /// derived pair (`frictionloss` for rolling resistance, `damping` for
+    /// bearing/motor losses -- see `sim/models/overboard_rider.xml`), and the
+    /// remaining physical uncertainty now lives entirely in Crr, which has
+    /// PUBLISHED BOUNDS. This is the instrument that re-derived sweep needs.
+    ///
+    /// Applied by [`sim_backend::SimBackend::set_crr_scale`], which scales
+    /// the joint's CURRENT resolved `dof_frictionloss` rather than asserting
+    /// a literal, the same reasoning [`HostConfig::incline_deg`] follows for
+    /// gravity.
+    pub crr_scale: f64,
+
     /// **Verification only.** Writes one CSV row per control cycle to this
     /// path when the run ends. Buffered in memory and written once, never
     /// during the loop: a 500 Hz control thread does not do file I/O per
@@ -1076,6 +1096,7 @@ impl Default for HostConfig {
             cmd_envelope_reserve_braking: None,
             disturbance: None,
             incline_deg: 0.0,
+            crr_scale: 1.0,
             trace_path: None,
         }
     }
@@ -1339,6 +1360,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // Before `open()`, which is where the tilt is applied -- see
     // `HostConfig::incline_deg`.
     backend.set_incline_deg(cfg.incline_deg);
+    // Same reasoning, same timing -- see `HostConfig::crr_scale`.
+    backend.set_crr_scale(cfg.crr_scale);
     backend.open().map_err(HostError::Backend)?;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
