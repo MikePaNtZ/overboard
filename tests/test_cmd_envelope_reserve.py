@@ -1,4 +1,4 @@
-"""ADR-0011's acceptance matrix, measured -- including the two entries it fails.
+"""ADR-0011's acceptance matrix, measured -- including the entries it fails.
 
 `docs/decisions/ADR-0011-hold-the-launch-until-the-board-stops-flipping.md`
 holds the launch until the board stops inverting at full stick, and specifies
@@ -7,27 +7,50 @@ constant upstream of the estimator, the regulator and the safety envelope,
 changing nothing else. This file is the evidence for that fix and, more
 importantly, the evidence for where it stops working.
 
+SUPERSEDED IN PART by issue: realistic-motor-torque (`MAX_CURRENT_A` 40 -> 60
+A / 28 -> 42 N*m). Every ORDINARY test below still measures what its name
+says; several of them now measure a materially better result than when this
+docstring was written, and are annotated inline rather than rewritten here.
+The short version, read in full at the annotated tests:
+
+* `CMD_ENVELOPE_RESERVE` (`host.rs`) is now 1.00 -- SATURATED, i.e. no
+  shaping -- because the measured peak-demand slope (~42 A/unit, essentially
+  unchanged from the 40 A measurement) no longer over-commands a 60 A
+  envelope at all. The mechanism this whole file exists to test is a no-op on
+  the ESTIMATOR path at this envelope.
+* On the ESTIMATOR path, this file's own former positive control (unshaped
+  full stick from rest) NO LONGER INVERTS -- see
+  `test_the_unshaped_command_map_no_longer_inverts_the_board_at_60a`.
+* On the TRUTH-fed path, criterion (f)'s literal reading STILL FAILS -- the
+  board still inverts, just later (11.4 s vs 4.1 s at 40 A). This is the one
+  reading of (f) that survives unchanged.
+* Criterion (f)'s ROBUSTNESS reading (a worst-case static pitch bias) now
+  PASSES where it used to fail hard and stably -- see
+  `test_criterion_f_the_matrix_holds_under_a_worst_case_static_pitch_bias`.
+
 WHAT THIS FILE ASSERTS, AND WHAT IT DELIBERATELY MARKS xfail
 ------------------------------------------------------------
-Three of ADR-0011's criteria pass on the DEPLOYED signal path and are asserted
-here as ordinary tests: (b) the constant is derived and the margin is a
-measured number, (a)-entry-1 full stick from rest, (a)-entry-2 the full stick
-reversal at speed -- which the ADR records as never having been tested and
-names as the worst case.
+At the 40 A envelope this docstring was originally written against, three of
+ADR-0011's criteria passed on the deployed signal path -- (b), (a)-entry-1,
+(a)-entry-2 -- and two did not, at any value of the constant, written as
+`xfail(strict=True)`: (a)-entry-3 (the kerb strike) and (f) (both readings).
 
-Two do not pass, at any value of the constant, and are written here as
-`xfail(strict=True)`:
+At 60 A, **only (a)-entry-3 and the LITERAL reading of (f) still carry an
+`xfail(strict=True)`** -- see `test_criterion_a3_full_stick_during_a_kerb_
+strike_does_not_invert` and `test_criterion_f_full_stick_holds_with_the_
+estimator_bias_removed`. The kerb strike is unaffected because it was never
+about the motor -- ADR-0011's own note names the ballast stroke and CoM
+height as the undersized elements, not current authority, and the 20 mm
+lip's imparted pitch rate has nothing to do with `MAX_CURRENT_A`.
 
-* **(a)-entry-3, the kerb strike.** During a full-stick hold the board cannot
-  ride out a strike much above a 1 mm lip.
-* **(f), "every pass must hold with the estimator bias removed".**
-
-They are written as the criteria SHOULD read, and marked expected-to-fail,
-rather than being softened into something that passes or left out. `strict=True`
-matters: the day somebody fixes the underlying problem these turn RED as
-XPASS, which is the only mechanism that reliably tells a future session a known
-failure has stopped being one. A green suite that quietly stopped covering the
-thing it was written for is the failure mode this repo keeps hitting.
+`strict=True` matters: the day somebody fixes the underlying problem these
+turn RED as XPASS, which is the only mechanism that reliably tells a future
+session a known failure has stopped being one -- and that is exactly what
+happened to this file's robustness-reading test for (f) at 60 A, and to its
+own former positive control. A green suite that quietly stopped covering the
+thing it was written for is the failure mode this repo keeps hitting; this
+docstring update, and the inline annotations at each changed test, are the
+record that it did not happen quietly here.
 
 WHY CRITERION (f) IS ALSO FLAGGED AS MIS-SPECIFIED
 ---------------------------------------------------
@@ -88,8 +111,9 @@ INVERTED_DEG = 90.0
 #: ICD 10.1 / the host's own constants. Duplicated here rather than imported
 #: because this file has no Rust binding; `test_the_shipped_constants_are_the_
 #: ones_this_file_measured` pins every one of them against `host.rs` so the
-#: duplication cannot drift silently.
-MAX_CURRENT_A = 40.0
+#: duplication cannot drift silently. Raised 40 -> 60 A with `host.rs`'s own
+#: `MAX_CURRENT_A` (issue: realistic-motor-torque).
+MAX_CURRENT_A = 60.0
 KT_NM_PER_A = 0.7
 KP_NM_PER_RAD = 140.0
 
@@ -319,9 +343,19 @@ def test_peak_current_demand_is_linear_in_stick_at_the_documented_slope(tmp_path
         f"{_rust_constant('STATED_ENVELOPE_RESERVE_FRACTION') * MAX_CURRENT_A / slope:.3f}) "
         "rather than adjusting this tolerance."
     )
-    assert slope > MAX_CURRENT_A, (
-        "the premise of the whole change is that full stick over-commands the "
-        f"envelope; measured {slope:.2f} A/unit against {MAX_CURRENT_A} A"
+    # INVERTED as of the 60 A / 42 N*m envelope (issue: realistic-motor-torque):
+    # this slope (~42 A/unit) is essentially unchanged from the 42.03 A/unit
+    # measured at the old 40 A envelope -- it is a property of the control law's
+    # transient response, not of the envelope. What changed is what it means:
+    # against a 40 A envelope it was an over-command; against 60 A it is not.
+    # See `host.rs`'s `CMD_ENVELOPE_RESERVE` doc comment -- ADR-0011's founding
+    # premise for this whole mechanism no longer holds, and this assertion
+    # states that rather than hiding it.
+    assert slope < MAX_CURRENT_A, (
+        "the premise this mechanism was built on (full stick over-commands the "
+        f"envelope) no longer holds; measured {slope:.2f} A/unit against "
+        f"{MAX_CURRENT_A} A -- CMD_ENVELOPE_RESERVE has saturated to a no-op, "
+        "see host.rs"
     )
 
 
@@ -402,22 +436,39 @@ def test_f2_the_peak_demand_slope_is_trim_derived_not_geometry_derived(tmp_path)
 # ---------------------------------------------------------------------------
 
 
-def test_the_unshaped_command_map_still_inverts_the_board(tmp_path):
-    """The positive control, and it has to run FIRST in spirit.
+def test_the_unshaped_command_map_no_longer_inverts_the_board_at_60a(tmp_path):
+    """**INVERTED as of the 60 A / 42 N*m envelope (issue:
+    realistic-motor-torque) -- this was the positive control for the whole
+    matrix below, asserting the board MUST still invert unshaped.**
 
-    Every "the board did not invert" assertion below is worthless unless this
-    harness can still see the defect ADR-0011 is about. With the reserve
-    disabled (`--cmd-reserve 1.0`) the board must still go over, at the time
-    the ADR measured.
+    At 40 A this reproduced ADR-0011's own numbers exactly: first saturation
+    at 4.92 s, `FALLEN` (20 deg) at 5.868 s, past 90 deg at 6.142 s (reproduced
+    against the pre-change checkout as part of this re-derivation). At 60 A,
+    on the SAME scripted schedule, on the SAME estimator signal path, with the
+    reserve fully disabled (`--cmd-reserve 1.0`, i.e. unshaped): the board
+    never saturates, never reaches `FALLEN`, and peaks at 10.64 deg over the
+    full run. `CMD_ENVELOPE_RESERVE` (see `host.rs`) has therefore saturated
+    to 1.00 -- no shaping -- and this is not a bug in the harness, it is the
+    reason that constant saturated: there is no over-command left to shape.
+
+    This test used to be the harness's own positive control -- if it stopped
+    seeing the ADR-0011 defect, every "did not invert" assertion below it was
+    suspect. It is kept, inverted, for the same reason: a matrix of "does not
+    invert" assertions is only meaningful with an explicit statement of what,
+    if anything, still does. On the ESTIMATOR path, at this envelope, nothing
+    in this file's schedules does any more -- see
+    `test_criterion_f_full_stick_holds_with_the_estimator_bias_removed` for
+    the TRUTH-fed reading, which still fails.
     """
     rows = _run(tmp_path, "unshaped", "full-stick", cmd_reserve=1.0, pitch_source="estimator")
     t = _inversion_time(rows)
-    assert t is not None, (
-        "full stick with the reserve disabled did NOT invert the board. Either "
-        "the plant, the gains or the harness has changed, and every acceptance "
-        "number in this file is measuring something else."
+    assert t is None, (
+        f"full stick with the reserve disabled INVERTED at {t} s. Either the "
+        "60 A / 42 N*m envelope regressed back toward the 40 A finding, or "
+        "this needs re-reading against the plant/gains that were current when "
+        "this was written."
     )
-    print(f"\nunshaped full stick inverts at {t:.3f} s")
+    print("\nunshaped full stick (60 A) survives the full hold -- ADR-0011's founding defect is gone on this path")
 
 
 def test_criterion_a1_full_stick_from_rest_does_not_invert(tmp_path):
@@ -480,14 +531,27 @@ def test_the_worst_point_in_the_matrix_is_quoted_in_both_currencies(tmp_path):
 def test_criterion_c_the_warning_leads_the_outcome_where_fallen_trails_it(tmp_path):
     """The warning must fire BEFORE the board is committed. `FALLEN` does not.
 
-    The reference event is the FIRST ENVELOPE SATURATION, which is what
-    ADR-0011's own lead times are quoted against -- its table puts it at
-    4.92 s, and its `FALLEN` figure of -0.95 s is exactly `FALLEN` minus that.
+    **Reference scenario CHANGED at the 60 A / 42 N*m envelope (issue:
+    realistic-motor-torque).** ADR-0011's own numbers, and this test's
+    original reference event (first envelope saturation at 4.92 s on
+    `--scripted-scenario full-stick --cmd-reserve 1.0 --pitch-source
+    estimator`), were measured at 40 A. At 60 A that exact run never
+    saturates, never warns and never falls at all -- see
+    `test_the_unshaped_command_map_no_longer_inverts_the_board_at_60a`. There
+    is no "committed point" left on the estimator path for the warning to
+    lead.
+
+    The TRUTH-fed full-stick hold still commits (criterion (f) still fails,
+    see `test_criterion_f_full_stick_holds_with_the_estimator_bias_removed`),
+    so that is the reference scenario here instead -- the warning mechanism
+    (criterion (c)) is still live and still worth measuring, just no longer
+    on the path this test originally used.
+
     Lead is asserted against a floor rather than pinned to a value, because
     the number is a measurement and pinning it would make an improvement look
     like a regression; the measured value is printed either way.
     """
-    rows = _run(tmp_path, "warn", "full-stick", cmd_reserve=1.0, pitch_source="estimator")
+    rows = _run(tmp_path, "warn", "full-stick", cmd_reserve=1.0, pitch_source="truth")
     t_sat = _first(rows, lambda r: r["saturated"] > 0.5)
     t_warn = _first(rows, lambda r: r["authority_warning"] > 0.5)
     t_fallen = _first(rows, lambda r: r["fallen"] > 0.5)
@@ -693,40 +757,42 @@ def test_criterion_f_full_stick_holds_with_the_estimator_bias_removed(tmp_path):
     assert t is None, f"fed MuJoCo truth, full stick from rest inverted at {t:.3f} s"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ADR-0011 criterion (f), robustness reading -- the question the ADR "
-        "was reaching for. A worst-case STATIC pitch-estimate error injected "
-        "on top of the real signal path inverts the board at +-0.5 deg "
-        "(survives +-0.25 deg). The tolerance band on the pitch estimate is "
-        "therefore about a quarter of a degree, which is the number that "
-        "matters most for hardware: an IMU mounted half a degree out flips "
-        "this board. Both readings of criterion (f) fail, so the conclusion "
-        "does not depend on which one is right.\n\n"
-        "NOSE-UP ONLY. The nose-DOWN side of this band was parametrised here "
-        "too until the braking reserve landed and turned -0.5 deg into an "
-        "XPASS. Sweeping it showed why, and it is not an improvement: outcome "
-        "is NOT MONOTONIC in nose-down bias. See "
-        "test_the_nose_down_static_bias_band_is_not_monotonic. +0.5 deg "
-        "inverts the board hard and stably (6.71 s, unchanged by the braking "
-        "reserve), so the criterion's failure is recorded on the side where a "
-        "single value means something."
-    ),
-)
 @pytest.mark.parametrize("bias_deg", [0.5])
 def test_criterion_f_the_matrix_holds_under_a_worst_case_static_pitch_bias(tmp_path, bias_deg):
+    """**XPASS as of the 60 A / 42 N*m envelope (issue: realistic-motor-torque)
+    -- the `xfail(strict=True)` this carried is REMOVED, per this file's own
+    stated policy: "the day somebody fixes the underlying problem these turn
+    red as XPASS, which is the only mechanism that reliably tells a future
+    session a known failure has stopped being one."**
+
+    At 40 A this inverted "hard and stably" at 6.71 s and was unchanged by the
+    braking-reserve change (issue #218/#219). At 60 A, the SAME +0.5 deg
+    nose-up static pitch bias on the SAME worst-case scenario (a full stick
+    reversal at speed) now survives. This is one point, not the whole
+    robustness reading -- see `test_the_nose_down_static_bias_band_is_not_
+    monotonic`, run in the same sweep, for the nose-down side (also now
+    surviving everywhere it was swept, which is its own finding).
+
+    **Do not read this as "criterion (f) now passes."** The LITERAL reading
+    (`test_criterion_f_full_stick_holds_with_the_estimator_bias_removed`,
+    fed MuJoCo truth) still inverts -- later (11.4 s vs 4.1 s at 40 A), but it
+    still inverts, at every value the ADR swept. This test is the ROBUSTNESS
+    reading the ADR was reaching for as a substitute, and it has flipped; the
+    literal one has not.
+    """
     rows = _run(tmp_path, f"f2{bias_deg}", "stick-reversal", pitch_source="estimator", pitch_bias_deg=bias_deg)
     t = _inversion_time(rows)
     assert t is None, f"a {bias_deg:+} deg static pitch bias inverted the board at {t:.3f} s"
 
 
-def test_the_nose_down_static_bias_band_is_not_monotonic(tmp_path):
-    """A correction to how the +-0.25 / +-0.5 characterisation reads.
+def test_the_nose_down_static_bias_band_now_holds_everywhere_swept(tmp_path):
+    """**INVERTED as of the 60 A / 42 N*m envelope (issue:
+    realistic-motor-torque) -- read the history before trusting the name.**
 
-    That pair was recorded as though the board simply survives a quarter of a
-    degree and inverts at a half. On the NOSE-UP side it behaves that way. On
-    the nose-down side it does not, and this is the measurement that says so:
+    This test used to correct how the +-0.25 / +-0.5 characterisation read:
+    at 40 A the pair was recorded as though the board simply survives a
+    quarter of a degree of nose-down bias and inverts at a half, but the
+    nose-down side actually had a knife-edge in it --
 
         bias      reserve 0.80    reserve 0.90
         -0.70 deg     held            held
@@ -736,27 +802,24 @@ def test_the_nose_down_static_bias_band_is_not_monotonic(tmp_path):
         -0.45 deg     INVERTED        INVERTED
         -0.40 deg     INVERTED        held
 
-    A larger bias surviving where a smaller one inverts is not a tolerance,
-    it is a knife-edge, and **it is pre-existing** -- visible at reserve 0.80
-    in the column that predates the braking change. The braking reserve did
-    not create it, it moved which side of the edge -0.5 deg lands on, which
-    is how it was noticed at all (a strict xfail turned XPASS).
+    -- a larger bias surviving where a smaller one inverted, not a tolerance.
+    The test's own original assertion anticipated exactly the result below and
+    named the risk explicitly: "a clean sweep is more likely to mean the
+    harness stopped working." It has NOT: this file's positive controls
+    reproduce the 40 A ADR-0011 numbers exactly on the same harness (see
+    `test_the_unshaped_command_map_no_longer_inverts_the_board_at_60a`'s
+    history), and the TRUTH-fed full-stick hold
+    (`test_criterion_f_full_stick_holds_with_the_estimator_bias_removed`)
+    still inverts on this exact build. The clean sweep below is real.
 
-    Recorded rather than resolved, and deliberately NOT bisected: this repo
-    has met exactly this shape once before, in the nose-strike disturbance
-    envelope, and concluded that bisecting to a boundary that moves with any
-    small upstream change manufactures precision the measurement does not
-    have.
-
-    **What must not be done with this:** the -0.5 deg XPASS must not be
-    promoted into "the board is now robust to nose-down bias". It is one
-    trajectory landing on the lucky side of a chaotic band. Asserting it
-    would be deriving acceptance from whatever happened to pass, which is the
-    precise move ADR-0011 criterion (f) exists to forbid.
-
-    Asserted here is only the part that is stable and that criterion (f)
-    actually turns on: somewhere in the +-0.5 deg band the board still goes
-    over, so the robustness reading still fails.
+    At 60 A, every bias in this band now HOLDS -- the knife-edge did not just
+    move, it disappeared from this band entirely. **This does not mean
+    "the board is now robust to nose-down bias" as a general claim** -- it is
+    one band, on one scenario (stick-reversal, estimator path), and the
+    literal criterion (f) reading still fails on the truth-fed path. It does
+    mean this specific, previously-documented non-monotonic knife-edge is not
+    reproducible at this envelope, which is itself worth recording rather than
+    silently losing when the band was widened or re-checked.
     """
     band = (-0.60, -0.50, -0.45, -0.40)
     outcomes = {}
@@ -771,19 +834,11 @@ def test_the_nose_down_static_bias_band_is_not_monotonic(tmp_path):
         print(f"  {bias:+.2f} deg: {'held' if t is None else f'INVERTED at {t:.2f} s'}")
 
     inverted = [b for b, t in outcomes.items() if t is not None]
-    assert inverted, (
-        "no nose-down bias in the +-0.5 deg band inverts the board any more. "
-        "If that is real it is a genuine robustness change and ADR-0011 "
-        "criterion (f) needs revisiting -- but check the monotonicity above "
-        "first, because this band has a knife-edge in it and a clean sweep is "
-        "more likely to mean the harness stopped working."
+    assert not inverted, (
+        f"a nose-down bias in {inverted} now inverts the board again -- the "
+        "60 A / 42 N*m envelope's clean sweep did not hold; re-check against "
+        "the table in this test's docstring for whether the knife-edge is back"
     )
-    held = [b for b, t in outcomes.items() if t is None]
-    if held and min(inverted) < min(held):
-        print(
-            f"  NON-MONOTONIC as recorded: {min(held):+.2f} deg holds while "
-            f"{min(inverted):+.2f} deg inverts."
-        )
 
 
 @pytest.mark.xfail(

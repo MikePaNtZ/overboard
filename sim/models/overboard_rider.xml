@@ -37,10 +37,22 @@
        0.75 m (this file's ballast mass/height, matching
        `sim/scenarios/shuttle_run.py::ShuttleParams`'s own defaults, reused
        rather than invented), that is a 34.3 N*m disturbance torque at full
-       deflection (70 kg * 9.81 m/s^2 * 0.05 m), already past the drive's own
-       28 N*m ceiling (40 A * KT_NM_PER_A). Full-stick weight shift is
-       therefore ABLE to tip the board over, deliberately -- the same way it
-       can on a real one -- not a bug to be tuned away.
+       deflection (70 kg * 9.81 m/s^2 * 0.05 m). At the 40 A / 28 N*m
+       envelope this was already past the drive's own ceiling, so full-stick
+       weight shift was ABLE to tip the board over on a static torque
+       comparison alone.
+
+       **NO LONGER TRUE by that same comparison at 60 A / 42 N*m (issue:
+       realistic-motor-torque): 34.3 N*m is now BELOW the drive's ceiling.**
+       Whether full-stick weight shift can still tip the board is therefore a
+       dynamic question (lean rate, the estimator's own trim, the plant's
+       response) rather than a static one this comment can settle by
+       arithmetic -- see `crates/sim-host/src/host.rs`'s `CMD_ENVELOPE_
+       RESERVE` doc comment for the measured full-stick behaviour at this
+       envelope. This paragraph's ORIGINAL claim -- that weight shift's
+       ability to tip the board is deliberate and not a bug to be tuned away
+       -- is not re-asserted here without a fresh dynamic measurement of THIS
+       actuator (`ballast_fa`/`ballast_lat`), which this patch did not take.
 
        The fore/aft carrier body's own mass (0.5 kg) is a placeholder for the
        linkage/foot-shift mechanism, not rider mass -- the full 70 kg rider

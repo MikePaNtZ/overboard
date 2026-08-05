@@ -51,7 +51,8 @@ DEFAULT_KD_NM_PER_RAD_S = 7.7
 #: headroom error instead of a gain error.
 DEFAULT_KT_NM_PER_A = KT_NM_PER_A
 
-#: Envelope clamp, amps. Matches the model's derived ctrlrange (40 A * kt).
+#: Envelope clamp, amps. Matches the model's derived ctrlrange (60 A * kt =
+#: 42 N*m; raised from 40 A / 28 N*m, issue: realistic-motor-torque).
 DEFAULT_MAX_CURRENT_A = 60.0
 
 #: Loaded rolling radius, m (ICD 10.5). Stage-0 will measure the real, loaded

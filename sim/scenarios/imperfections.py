@@ -187,7 +187,12 @@ IDEAL = ImperfectionProfile(profile_id="ideal-v1")
 #:   gyro bias         0.002 rad/s  a small fixed offset, un-calibrated
 #:   wheel quantum     0.007 rad/s  1 ERPM = 6.98e-3 rad/s (ICD §10.5)
 #:   wheel update      500 Hz       the STATUS rate (ICD §11.2)
-#:   current cap       40 A         the envelope limit
+#:   current cap       60 A         the envelope limit (FLAG: Sr. Mechanical
+#:                                  & Systems owns whether 60 A / 42 N*m is
+#:                                  defensible against the real drive; raised
+#:                                  here only for consistency with the rest of
+#:                                  the sweep, see `crates/sim-host/src/host.rs`
+#:                                  `MAX_CURRENT_A`)
 STAGE0_PLACEHOLDER = ImperfectionProfile(
     profile_id="stage0-placeholder-v1",
     actuation_delay_s=0.001,
@@ -196,7 +201,7 @@ STAGE0_PLACEHOLDER = ImperfectionProfile(
     gyro_bias_rad_s=0.002,
     wheel_rate_quantum_rad_s=0.00698,
     wheel_rate_update_hz=500.0,
-    max_current_a=40.0,
+    max_current_a=60.0,
     #: ICM-42688-P accel noise density x2 per ICD §12, integrated over a
     #: 250 Hz band. Small in absolute terms, but it enters the attitude
     #: estimate through an atan2 and is not attenuated by the plant.
@@ -218,10 +223,16 @@ STAGE0_PLACEHOLDER = ImperfectionProfile(
 #:
 #:   onset  27 rad/s  ≈ 4 m/s  (~14 km/h), where duty starts to bind
 #:   full   55 rad/s  ≈ 8 m/s  (~29 km/h), a plausible top speed
-#:   floor  0.35      → 14 A of the 40 A cap still available
+#:   floor  0.35      → 21 A of the 60 A cap still available
 #:
 #: **Sr. Mechanical & Systems owns whether these match the real drive.** They
-#: are shaped to be defensible, not measured.
+#: are shaped to be defensible, not measured. That includes `max_current_a`
+#: itself: raised 40 -> 60 A here only to stay consistent with
+#: `crates/sim-host/src/host.rs`'s `MAX_CURRENT_A` (issue: realistic-motor-
+#: torque) -- NOT a claim that the cutback breakpoints above are still
+#: defensible at the new ceiling, which is exactly the kind of question this
+#: profile's ownership note exists to route to Sr. Mechanical rather than to
+#: decide unilaterally here.
 STAGE0_CUTBACK = ImperfectionProfile(
     profile_id="stage0-cutback-v1",
     actuation_delay_s=0.001,
@@ -230,7 +241,7 @@ STAGE0_CUTBACK = ImperfectionProfile(
     gyro_bias_rad_s=0.002,
     wheel_rate_quantum_rad_s=0.00698,
     wheel_rate_update_hz=500.0,
-    max_current_a=40.0,
+    max_current_a=60.0,
     accel_noise_m_s2=0.02,
     derate_onset_rad_s=27.0,
     derate_full_rad_s=55.0,

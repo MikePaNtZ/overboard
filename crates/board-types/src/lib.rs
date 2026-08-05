@@ -442,13 +442,17 @@ mod tests {
 
     #[test]
     fn tau_max_is_kt_times_i_max() {
-        // Issue #137 AC3: the 40 A clamp expressed as a torque ceiling.
+        // Issue #137 AC3: the current clamp expressed as a torque ceiling --
+        // asserted as the RELATIONSHIP, not a magic pair of literals, so this
+        // survives the next `max_current_a` change instead of being "fixed"
+        // by editing the input while leaving the output stale (which is
+        // exactly how this test broke when MAX_CURRENT_A moved 40 -> 60 A).
         let p = Params {
             kt_nm_per_a: 0.7,
             max_current_a: 60.0,
             ..Params::default()
         };
-        assert!((p.tau_max_nm() - 28.0).abs() < 1e-4);
+        assert!((p.tau_max_nm() - p.kt_nm_per_a * p.max_current_a).abs() < 1e-4);
     }
 
     #[test]

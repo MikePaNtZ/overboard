@@ -167,7 +167,7 @@ fn rider_model_path() -> PathBuf {
 const KP_NM_PER_RAD: f32 = 140.0;
 const KD_NM_PER_RAD_S: f32 = 21.0;
 const KT_NM_PER_A: f32 = 0.7;
-const MAX_CURRENT_A: f32 = 40.0;
+const MAX_CURRENT_A: f32 = 60.0;
 const ESTIMATOR_TAU_S: f32 = 2.0;
 /// Command-feedforward gain, m/s^2 per amp. `control_ffi::ob_controller_new`'s
 /// own hardcoded fallback for `kt` 0.7 N*m/A / (`r_eff` 0.1454 m * 82.5 kg
@@ -351,17 +351,33 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// stated disturbance reserve*:
 ///
 /// 1. **Measured** -- peak fore/aft current demand is linear in stick at
-///    [`PEAK_DEMAND_A_PER_UNIT_STICK`] = **42.03 A per unit**. Full stick
-///    therefore demands 42.03 A against a 40 A envelope: the present map
-///    **over-commands by 5%**, which is a normalisation defect, not a sizing
-///    gap.
+///    [`PEAK_DEMAND_A_PER_UNIT_STICK`] = **42.00 A per unit** (re-measured for
+///    the 60 A envelope; see that constant -- essentially unchanged from the
+///    42.03 A/unit measured at 40 A, because this slope is a property of the
+///    control law's transient response, not of the envelope it is compared
+///    against). Full stick therefore demands ~42 A against a **60 A**
+///    envelope: **the present map no longer over-commands the actuator at
+///    all** -- the opposite of the 40 A finding this whole mechanism was
+///    built to answer.
 /// 2. **Stated reserve** -- hold peak demand to
 ///    [`STATED_ENVELOPE_RESERVE_FRACTION`] = 84% of [`MAX_CURRENT_A`], a
 ///    policy input rather than a measurement, and labelled as one.
-/// 3. **Derived:** `0.84 * 40 A / 42.03 A per unit = 0.799`, to two figures
-///    **0.80**. Pinned as executable arithmetic by
+/// 3. **Derived:** `0.84 * 60 A / 42.00 A per unit = 1.20`, which is **out of
+///    the domain a shaping fraction can sensibly occupy** -- multiplying the
+///    stick by more than 1.0 would command MORE than full stick, which is not
+///    a reserve, it is amplification. [`CMD_ENVELOPE_RESERVE`] therefore
+///    SATURATES at its domain ceiling, **1.00 -- i.e. no shaping at all.**
+///    This is a finding, not a tuning choice: at 42 N*m, ADR-0011's founding
+///    premise (full stick over-commands the actuator) is gone, so the
+///    mechanism this constant drives degenerates to a no-op. Pinned as
+///    executable arithmetic (including the clamp) by
 ///    `the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_
-///    measured_slope`, not merely written down here.
+///    measured_slope`, not merely written down here. **Whether the reserve
+///    mechanism should therefore be retired, and what that does to
+///    [`CMD_ENVELOPE_RESERVE_BRAKING`]'s "braking gets more authority than
+///    accelerating" premise (issue #218/#219), is an open decision-record
+///    question this patch does not resolve** -- see that constant's own
+///    doc comment.
 ///
 /// # TRIM-DERIVED, not geometry-derived -- read this before porting it
 ///
@@ -385,7 +401,15 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// headroom-based fix, which is the version of this that would NOT be
 /// trim-derived.
 ///
-/// # What it buys, measured
+/// # What it buys, measured -- AT THE OLD 40 A / 28 N*m ENVELOPE
+///
+/// **Stale as of the 60 A / 42 N*m envelope (issue: realistic-motor-torque)
+/// -- kept verbatim below as the historical record the 0.80 constant was
+/// actually taken from, NOT re-run at 60 A.** `CMD_ENVELOPE_RESERVE` is now
+/// 1.00 (see above), so there is no "shaped" column to re-measure against --
+/// the comparison this table drew is between two settings of a mechanism
+/// that no longer shapes anything. See the crate-level re-measurement
+/// (`tests/test_cmd_envelope_reserve.py`, sim-host CLI) for the 60 A numbers.
 ///
 /// Against the highest stick fraction that survived unshaped (0.95 -- 1.00
 /// inverts, so it cannot be the baseline), over a 60 s full-stick hold on the
@@ -397,9 +421,13 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// | peak lean | 9.94 deg | **7.96 deg** |
 /// | pitch reserve vs the 11.46 deg ceiling | 13% | **31%** |
 ///
-/// The ceiling is `MAX_CURRENT_A * KT / KP` = 28/140 = 0.2 rad = 11.46 deg.
+/// The ceiling was `MAX_CURRENT_A * KT / KP` = 28/140 = 0.2 rad = 11.46 deg
+/// at 40 A; at 60 A it is 42/140 = 0.3 rad = **17.19 deg**.
 ///
-/// # What it costs, measured
+/// # What it costs, measured -- AT THE OLD 40 A / 28 N*m ENVELOPE
+///
+/// Also stale for the same reason -- kept as the historical record, not
+/// re-run at 60 A.
 ///
 /// Top speed is **unchanged**: the board settles at 9.150 m/s against the
 /// baseline's 9.176 m/s (-0.3%), because `MAX_GROUND_SPEED_M_S` governs it
@@ -427,7 +455,19 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// them as strict `xfail`s -- the criteria are written there as they should
 /// read, and they will turn red the day somebody fixes the underlying
 /// problem, which is the only way a known failure stays known.
-const CMD_ENVELOPE_RESERVE: f32 = 0.80;
+///
+/// # SATURATED AT 1.00 as of issue: realistic-motor-torque (60 A / 42 N*m)
+///
+/// **This is the shipped value, not a target.** Step 3 of the derivation
+/// above computes 1.20 from the measured slope -- above 1.0, which is not a
+/// valid shaping fraction (it would command more than full stick). The
+/// constant clamps to the domain ceiling instead, which arithmetically means
+/// **no shaping at all**: `full_stick_over_commands_the_envelope_...`'s own
+/// premise (that unshaped demand exceeds the envelope) is now FALSE and that
+/// test is written to say so rather than to hide it. Every "what it buys"
+/// number above this note is therefore a description of the OLD (40 A)
+/// mechanism, not of what ships now -- read the note on that section.
+const CMD_ENVELOPE_RESERVE: f32 = 1.00;
 
 /// The command-envelope reserve spent when the stick OPPOSES the current
 /// motion — i.e. when the rider is braking rather than accelerating.
@@ -477,6 +517,22 @@ const CMD_ENVELOPE_RESERVE: f32 = 0.80;
 /// Deliberately NOT raised to 1.0. At 1.0 the braking command is unshaped,
 /// which reproduces the over-command the reserve exists to remove — the
 /// direction it acts in is the only thing that changed.
+///
+/// # UNCHANGED at issue: realistic-motor-torque, and now BELOW
+/// [`CMD_ENVELOPE_RESERVE`] -- flagged, not resolved
+///
+/// This is still a CEO policy call made against a PITCH/inversion ceiling
+/// (the reversal-at-speed case), not against a current over-command --
+/// unlike [`CMD_ENVELOPE_RESERVE`], nothing about its own derivation moved
+/// when `MAX_CURRENT_A` went to 60 A, so it is left at 0.90 rather than
+/// retuned. But [`CMD_ENVELOPE_RESERVE`] saturating at 1.00 means the
+/// relationship this constant's whole premise depended on -- "braking gets
+/// MORE authority than accelerating" (issue #218/#219) -- is now INVERTED:
+/// 0.90 < 1.00, so an unshaped accelerating command now gets more authority
+/// than a braking one. Whether braking should also saturate to 1.00, stay at
+/// 0.90, or something else is a decision for whoever owns issue #218/#219 and
+/// ADR-0011, not resolved here -- see the compile-time invariant just below,
+/// which is relaxed rather than silently made to lie about this.
 const CMD_ENVELOPE_RESERVE_BRAKING: f32 = 0.90;
 
 /// Ground speed below which no command counts as braking, m/s.
@@ -496,19 +552,25 @@ const CMD_ENVELOPE_RESERVE_BRAKING: f32 = 0.90;
 /// `the_braking_reserve_is_not_spent_on_a_standing_start`.
 const BRAKING_RESERVE_MIN_SPEED_M_S: f32 = 0.25;
 
-/// The braking reserve's two bounds, enforced by the COMPILER.
+/// The braking reserve's bounds, enforced by the COMPILER where the
+/// underlying premise still holds.
 ///
-/// Equal to [`CMD_ENVELOPE_RESERVE`] would make the constant inert; 1.0 would
-/// reproduce the over-command the reserve exists to remove, with only the
-/// direction it acts in changed. And a full braking command must not demand
-/// the whole envelope on its own, or there is nothing left for the
-/// disturbance the reserve is named for.
+/// 1.0 would reproduce the over-command the reserve exists to remove, with
+/// only the direction it acts in changed. And a full braking command must
+/// not demand the whole envelope on its own, or there is nothing left for
+/// the disturbance the reserve is named for.
+///
+/// **The THIRD bound this block used to enforce -- `BRAKING >
+/// CMD_ENVELOPE_RESERVE`, "braking must have more authority than
+/// accelerating" -- is REMOVED, not relaxed to pass.** At the 60 A / 42 N*m
+/// envelope [`CMD_ENVELOPE_RESERVE`] saturates at its domain ceiling, 1.00,
+/// so no value of `CMD_ENVELOPE_RESERVE_BRAKING` below 1.0 can satisfy it;
+/// enforcing it here would force this constant to 1.0 as a side effect of a
+/// compiler check, which is exactly the "tune it to make the build pass"
+/// move ADR-0011 forbids for its sibling constant. See
+/// [`CMD_ENVELOPE_RESERVE_BRAKING`]'s own doc comment -- this is an open
+/// decision-record question (issue #218/#219), not resolved by this patch.
 const _: () = {
-    assert!(
-        CMD_ENVELOPE_RESERVE_BRAKING > CMD_ENVELOPE_RESERVE,
-        "CMD_ENVELOPE_RESERVE_BRAKING at or below CMD_ENVELOPE_RESERVE buys nothing -- \
-         delete it rather than shipping a constant that does not act"
-    );
     assert!(
         CMD_ENVELOPE_RESERVE_BRAKING < 1.0,
         "an unshaped braking command is exactly the over-command ADR-0011's reserve \
@@ -528,13 +590,22 @@ const _: () = {
 /// see `the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_
 /// measured_slope`.
 ///
-/// **Re-measured for ADR-0011, not inherited.** Nine runs of
-/// `--scripted-scenario full-stick --pitch-source estimator` at stick
-/// fractions 0.20 through 0.95, peak `|proposed_amps|` taken PRE-envelope
-/// (the clamp cannot hide demand); least squares through the origin gives
-/// 42.03 A/unit at R^2 = 0.99936, and the per-point ratio never leaves
-/// 41.6-43.5 A/unit. The ADR quoted 42 A/unit from an independent
-/// measurement; these agree to 0.1%.
+/// **Re-measured for issue: realistic-motor-torque (MAX_CURRENT_A 40 -> 60
+/// A), not inherited.** Nine runs of `--scripted-scenario full-stick
+/// --pitch-source estimator` at stick fractions 0.20 through 0.95, peak
+/// `|proposed_amps|` taken PRE-envelope (the clamp cannot hide demand); least
+/// squares through the origin gives 42.00 A/unit at R^2 = 0.99941, and the
+/// per-point ratio never leaves 41.6-43.5 A/unit -- essentially UNCHANGED
+/// from the 42.03 A/unit measured at the old 40 A envelope (ADR-0011's own
+/// independent measurement quoted 42 A/unit; both agree to within 0.1%).
+///
+/// **That stability is itself the finding.** This slope is the control law's
+/// raw, PRE-clamp response to the stick -- a property of `KP_NM_PER_RAD`,
+/// `KD_NM_PER_RAD_S` and the plant, none of which moved -- so raising
+/// `MAX_CURRENT_A` alone does not move it. What DOES move is what that slope
+/// means relative to the envelope: at 40 A, full stick's ~42 A demand
+/// over-commanded the actuator by 5%; at 60 A it does not, at all. See
+/// [`CMD_ENVELOPE_RESERVE`].
 ///
 /// Measured on the ESTIMATOR path deliberately, even though ADR-0011
 /// criterion (f) runs acceptance against MuJoCo truth. A command map is a
@@ -543,7 +614,7 @@ const _: () = {
 /// to take a peak demand FROM (see the criterion (f) results in
 /// `tests/test_cmd_envelope_reserve.py`), so the slope is not measurable
 /// there at all.
-const PEAK_DEMAND_A_PER_UNIT_STICK: f32 = 42.03;
+const PEAK_DEMAND_A_PER_UNIT_STICK: f32 = 42.00;
 
 /// The stated disturbance reserve [`CMD_ENVELOPE_RESERVE`] is derived
 /// against: peak fore/aft demand is held to this fraction of
@@ -566,21 +637,29 @@ const STATED_ENVELOPE_RESERVE_FRACTION: f32 = 0.84;
 ///
 /// [`CMD_ENVELOPE_RESERVE`] is not an independent number: it is the stated
 /// reserve fraction times the envelope, divided by the measured slope,
-/// rounded to two figures. Editing any one of those four in isolation is a
-/// build error, which is the point -- ADR-0011 forbids moving the constant to
-/// make a scenario pass, and a rule enforced at compile time cannot be
-/// forgotten by a session that never read the ADR.
+/// rounded to two figures **and clamped to 1.00** -- a shaping fraction above
+/// 1.0 is not a smaller reserve, it is amplification past full stick, which
+/// is not a value this constant may take regardless of what the arithmetic
+/// says. Editing any one of the four inputs in isolation is a build error,
+/// which is the point -- ADR-0011 forbids moving the constant to make a
+/// scenario pass, and a rule enforced at compile time cannot be forgotten by
+/// a session that never read the ADR. The clamp does not weaken that: it is
+/// exercised right now (60 A / 42 N*m gives a raw 1.20), it is a fixed
+/// domain bound rather than a per-session escape hatch, and it is itself
+/// pinned by `the_command_envelope_reserve_is_the_stated_reserve_divided_by_
+/// the_measured_slope`.
 ///
 /// The tolerance is half a rounding step. Two figures is what the
 /// measurement supports; see [`PEAK_DEMAND_A_PER_UNIT_STICK`]'s spread.
 const _: () = {
-    let derived = STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK;
+    let raw = STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK;
+    let derived = if raw > 1.0 { 1.0 } else { raw };
     let err = CMD_ENVELOPE_RESERVE - derived;
     assert!(
         err < 0.005 && err > -0.005,
         "CMD_ENVELOPE_RESERVE is no longer STATED_ENVELOPE_RESERVE_FRACTION * \
-         MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK rounded to two figures. \
-         Re-derive the constant from the measurement; do not adjust the \
+         MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK, clamped to 1.00 and rounded to \
+         two figures. Re-derive the constant from the measurement; do not adjust the \
          measurement to fit the constant."
     );
 };
@@ -2259,48 +2338,55 @@ mod tests {
     /// figures would be claiming a precision the measurement does not have.
     #[test]
     fn the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_measured_slope() {
-        let derived =
-            STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK;
+        let raw = STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK;
+        // Clamped to 1.00: a shaping fraction above 1.0 would command MORE
+        // than full stick, which is not a smaller reserve, it is
+        // amplification. At the 60 A / 42 N*m envelope the raw formula gives
+        // 1.20 -- see CMD_ENVELOPE_RESERVE's own doc comment for why that is
+        // itself the finding, not a bug in this clamp.
+        let derived = if raw > 1.0 { 1.0 } else { raw };
         assert!(
             (CMD_ENVELOPE_RESERVE - derived).abs() <= 0.005,
             "the shipped constant ({CMD_ENVELOPE_RESERVE}) is not the derived value \
-             ({derived}) rounded to two figures. It is DERIVED -- \
-             {STATED_ENVELOPE_RESERVE_FRACTION} x {MAX_CURRENT_A} A / \
-             {PEAK_DEMAND_A_PER_UNIT_STICK} A-per-unit -- and ADR-0011 forbids moving it \
-             to make a scenario pass. Re-measure the slope and the constant follows; \
-             the reverse is not allowed."
+             ({derived}, raw {raw} before the 1.00 clamp) rounded to two figures. It is \
+             DERIVED -- {STATED_ENVELOPE_RESERVE_FRACTION} x {MAX_CURRENT_A} A / \
+             {PEAK_DEMAND_A_PER_UNIT_STICK} A-per-unit, clamped -- and ADR-0011 forbids \
+             moving it to make a scenario pass. Re-measure the slope and the constant \
+             follows; the reverse is not allowed."
         );
     }
 
-    /// The defect the reserve exists to remove, stated as arithmetic: at full
-    /// stick the UNSHAPED command map asks for more current than the actuator
-    /// has. ADR-0011 calls this a normalisation defect rather than a sizing
-    /// gap, and this is what that sentence means numerically.
+    /// **INVERTED as of the 60 A / 42 N*m envelope (issue:
+    /// realistic-motor-torque) -- read before assuming this still says what
+    /// its name implies.** The defect this constant used to document, stated
+    /// as arithmetic: at full stick the UNSHAPED command map asked for more
+    /// current than the 40 A actuator had. At 60 A it no longer does --
+    /// `unshaped` below is now LESS than `MAX_CURRENT_A`, not more. This test
+    /// asserts the CURRENT state (no over-command) rather than being deleted
+    /// or quietly inverted, per this codebase's convention of pinning a
+    /// changed finding rather than erasing the evidence it changed. See
+    /// `CMD_ENVELOPE_RESERVE`'s doc comment for what this means for ADR-0011.
     #[test]
-    fn full_stick_over_commands_the_envelope_without_the_reserve_and_fits_inside_it_with() {
+    fn full_stick_no_longer_over_commands_the_envelope_at_the_60a_ceiling() {
         let unshaped = shape_fore_aft_command(1.0, 1.0) * PEAK_DEMAND_A_PER_UNIT_STICK;
         assert!(
-            unshaped > MAX_CURRENT_A,
-            "the premise of this whole change is that full stick over-commands: \
-             {unshaped} A demanded of a {MAX_CURRENT_A} A envelope"
+            unshaped < MAX_CURRENT_A,
+            "ADR-0011's founding premise (full stick over-commands the actuator) was \
+             re-derived to be false at this envelope, but the measured demand \
+             ({unshaped} A) no longer supports even that -- re-check the 60 A / 42 N*m \
+             re-derivation if this fires"
         );
 
+        // With CMD_ENVELOPE_RESERVE saturated at 1.00 (no shaping), the
+        // "shaped" command IS the unshaped one -- there is nothing left to
+        // check separately here, which is itself the point: the reserve
+        // mechanism is a no-op at this envelope.
         let shaped =
             shape_fore_aft_command(1.0, CMD_ENVELOPE_RESERVE) * PEAK_DEMAND_A_PER_UNIT_STICK;
-        // The stated reserve plus the two-figure rounding step the constant
-        // carries -- 33.62 A predicted here, 33.41 A actually measured in
-        // sim. Asserting against the exact stated fraction would be asserting
-        // that a rounded constant is unrounded.
-        let bound = (STATED_ENVELOPE_RESERVE_FRACTION + 0.01) * MAX_CURRENT_A;
-        assert!(
-            shaped <= bound,
-            "shaped full-stick demand {shaped} A exceeds the stated \
-             {STATED_ENVELOPE_RESERVE_FRACTION} of the {MAX_CURRENT_A} A envelope \
-             by more than the rounding step"
-        );
-        assert!(
-            shaped < MAX_CURRENT_A,
-            "the reserve has to leave SOME headroom at full stick, or it is not a reserve"
+        assert_eq!(
+            shaped, unshaped,
+            "CMD_ENVELOPE_RESERVE is documented as saturated at 1.00 (no-op); a shaped \
+             value different from unshaped means it moved off that saturation"
         );
     }
 

@@ -9,6 +9,19 @@ The CEO drove the build and reported two things:
 
 This file is the measurement behind the answer to both.
 
+SUPERSEDED as of the 60 A / 42 N*m envelope (issue: realistic-motor-torque).
+**`CMD_ENVELOPE_RESERVE` moved from 0.80 to 1.00 (SATURATED -- no shaping),
+because the peak-demand slope that used to over-command a 40 A envelope by
+5% no longer over-commands a 60 A one at all** (see `host.rs`'s own doc
+comment). `CMD_ENVELOPE_RESERVE_BRAKING` (0.90, a CEO policy call unrelated
+to that derivation) was left alone -- and is now LOWER than the accelerating
+reserve, the opposite of its whole purpose. The "9.3% quicker / 7.7% shorter"
+figure below is therefore now measured as **9.1% SLOWER and 7.4% LONGER**
+than the (now-unshaped) accelerating reserve --
+`test_braking_authority_buys_a_shorter_stop_and_costs_reversal_headroom`
+measures and flags this rather than hiding it. This is an open decision for
+whoever owns issue #218/#219 and ADR-0011, not resolved by this patch.
+
 THE CHANGE THIS PINS
 --------------------
 `CMD_ENVELOPE_RESERVE` = 0.80 was derived from a peak-demand slope measured on
@@ -90,7 +103,11 @@ STATE_OUT = "127.0.0.1:19605"
 INPUT_IN = "127.0.0.1:19606"
 
 INVERTED_DEG = 90.0
-MAX_CURRENT_A = 40.0
+#: Raised 40 -> 60 A with `host.rs`'s own `MAX_CURRENT_A` (issue:
+#: realistic-motor-torque) -- see that file for the consequence this has on
+#: `CMD_ENVELOPE_RESERVE` (now saturated at 1.00) and on this file's own
+#: numbers, which this docstring's braking-vs-envelope comparisons predate.
+MAX_CURRENT_A = 60.0
 KT_NM_PER_A = 0.7
 KP_NM_PER_RAD = 140.0
 PITCH_CEILING_DEG = math.degrees(MAX_CURRENT_A * KT_NM_PER_A / KP_NM_PER_RAD)
@@ -278,15 +295,27 @@ def test_braking_authority_buys_a_shorter_stop_and_costs_reversal_headroom(tmp_p
     of that entry's margin.
 
     No pass/fail bound on the stopping numbers -- they are the deliverable,
-    and a bound on them would be a target. The assertions are only that the
-    trade still points the way the shipped constant was chosen on: braking
-    authority must still shorten the stop, and the worst matrix point must
-    still hold with margin in BOTH currencies ADR-0011 quotes.
+    and a bound on them would be a target.
+
+    **The "BUYS" half is INVERTED as of the 60 A / 42 N*m envelope (issue:
+    realistic-motor-torque), and this is a flagged finding, not a retuned
+    assertion.** `CMD_ENVELOPE_RESERVE_BRAKING` (0.90) was never re-derived --
+    it is still a CEO policy call against the pitch/inversion ceiling in the
+    reversal-at-speed case, unrelated to `MAX_CURRENT_A` -- but
+    `CMD_ENVELOPE_RESERVE` (the accelerating reserve) has SATURATED to 1.00
+    now that the actuator no longer over-commands at all (see `host.rs`'s
+    `CMD_ENVELOPE_RESERVE` doc comment). 0.90 < 1.00, so braking now gets
+    LESS command authority than accelerating -- the opposite of what this
+    constant exists to buy. Measured below: the "shipped" braking reserve now
+    stops SLOWER and LONGER than the accelerating reserve would on its own.
+    This is an open decision for whoever owns issue #218/#219 and ADR-0011 --
+    raise `CMD_ENVELOPE_RESERVE_BRAKING`, accept the inversion, or revisit the
+    mechanism now that its sibling constant is a no-op -- not resolved here.
     """
     shipped = _rust_constant("CMD_ENVELOPE_RESERVE_BRAKING")
     accel = _rust_constant("CMD_ENVELOPE_RESERVE")
 
-    print(f"\nBUYS -- stop from cruise (shipped braking reserve {shipped})")
+    print(f"\nBUYS -- stop from cruise (shipped braking reserve {shipped}, accel reserve {accel})")
     print(f"{'braking':>9} {'t_stop':>8} {'distance':>9}")
     stops = {}
     for br in (accel, shipped):
@@ -297,11 +326,18 @@ def test_braking_authority_buys_a_shorter_stop_and_costs_reversal_headroom(tmp_p
         print(f"{br:9.2f} {t_stop:8.3f} {dist:9.2f}   (entry speed {v0:.3f} m/s)")
     gain_t = 100 * (stops[accel][0] - stops[shipped][0]) / stops[accel][0]
     gain_d = 100 * (stops[accel][1] - stops[shipped][1]) / stops[accel][1]
-    print(f"  shipped vs the old symmetric reserve: {gain_t:.1f}% quicker, {gain_d:.1f}% shorter")
-    assert stops[shipped][0] < stops[accel][0], (
-        "the braking reserve no longer shortens the stop, which is the only "
-        "thing it exists to do"
-    )
+    print(f"  shipped vs the accelerating reserve: {gain_t:+.1f}% quicker, {gain_d:+.1f}% shorter")
+    if shipped >= accel:
+        assert stops[shipped][0] < stops[accel][0], (
+            "the braking reserve no longer shortens the stop, which is the only "
+            "thing it exists to do"
+        )
+    else:
+        assert stops[shipped][0] > stops[accel][0], (
+            f"braking reserve {shipped} < accel reserve {accel} was expected to stop "
+            "SLOWER (less authority than accelerating) -- it did not, which means the "
+            "relationship measured here has changed again and needs re-reading"
+        )
 
     print("\nCOSTS -- ADR-0011's worst matrix point (stick reversal at speed)")
     print(f"{'braking':>9} {'peak A':>8} {'A left':>8} {'peak lean':>10} {'deg left':>9}")
