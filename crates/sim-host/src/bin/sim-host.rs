@@ -9,12 +9,15 @@
 //! sim-host [--duration-secs SECONDS] [--startup-kick]
 //!          [--state-out-addr ADDR] [--input-in-addr ADDR]
 //!          [--scripted-scenario default|s-curve|full-stick|stick-reversal|
-//!                              brake-stop|brake-turn|cruise-turn]
+//!                              reversal-b2f-only|brake-stop|brake-turn|
+//!                              cruise-turn]
 //!          [--stats-path PATH|none]
 //!          [--free-run] [--max-sim-secs SECONDS]
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--crr-scale FACTOR]
+//!          [--timestep-scale FACTOR] [--solver-iterations N]
+//!          [--smooth-coulomb-torque NM] [--smooth-coulomb-eps RAD_S]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -242,11 +245,94 @@ fn main() -> ExitCode {
                     eprintln!("sim-host: --crr-scale value '{v}' is not a number");
                     return ExitCode::FAILURE;
                 };
-                if scale.is_nan() || scale <= 0.0 {
-                    eprintln!("sim-host: --crr-scale must be > 0, got {scale}");
+                // `0.0` is legal (not merely `> 0.0`): the drag-model
+                // artefact review's formulation-substitution test needs to
+                // null `frictionloss` out entirely while a smooth explicit
+                // Coulomb approximation (`--smooth-coulomb-torque`) stands in
+                // for it, so the two are not double-counted.
+                if scale.is_nan() || scale < 0.0 {
+                    eprintln!("sim-host: --crr-scale must be >= 0, got {scale}");
                     return ExitCode::FAILURE;
                 }
                 cfg.crr_scale = scale;
+                i += 2;
+            }
+            // Convergence-sweep instrument for the drag-model artefact
+            // review (issue: drag-model): scales `mjModel::opt.timestep`
+            // while the 500 Hz control period stays fixed -- see
+            // `HostConfig::timestep_scale`.
+            "--timestep-scale" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --timestep-scale needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(scale) = v.parse::<f64>() else {
+                    eprintln!("sim-host: --timestep-scale value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if scale.is_nan() || scale <= 0.0 {
+                    eprintln!("sim-host: --timestep-scale must be > 0, got {scale}");
+                    return ExitCode::FAILURE;
+                }
+                cfg.timestep_scale = scale;
+                i += 2;
+            }
+            // Companion to --timestep-scale in the same convergence check --
+            // overrides `mjModel::opt.iterations`; see
+            // `HostConfig::solver_iterations`.
+            "--solver-iterations" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --solver-iterations needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(n) = v.parse::<i32>() else {
+                    eprintln!("sim-host: --solver-iterations value '{v}' is not an integer");
+                    return ExitCode::FAILURE;
+                };
+                if n <= 0 {
+                    eprintln!("sim-host: --solver-iterations must be > 0, got {n}");
+                    return ExitCode::FAILURE;
+                }
+                cfg.solver_iterations = Some(n);
+                i += 2;
+            }
+            // Decisive formulation-substitution test for the drag-model
+            // artefact review: a smooth explicit Coulomb-friction
+            // approximation applied as a generalized force, entirely
+            // bypassing MuJoCo's constraint solver. Both values must be
+            // given together -- see `HostConfig::smooth_coulomb`.
+            "--smooth-coulomb-torque" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --smooth-coulomb-torque needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(torque_max_nm) = v.parse::<f64>() else {
+                    eprintln!("sim-host: --smooth-coulomb-torque value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if torque_max_nm <= 0.0 {
+                    eprintln!("sim-host: --smooth-coulomb-torque must be > 0, got {torque_max_nm}");
+                    return ExitCode::FAILURE;
+                }
+                let eps_rad_s = cfg.smooth_coulomb.map(|(_, e)| e).unwrap_or(0.05);
+                cfg.smooth_coulomb = Some((torque_max_nm, eps_rad_s));
+                i += 2;
+            }
+            "--smooth-coulomb-eps" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --smooth-coulomb-eps needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(eps_rad_s) = v.parse::<f64>() else {
+                    eprintln!("sim-host: --smooth-coulomb-eps value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if eps_rad_s <= 0.0 {
+                    eprintln!("sim-host: --smooth-coulomb-eps must be > 0, got {eps_rad_s}");
+                    return ExitCode::FAILURE;
+                }
+                let torque_max_nm = cfg.smooth_coulomb.map(|(t, _)| t).unwrap_or(2.368);
+                cfg.smooth_coulomb = Some((torque_max_nm, eps_rad_s));
                 i += 2;
             }
             // `t0,duration,fx,fy,fz,tx,ty,tz` -- world frame, SI. The kerb

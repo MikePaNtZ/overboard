@@ -134,6 +134,67 @@ void plant_mujoco_set_dof_frictionloss(void* model, int dofadr, double value) {
   ((mjModel*)model)->dof_frictionloss[dofadr] = value;
 }
 
+// `mjModel::opt.timestep`, seconds -- WRITE side. Verification-only
+// instrument for the drag-model convergence sweep (issue: drag-model
+// artefact review): refines the physics integration step while the 500 Hz
+// control period (sim-backend's CYCLE_NS) stays fixed, to tell a converging
+// numerical result from a churning one. Must be set before the first
+// mj_step -- opt.timestep is read every step.
+void plant_mujoco_set_timestep(void* model, double dt) {
+  ((mjModel*)model)->opt.timestep = dt;
+}
+
+// `mjModel::opt.iterations` -- WRITE side. Same reasoning as
+// plant_mujoco_set_timestep: the constraint solver's iteration cap, doubled
+// for the same convergence check (the solver is already Newton by default,
+// per mjModel::opt.solver -- this does not change the algorithm, only its
+// budget).
+void plant_mujoco_set_solver_iterations(void* model, int n) {
+  ((mjModel*)model)->opt.iterations = n;
+}
+
+// `mjData::qfrc_applied[dofadr]` -- WRITE side. Verification-only instrument
+// for the drag-model artefact review's formulation-substitution test: a
+// smooth, explicit Coulomb-friction approximation (tau = -mu*tanh(omega/eps))
+// applied directly as a generalized force on one DOF, entirely bypassing the
+// constraint solver's `frictionloss`. Mirrors plant_mujoco_set_xfrc_applied's
+// per-body pattern, one DOF at a time rather than 6 at a time.
+void plant_mujoco_set_qfrc_applied_dof(void* data, int dofadr, double value) {
+  ((mjData*)data)->qfrc_applied[dofadr] = value;
+}
+
+// `mjData::qfrc_constraint[dofadr]` -- READ side. Verification-only
+// instrument. NOTE, found while building the friction-torque legality audit:
+// on a WHEEL this is NOT purely the frictionloss torque -- the wheel's
+// rolling ground contact couples back into this same generalized coordinate
+// through the contact Jacobian, so qfrc_constraint mixes contact reaction
+// force in with any dof friction. plant_mujoco_get_dof_friction_force below
+// is the one the legality audit actually wants. Kept for anything that
+// genuinely wants the total constraint force on a DOF.
+double plant_mujoco_get_qfrc_constraint_dof(void* data, int dofadr) {
+  return ((mjData*)data)->qfrc_constraint[dofadr];
+}
+
+// The ISOLATED Coulomb `frictionloss` torque on DOF `dofadr` -- READ side.
+// Verification-only instrument for the drag-model artefact review's
+// friction-torque legality audit (issue: drag-model): scans mjData's active
+// constraint rows (`efc_type`/`efc_id`/`efc_force`) for the ONE row of type
+// `mjCNSTR_FRICTION_DOF` whose `efc_id` is `dofadr` -- MuJoCo's own
+// row-per-DOF-friction-constraint representation, resolved by the symbol the
+// header defines rather than a hand-copied integer, so a MuJoCo enum
+// reordering is a recompile, not silent corruption. Returns 0.0 if no such
+// row is active this step (e.g. frictionloss is 0, or the dof happens to be
+// exactly at rest with no friction engaged).
+double plant_mujoco_get_dof_friction_force(void* data, int dofadr) {
+  mjData* d = (mjData*)data;
+  for (int i = 0; i < d->nefc; i++) {
+    if (d->efc_type[i] == mjCNSTR_FRICTION_DOF && d->efc_id[i] == dofadr) {
+      return d->efc_force[i];
+    }
+  }
+  return 0.0;
+}
+
 // The pre-loop priming call the CONTROLLED scenarios make (AC8 / issue #107's
 // carried-forward criterion): populates sensordata and qacc_warmstart for the
 // controller's first cycle, in the same position relative to the first

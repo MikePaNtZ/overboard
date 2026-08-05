@@ -1016,6 +1016,37 @@ pub struct HostConfig {
     /// gravity.
     pub crr_scale: f64,
 
+    /// **Verification only.** Scales `mjModel::opt.timestep` by this factor
+    /// at the next `open()`, refining the physics integration step while the
+    /// 500 Hz control period stays fixed. `1.0` (the default) leaves it
+    /// exactly as the MJCF declares it -- no shipped configuration sets this
+    /// to anything else.
+    ///
+    /// Added for the drag-model artefact review (issue: drag-model): a
+    /// convergence sweep is the sharpest first test of whether a
+    /// constraint-solver-based term (`frictionloss`) is producing real
+    /// physics or a numerical artefact that only looks real at one step
+    /// size. Applied by [`sim_backend::SimBackend::set_timestep_scale`].
+    pub timestep_scale: f64,
+
+    /// **Verification only.** Overrides `mjModel::opt.iterations` (the
+    /// constraint solver's iteration budget) at the next `open()` when
+    /// `Some`. `None` (the default) leaves the model's own value untouched.
+    /// Companion to [`HostConfig::timestep_scale`] in the same convergence
+    /// check. Applied by [`sim_backend::SimBackend::set_solver_iterations`].
+    pub solver_iterations: Option<i32>,
+
+    /// **Verification only.** `(torque_max_nm, eps_rad_s)` for the drag-model
+    /// artefact review's decisive formulation-substitution test: replaces
+    /// `wheel_hinge`'s constraint-solver-based `frictionloss` with a smooth
+    /// explicit approximation, `tau_f = -torque_max_nm * tanh(omega /
+    /// eps_rad_s)`, applied directly as a generalized force -- entirely
+    /// bypassing the constraint solver. `None` (the default) applies
+    /// nothing; no shipped configuration sets this. Callers should also pass
+    /// `--crr-scale 0` so the two are not double-counted. Applied by
+    /// [`sim_backend::SimBackend::set_smooth_coulomb_friction`].
+    pub smooth_coulomb: Option<(f64, f64)>,
+
     /// **Verification only.** Writes one CSV row per control cycle to this
     /// path when the run ends. Buffered in memory and written once, never
     /// during the loop: a 500 Hz control thread does not do file I/O per
@@ -1097,6 +1128,9 @@ impl Default for HostConfig {
             disturbance: None,
             incline_deg: 0.0,
             crr_scale: 1.0,
+            timestep_scale: 1.0,
+            solver_iterations: None,
+            smooth_coulomb: None,
             trace_path: None,
         }
     }
@@ -1143,6 +1177,15 @@ struct TraceRow {
     authority_warning: bool,
     /// The wire's `FALLEN` bit, for the lead-time comparison.
     fallen: bool,
+    /// Truth `wheel_hinge` angular rate, rad/s. Added for the drag-model
+    /// artefact review's friction-torque legality audit (issue: drag-model):
+    /// `tau_f * omega <= 0` needs both this and `wheel_friction_torque_nm`
+    /// in the same row.
+    wheel_omega_rad_s: f32,
+    /// The constraint-solver torque on `wheel_hinge` this cycle, N*m -- on
+    /// the shipped model, exactly the Coulomb `frictionloss` torque. See
+    /// `sim_backend::SimBackend::wheel_friction_torque_nm`.
+    wheel_friction_torque_nm: f32,
 }
 
 /// What a finished (or interrupted-by-error) run produced.
@@ -1362,6 +1405,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     backend.set_incline_deg(cfg.incline_deg);
     // Same reasoning, same timing -- see `HostConfig::crr_scale`.
     backend.set_crr_scale(cfg.crr_scale);
+    // Same reasoning, same timing -- see `HostConfig::timestep_scale`.
+    backend.set_timestep_scale(cfg.timestep_scale);
+    // Same reasoning, same timing -- see `HostConfig::solver_iterations`.
+    if let Some(n) = cfg.solver_iterations {
+        backend.set_solver_iterations(n);
+    }
+    // Same reasoning, same timing -- see `HostConfig::smooth_coulomb`.
+    if let Some((torque_max_nm, eps_rad_s)) = cfg.smooth_coulomb {
+        backend.set_smooth_coulomb_friction(torque_max_nm, eps_rad_s);
+    }
     backend.open().map_err(HostError::Backend)?;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
@@ -1934,6 +1987,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 utilisation_filtered,
                 authority_warning,
                 fallen,
+                wheel_omega_rad_s: backend.truth_wheel_rate_rad_s(),
+                wheel_friction_torque_nm: backend.wheel_friction_torque_nm(),
             });
         }
 
@@ -2121,12 +2176,13 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
     out.push_str(
         "seq,sim_time_s,stick_fore_aft,shaped_fore_aft,applied_fore_aft,truth_pitch_deg,\
          est_pitch_deg,est_pitch_rate_deg_s,truth_pitch_rate_deg_s,forward_speed_m_s,proposed_amps,applied_amps,\
-         saturated,utilisation,utilisation_filtered,authority_warning,fallen\n",
+         saturated,utilisation,utilisation_filtered,authority_warning,fallen,\
+         wheel_omega_rad_s,wheel_friction_torque_nm\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{}",
+            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?}",
             r.seq,
             r.sim_time_s,
             r.stick_fore_aft,
@@ -2144,6 +2200,8 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
             r.utilisation_filtered,
             r.authority_warning as u8,
             r.fallen as u8,
+            r.wheel_omega_rad_s,
+            r.wheel_friction_torque_nm,
         );
     }
     std::fs::write(path, out).map_err(HostError::Io)

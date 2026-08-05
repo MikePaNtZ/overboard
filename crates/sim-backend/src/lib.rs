@@ -202,6 +202,24 @@ pub struct SimBackend {
     /// never calls [`SimBackend::set_crr_scale`] is bit-identical to one
     /// built before this knob existed. See [`SimBackend::set_crr_scale`].
     crr_scale: Option<f64>,
+    /// **Verification only.** Scales `mjModel::opt.timestep` by this factor
+    /// at `open()`, refining the physics integration step while the control
+    /// period (`CYCLE_NS`) stays fixed. `None` (the default) leaves the
+    /// model's own timestep untouched. See [`SimBackend::set_timestep_scale`].
+    timestep_scale: Option<f64>,
+    /// **Verification only.** Overrides `mjModel::opt.iterations` (the
+    /// constraint solver's iteration budget) at `open()` when `Some`. `None`
+    /// leaves the model's own value untouched. See
+    /// [`SimBackend::set_solver_iterations`].
+    solver_iterations: Option<i32>,
+    /// **Verification only.** `(torque_max_nm, eps_rad_s)` for the smooth
+    /// explicit Coulomb-friction substitution -- see
+    /// [`SimBackend::set_smooth_coulomb_friction`]. `None` (the default)
+    /// applies nothing.
+    smooth_coulomb: Option<(f64, f64)>,
+    /// `mjModel::jnt_dofadr` for `wheel_hinge`, resolved once in `open()`.
+    /// Only used by the smooth-Coulomb substitution above.
+    wheel_hinge_dofadr: usize,
 }
 
 impl SimBackend {
@@ -297,6 +315,48 @@ impl SimBackend {
     /// declares.
     pub fn set_crr_scale(&mut self, scale: f64) {
         self.crr_scale = Some(scale);
+    }
+
+    /// **Verification only.** Scales the open model's resolved
+    /// `mjModel::opt.timestep` by `scale`, taking effect at the next
+    /// `open()`, before `steps_per_cycle` is derived from it. Refines the
+    /// physics integration step while `CYCLE_NS` (the 500 Hz control period)
+    /// stays fixed -- `steps_per_cycle` grows to keep the ratio an exact
+    /// integer, per the same assertion `open()` already carries.
+    ///
+    /// Added for the drag-model artefact review: a constraint-solver-based
+    /// term (`frictionloss`) that only looks real at one timestep is the
+    /// textbook symptom of a solver artefact rather than physics, so this is
+    /// the instrument that tells the two apart.
+    pub fn set_timestep_scale(&mut self, scale: f64) {
+        self.timestep_scale = Some(scale);
+    }
+
+    /// **Verification only.** Overrides `mjModel::opt.iterations` (the
+    /// constraint solver's iteration budget) at the next `open()`. Companion
+    /// to [`SimBackend::set_timestep_scale`] in the same convergence check --
+    /// see there for why.
+    pub fn set_solver_iterations(&mut self, n: i32) {
+        self.solver_iterations = Some(n);
+    }
+
+    /// **Verification only.** Drag-model artefact review, decisive test:
+    /// replaces the constraint-solver-based `wheel_hinge` `frictionloss` with
+    /// a smooth explicit approximation, `tau_f = -torque_max_nm *
+    /// tanh(omega / eps_rad_s)`, applied as a generalized force on the
+    /// `wheel_hinge` DOF every physics sub-step (via `qfrc_applied`) rather
+    /// than left to the constraint solver.
+    ///
+    /// Callers should also call [`SimBackend::set_crr_scale`] with `0.0` so
+    /// the two are not double-counted -- this method does not do that for
+    /// them, mirroring every other verification knob here (each does exactly
+    /// one thing).
+    ///
+    /// If the inversion this review is chasing reproduces under this
+    /// substitution, the constraint-solver suspicion is exonerated: nothing
+    /// here ever calls into MuJoCo's constraint solver for this torque.
+    pub fn set_smooth_coulomb_friction(&mut self, torque_max_nm: f64, eps_rad_s: f64) {
+        self.smooth_coulomb = Some((torque_max_nm, eps_rad_s));
     }
 
     /// As [`SimBackend::with_params`], but with a non-default imperfection
@@ -477,6 +537,39 @@ impl SimBackend {
         }
     }
 
+    /// Truth `wheel_hinge` angular rate, rad/s, straight from the plant this
+    /// cycle (the same value fed to the imperfection chain's cutback
+    /// decision next cycle -- see `last_wheel_rate_rad_s`'s field doc).
+    /// **Verification only**: the drag-model artefact review's convergence
+    /// and legality-audit tests need the wheel speed alongside its friction
+    /// torque, not just the imperfection-chain-consumed copy.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_wheel_rate_rad_s(&self) -> f32 {
+        assert!(self.plant.is_some(), "truth_wheel_rate_rad_s: backend is not open");
+        self.last_wheel_rate_rad_s as f32
+    }
+
+    /// The ISOLATED Coulomb `frictionloss` torque currently acting on
+    /// `wheel_hinge`, N*m. **Verification only**: a rolling wheel's ground
+    /// contact couples back into this same generalized coordinate, so the
+    /// RAW constraint force on this DOF is not the friction torque alone --
+    /// see [`plant_mujoco::Plant::dof_friction_force`]'s doc comment for why
+    /// this reads that method and not [`plant_mujoco::Plant::qfrc_constraint`].
+    /// The drag-model artefact review's legality audit reads this every
+    /// cycle.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn wheel_friction_torque_nm(&self) -> f32 {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("wheel_friction_torque_nm: backend is not open");
+        plant.dof_friction_force(self.wheel_hinge_dofadr) as f32
+    }
+
     /// Rotates the board's free joint about the WORLD vertical axis through
     /// its own current x/y by `dyaw_rad`, so that the next
     /// [`BoardObserve::wait_observe`] integrates the board's translation along
@@ -599,6 +692,21 @@ impl BoardObserve for SimBackend {
             IoError::Fatal(FaultCode::ConfigMismatch)
         })?;
 
+        // The timestep scale, if any, goes on FIRST -- before steps_per_cycle
+        // is derived from it below, and before the incline/Crr overrides,
+        // mirroring their own "before the first mj_step" rule. `None`, or an
+        // explicit `1.0`, leaves `opt.timestep` exactly as the open model
+        // declares it. See `SimBackend::set_timestep_scale`.
+        if let Some(scale) = self.timestep_scale.filter(|&s| s != 1.0) {
+            let base_dt = plant.timestep();
+            plant.set_timestep(base_dt * scale);
+        }
+        // Same reasoning: `None` leaves `opt.iterations` as the model
+        // declares it. See `SimBackend::set_solver_iterations`.
+        if let Some(n) = self.solver_iterations {
+            plant.set_solver_iterations(n);
+        }
+
         // AC2 (issue #107): wait_observe() must step this plant exactly
         // control_period / mj_timestep times, and that ratio must be an
         // exact integer -- a fractional ratio gives a small persistent
@@ -637,12 +745,15 @@ impl BoardObserve for SimBackend {
         // every step, so a mid-run change would be a step disturbance, not a
         // sweep point). `None`, or an explicit `1.0`, leaves `wheel_hinge`'s
         // dof_frictionloss exactly as the open model declares it.
+        // Resolved unconditionally (not only when crr_scale is set): the
+        // smooth-Coulomb substitution below needs it too, and both knobs
+        // target the same DOF.
+        self.wheel_hinge_dofadr = plant
+            .joint_dofadr("wheel_hinge")
+            .expect("model must declare a wheel_hinge joint");
         if let Some(scale) = self.crr_scale.filter(|&s| s != 1.0) {
-            let dofadr = plant
-                .joint_dofadr("wheel_hinge")
-                .expect("model must declare a wheel_hinge joint");
-            let base = plant.dof_frictionloss(dofadr);
-            plant.set_dof_frictionloss(dofadr, base * scale);
+            let base = plant.dof_frictionloss(self.wheel_hinge_dofadr);
+            plant.set_dof_frictionloss(self.wheel_hinge_dofadr, base * scale);
         }
 
         // AC8 (issue #107, carried forward from I1b/#106): the CONTROLLED
@@ -781,6 +892,17 @@ impl BoardObserve for SimBackend {
             // "ctrl before step, never mid-step" ordering I1b pins down,
             // extended to more than one step per cycle.
             plant.set_ctrl(&ctrl);
+            // Drag-model artefact review: the smooth-Coulomb substitution,
+            // if enabled, is recomputed every sub-step (not once per cycle)
+            // from THIS sub-step's own wheel speed -- omega changes within a
+            // control period once steps_per_cycle > 1 (convergence sweep),
+            // and a stale value would silently make this less smooth than
+            // it claims to be.
+            if let Some((torque_max_nm, eps_rad_s)) = self.smooth_coulomb {
+                let omega = plant.qvel()[self.wheel_hinge_dofadr];
+                let tau_f = -torque_max_nm * (omega / eps_rad_s).tanh();
+                plant.set_qfrc_applied_dof(self.wheel_hinge_dofadr, tau_f);
+            }
             t_s = plant.step();
         }
         let t_ns = (t_s * 1e9).round() as u64;
@@ -1261,6 +1383,98 @@ mod tests {
             "doubling wheel_hinge frictionloss had no measurable effect -- the \
              instrument is not reaching the plant"
         );
+    }
+
+    /// Drag-model artefact review convergence instrument: a run that never
+    /// calls [`SimBackend::set_timestep_scale`] must be bit-identical to one
+    /// that calls it with `1.0` -- the same no-op guarantee `crr_scale` makes.
+    #[test]
+    fn timestep_scale_of_one_is_bit_identical_to_leaving_it_unset() {
+        let mut default_scale = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        default_scale.open().unwrap();
+
+        let mut explicit_one = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        explicit_one.set_timestep_scale(1.0);
+        explicit_one.open().unwrap();
+
+        for _ in 0..30 {
+            default_scale.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            explicit_one.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            default_scale.wait_observe().unwrap();
+            explicit_one.wait_observe().unwrap();
+            assert_eq!(
+                default_scale.truth_qpos(),
+                explicit_one.truth_qpos(),
+                "--timestep-scale 1.0 perturbed a run that never set it"
+            );
+        }
+    }
+
+    /// Positive control: halving the timestep must change `steps_per_cycle`
+    /// (asserted indirectly through control_rate_hz staying put while the
+    /// underlying step count doubles) and must not panic the AC2 integer-
+    /// ratio assertion.
+    #[test]
+    fn timestep_scale_of_one_half_still_resolves_an_integer_stepping_ratio() {
+        let mut halved = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        halved.set_timestep_scale(0.5);
+        halved.open().unwrap();
+        // The control rate this backend reports is CYCLE_NS-derived, not
+        // model-timestep-derived, so it must be unchanged...
+        assert_eq!(halved.run_metadata().control_rate_hz, 500.0);
+        // ...while the plant itself has measurably finer resolution: a run
+        // over the same disturbance should differ from the unscaled one
+        // (the AC2 assertion not panicking, checked by `open()` returning
+        // at all, is the more important half of this test).
+        let mut baseline = opened();
+        for _ in 0..30 {
+            baseline.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            halved.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            baseline.wait_observe().unwrap();
+            halved.wait_observe().unwrap();
+        }
+    }
+
+    /// Companion no-op check for [`SimBackend::set_solver_iterations`]: a run
+    /// that never calls it must be bit-identical to one that calls it with
+    /// the model's own already-resolved iteration count.
+    #[test]
+    fn solver_iterations_unset_is_bit_identical_to_the_models_default() {
+        let mut default_iters = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        default_iters.open().unwrap();
+
+        let mut explicit_100 = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        // 100 is MuJoCo's own default `opt.iterations` -- matches what the
+        // model already resolves to unset.
+        explicit_100.set_solver_iterations(100);
+        explicit_100.open().unwrap();
+
+        for _ in 0..30 {
+            default_iters.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            explicit_100.apply_external_force([0.0; 3], [0.0, 15.0, 0.0]);
+            default_iters.wait_observe().unwrap();
+            explicit_100.wait_observe().unwrap();
+            assert_eq!(
+                default_iters.truth_qpos(),
+                explicit_100.truth_qpos(),
+                "--solver-iterations 100 perturbed a run that never set it"
+            );
+        }
     }
 
     // --- new for issue #107 (I1c): real-plant-specific properties ---------

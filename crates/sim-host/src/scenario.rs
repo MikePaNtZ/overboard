@@ -262,6 +262,39 @@ pub const STICK_REVERSAL_SCHEDULE: Schedule = &[
     (30.5, 32.5, 0.0, 0.0, 0.0, "release"),
 ];
 
+/// Isolates the ADR-0011 (a)-entry-2 event ITSELF -- reverse-to-forward at
+/// speed -- without [`STICK_REVERSAL_SCHEDULE`]'s preceding forward-to-reverse
+/// leg. Added for the drag-model artefact review's formulation-substitution
+/// test (issue: drag-model): that test replaces `wheel_hinge` `frictionloss`
+/// with a smooth explicit Coulomb approximation, which can legitimately
+/// change exactly WHEN along a multi-event schedule the board first goes
+/// over; running the two-reversal schedule under the substitution risked
+/// answering a different question (does it fail on the FIRST, unstudied
+/// transition) instead of the one the review needs (does it fail on the
+/// ADR's own NAMED worst case). This schedule builds reverse speed directly
+/// (rather than via a forward build + reversal) and slams forward exactly
+/// once, so a run under this schedule can only be measuring the named case.
+pub const REVERSAL_B2F_ONLY_SCHEDULE: Schedule = &[
+    (0.0, ACCEPTANCE_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        ACCEPTANCE_SETTLE_S,
+        20.5,
+        -1.0,
+        0.0,
+        0.0,
+        "full stick reverse (build to the cap in reverse)",
+    ),
+    (
+        20.5,
+        30.5,
+        1.0,
+        0.0,
+        0.0,
+        "SLAM full forward (reverse-to-forward reversal at speed -- the ADR's named case)",
+    ),
+    (30.5, 32.5, 0.0, 0.0, 0.0, "release"),
+];
+
 // --- Braking authority: the CEO's report from driving the build ----------
 //
 // "I would say you should be able to stop faster by leaning back [...] but in
@@ -391,6 +424,7 @@ pub const BY_NAME: &[(&str, Schedule)] = &[
     ("s-curve", S_CURVE_SCHEDULE),
     ("full-stick", FULL_STICK_SCHEDULE),
     ("stick-reversal", STICK_REVERSAL_SCHEDULE),
+    ("reversal-b2f-only", REVERSAL_B2F_ONLY_SCHEDULE),
     ("brake-stop", BRAKE_STOP_SCHEDULE),
     ("brake-turn", BRAKE_TURN_SCHEDULE),
     ("cruise-turn", CRUISE_TURN_SCHEDULE),

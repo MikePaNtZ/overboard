@@ -50,6 +50,11 @@ extern "C" {
     fn plant_mujoco_set_gravity(model: *mut c_void, g: *const f64);
     fn plant_mujoco_get_dof_frictionloss(model: *mut c_void, dofadr: c_int) -> f64;
     fn plant_mujoco_set_dof_frictionloss(model: *mut c_void, dofadr: c_int, value: f64);
+    fn plant_mujoco_set_timestep(model: *mut c_void, dt: f64);
+    fn plant_mujoco_set_solver_iterations(model: *mut c_void, n: c_int);
+    fn plant_mujoco_set_qfrc_applied_dof(data: *mut c_void, dofadr: c_int, value: f64);
+    fn plant_mujoco_get_qfrc_constraint_dof(data: *mut c_void, dofadr: c_int) -> f64;
+    fn plant_mujoco_get_dof_friction_force(data: *mut c_void, dofadr: c_int) -> f64;
     fn plant_mujoco_forward(model: *mut c_void, data: *mut c_void);
     fn plant_mujoco_sensor_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_sensor_adr(model: *mut c_void, sensor_id: c_int) -> c_int;
@@ -535,6 +540,122 @@ impl Plant {
         );
         // SAFETY: see `dof_frictionloss`.
         unsafe { plant_mujoco_set_dof_frictionloss(self.model, dofadr as c_int, value) };
+    }
+
+    /// Overwrites `mjModel::opt.timestep`, seconds -- **verification only**,
+    /// the convergence instrument the drag-model artefact review needs:
+    /// refining the physics integration step while `sim-backend`'s 500 Hz
+    /// control period stays fixed distinguishes a converging numerical result
+    /// (individual points may shift slightly, the qualitative outcome holds)
+    /// from a solver artefact (outcomes churn wholesale and never settle).
+    ///
+    /// # Panics
+    /// If called after any [`Plant::step`] -- same rule as
+    /// [`Plant::set_gravity`], and for the same reason: `opt.timestep` is
+    /// read every step.
+    pub fn set_timestep(&mut self, dt_s: f64) {
+        assert!(
+            self.time() == 0.0,
+            "Plant::set_timestep must be called before the first Plant::step (mjData::time is \
+             {:.6}, not 0)",
+            self.time()
+        );
+        assert!(dt_s > 0.0, "Plant::set_timestep: dt_s must be positive, got {dt_s}");
+        // SAFETY: `self.model` is non-null and owned for the life of `self`.
+        unsafe { plant_mujoco_set_timestep(self.model, dt_s) };
+    }
+
+    /// Overwrites `mjModel::opt.iterations` -- **verification only**, the
+    /// companion convergence instrument to [`Plant::set_timestep`]: doubling
+    /// the constraint solver's iteration budget (the solver itself is already
+    /// Newton, per `mjModel::opt.solver`) is the other half of telling a
+    /// converged result from an under-iterated one.
+    ///
+    /// # Panics
+    /// If called after any [`Plant::step`], same reasoning as
+    /// [`Plant::set_timestep`].
+    pub fn set_solver_iterations(&mut self, n: i32) {
+        assert!(
+            self.time() == 0.0,
+            "Plant::set_solver_iterations must be called before the first Plant::step \
+             (mjData::time is {:.6}, not 0)",
+            self.time()
+        );
+        assert!(n > 0, "Plant::set_solver_iterations: n must be positive, got {n}");
+        // SAFETY: see `set_timestep`.
+        unsafe { plant_mujoco_set_solver_iterations(self.model, n) };
+    }
+
+    /// Overwrites `mjData::qfrc_applied[dofadr]` -- **verification only**,
+    /// the drag-model artefact review's formulation-substitution instrument:
+    /// a smooth explicit Coulomb-friction approximation applied as a
+    /// generalized force on one DOF, entirely bypassing the constraint
+    /// solver `frictionloss` otherwise goes through. Like
+    /// [`Plant::set_xfrc_applied`], overwrites rather than accumulates --
+    /// callers must call this every step (with zero when no force is meant)
+    /// or a stale value persists.
+    ///
+    /// # Panics
+    /// If `dofadr` is not less than [`Plant::nv`].
+    pub fn set_qfrc_applied_dof(&mut self, dofadr: usize, value: f64) {
+        assert!(
+            dofadr < self.nv(),
+            "set_qfrc_applied_dof: dofadr {dofadr} out of range (nv={})",
+            self.nv()
+        );
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `dofadr` was just checked against `nv()`.
+        unsafe { plant_mujoco_set_qfrc_applied_dof(self.data, dofadr as c_int, value) };
+    }
+
+    /// `mjData::qfrc_constraint[dofadr]` -- the constraint-solver force
+    /// currently acting on DOF `dofadr`. **Verification only**: the
+    /// drag-model artefact review's friction-torque legality audit reads
+    /// this on `wheel_hinge`, where it is exactly the Coulomb `frictionloss`
+    /// torque the solver applied (no joint limit, no contact on that DOF),
+    /// every step, to check `|tau_f| <= frictionloss` and `tau_f * omega <=
+    /// 0` (Coulomb friction can never do positive work).
+    ///
+    /// Callers must call this AFTER [`Plant::step`] -- constraint forces are
+    /// a solve result, not populated eagerly.
+    ///
+    /// # Panics
+    /// If `dofadr` is not less than [`Plant::nv`].
+    pub fn qfrc_constraint(&self, dofadr: usize) -> f64 {
+        assert!(
+            dofadr < self.nv(),
+            "qfrc_constraint: dofadr {dofadr} out of range (nv={})",
+            self.nv()
+        );
+        // SAFETY: `self.data` is non-null and owned for the life of `self`;
+        // `dofadr` was just checked against `nv()`.
+        unsafe { plant_mujoco_get_qfrc_constraint_dof(self.data, dofadr as c_int) }
+    }
+
+    /// The ISOLATED Coulomb `frictionloss` torque on DOF `dofadr`, N*m --
+    /// **verification only**, and the one [`Plant::qfrc_constraint`]'s own
+    /// doc comment says NOT to use for a wheel: on a rolling wheel,
+    /// `qfrc_constraint` mixes ground-contact reaction force into the same
+    /// generalized coordinate, so it is not the friction torque alone. This
+    /// scans mjData's active constraint rows for the one of type
+    /// `mjCNSTR_FRICTION_DOF` belonging to `dofadr` and returns 0.0 if none
+    /// is active (e.g. `frictionloss` is 0). This is the number the
+    /// drag-model artefact review's legality audit checks `|tau_f| <=
+    /// frictionloss` and `tau_f * omega <= 0` against.
+    ///
+    /// Callers must call this AFTER [`Plant::step`] -- constraint forces are
+    /// a solve result.
+    ///
+    /// # Panics
+    /// If `dofadr` is not less than [`Plant::nv`].
+    pub fn dof_friction_force(&self, dofadr: usize) -> f64 {
+        assert!(
+            dofadr < self.nv(),
+            "dof_friction_force: dofadr {dofadr} out of range (nv={})",
+            self.nv()
+        );
+        // SAFETY: see `qfrc_constraint`.
+        unsafe { plant_mujoco_get_dof_friction_force(self.data, dofadr as c_int) }
     }
 
     /// `mjData::xmat[body_id]`, row-major, exactly `data.xmat[body].reshape(3,
