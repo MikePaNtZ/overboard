@@ -282,7 +282,6 @@ impl SimBackend {
 
     /// The current the plant is seeing, after the imperfection chain.
     /// Exposed for tests.
-
     pub fn applied_current_a(&self) -> f32 {
         self.applied_current_a
     }
