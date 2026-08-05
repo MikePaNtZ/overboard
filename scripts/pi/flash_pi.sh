@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Flash an Overboard image to an SD card and stage credentials onto it.
 #
-#     scripts/pi/flash_pi.sh --disk /dev/disk4                 # newest release
-#     scripts/pi/flash_pi.sh --disk /dev/disk4 --image ./x.img.xz
-#     scripts/pi/flash_pi.sh --disk /dev/disk4 --dry-run       # rehearse
+#     scripts/pi/flash_pi.sh                                   # newest release
+#     scripts/pi/flash_pi.sh --disk /dev/disk4                 # explicit target
+#     scripts/pi/flash_pi.sh --image ./x.img.xz                # local image
+#     scripts/pi/flash_pi.sh --dry-run                         # rehearse
+#
+# With no --disk, the one removable disk in the machine is proposed. Zero or
+# more than one is an error, never a guess. Detection only ever REMOVES the
+# lookup step -- the confirmation prompt below still has to be answered by
+# hand, because the failure this script exists to prevent is writing to the
+# wrong disk, and a target the script chose deserves more scrutiny than one
+# you typed, not less.
 #
 # THIS WRITES TO A RAW BLOCK DEVICE. The classic way to lose a laptop's
 # internal disk is a mistyped device path in exactly this kind of script, so
@@ -36,7 +44,12 @@ die() { echo "error: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
 usage() {
-  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Print the header block, whatever length it happens to be: everything from
+  # line 2 up to (not including) the first line of actual code. The previous
+  # hard-coded '2,30p' silently truncated the moment the header grew, which is
+  # how --help starts lying about a script whose whole job is not to surprise
+  # you.
+  sed -n '2,/^set -/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -52,16 +65,55 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$DISK" ] || die "--disk is required. There is no default: a default target
-       for a raw write is a loaded gun. Find yours with:
-         macOS:  diskutil list external
-         Linux:  lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT"
-
 OS="$(uname -s)"
 case "$OS" in
   Darwin|Linux) ;;
   *) die "unsupported platform: $OS" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# Target selection.
+#
+# --disk still wins outright. With no --disk we PROPOSE the single removable
+# disk rather than requiring the operator to go and look it up -- but only
+# when there is exactly one. Zero or several is an error, never a guess: the
+# whole point of this script is that it does not write to the wrong disk, and
+# "pick the first one" is how that promise gets broken.
+#
+# What detection removes is the lookup step, not a safety step. Guard 1
+# (removable-only) and guard 2 (type the identifier back) both still run
+# against whatever lands in $DISK, and they run identically whether a human
+# or this function chose it. A target the script picked deserves the SAME
+# scrutiny as one that was typed, not less.
+# ---------------------------------------------------------------------------
+removable_disks() {
+  if [ "$OS" = "Darwin" ]; then
+    diskutil list external physical 2>/dev/null | awk '/^\/dev\/disk/{print $1}'
+  else
+    # RM=1 is the kernel's own removable flag -- the same bit guard 1 checks.
+    lsblk -dno NAME,RM 2>/dev/null | awk '$2 == 1 { print "/dev/" $1 }'
+  fi
+}
+
+if [ -z "$DISK" ]; then
+  FOUND="$(removable_disks || true)"
+  COUNT="$(printf '%s\n' "$FOUND" | grep -c '^/dev/' || true)"
+  case "$COUNT" in
+    1)
+      DISK="$(printf '%s\n' "$FOUND" | grep '^/dev/')"
+      say "no --disk given; exactly one removable disk present: $DISK"
+      ;;
+    0)
+      die "no --disk given, and no removable disk was found.
+       Insert the card, or name the target explicitly:
+         macOS:  diskutil list external
+         Linux:  lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT" ;;
+    *)
+      die "no --disk given, and $COUNT removable disks are present:
+$(printf '%s\n' "$FOUND" | grep '^/dev/' | sed 's/^/         /')
+       Refusing to choose between them -- pick one with --disk." ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Guard 1: the target must be removable. Refused, not warned about.
