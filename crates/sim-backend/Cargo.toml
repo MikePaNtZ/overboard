@@ -9,3 +9,16 @@ board-types = { workspace = true }
 hal = { workspace = true }
 hal-actuate = { workspace = true }
 plant-mujoco = { workspace = true }
+
+[dev-dependencies]
+# Only for tests/imperfection_conformance.rs, to parse the JSON the Python
+# generator emits. xtask already pins the same major version.
+#
+# `float_roundtrip` is NOT optional here: serde_json's default f64 parser is
+# fast but not correctly rounded, and silently returned a value 1 ULP off
+# Python's own for a real vector during this crate's own development --
+# exactly the kind of failure this test exists to catch, except in the test
+# harness's own JSON parsing rather than in the code under test. Without this
+# feature the conformance test is checking against numbers this crate did not
+# actually generate.
+serde_json = { version = "1", features = ["float_roundtrip"] }

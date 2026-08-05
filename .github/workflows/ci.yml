@@ -82,12 +82,23 @@ jobs:
       # succeed. Installed from the SAME pin as requirements-sim.txt (not
       # duplicated by hand) so the version this job links can never drift
       # from the one `sim` tests against.
+      #
+      # numpy is installed the same pinned way for a second, newer reason
+      # (issue #129): `cargo test`'s tests/imperfection_conformance.rs shells
+      # out to `python3 -m sim.scenarios.imperfections`, which imports numpy
+      # directly. Pinning it explicitly rather than relying on mujoco's own
+      # transitive numpy dependency (which would also satisfy the import) --
+      # a version that transitive pull happens to resolve is an accident of
+      # mujoco's own requirements, not a guarantee this job's `sim.scenarios`
+      # import is exercised against the same numpy `sim` itself gates on.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
 
-      - name: Install MuJoCo (plant-mujoco's native dependency)
-        run: pip install "$(grep '^mujoco==' requirements-sim.txt)"
+      - name: Install MuJoCo + numpy (native dep + conformance-test dep)
+        run: |
+          pip install "$(grep '^mujoco==' requirements-sim.txt)"
+          pip install "$(grep '^numpy==' requirements-sim.txt)"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
