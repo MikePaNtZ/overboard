@@ -70,6 +70,16 @@ impl RtStatus {
     }
 }
 
+/// Whether a `uname -v` string names a PREEMPT_RT build, e.g.
+/// `#1 SMP PREEMPT_RT Debian 1:6.12.34-1 (2025-06-xx)`.
+///
+/// A free function at module scope, not inside the Linux-only `imp` module,
+/// so it is unit-testable on every platform this crate builds on without a
+/// subprocess or a cfg-gate.
+fn detect_preempt_rt_from_uname_v(v: &str) -> bool {
+    v.contains("PREEMPT_RT")
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::RtStatus;
@@ -81,9 +91,22 @@ mod imp {
     /// value of the no-Pi coverage rule (AC-12) is that this harness is
     /// exercised long before the numbers matter.
     pub fn acquire(prio: Option<i32>) -> RtStatus {
+        let mut preempt_rt = read_trimmed("/sys/kernel/realtime").map(|v| v == "1");
+        if preempt_rt.is_none() {
+            // `/sys/kernel/realtime` is the primary source, but its absence
+            // is not itself evidence of a non-RT kernel -- it is evidence
+            // the file was not there to read (issue #226 defect 2: this
+            // branch has never once been exercised on a real RT kernel, so
+            // an unexpectedly missing file must not silently make AC-5
+            // unmeasurable forever). `uname -v` is a second, independent
+            // source: Debian/Raspberry Pi OS RT kernels stamp `PREEMPT_RT`
+            // into it.
+            preempt_rt = uname_v().map(|v| super::detect_preempt_rt_from_uname_v(&v));
+        }
+
         let mut status = RtStatus {
             kernel_release: read_trimmed("/proc/sys/kernel/osrelease"),
-            preempt_rt: read_trimmed("/sys/kernel/realtime").map(|v| v == "1"),
+            preempt_rt,
             ..Default::default()
         };
 
@@ -136,6 +159,17 @@ mod imp {
         std::fs::read_to_string(path)
             .ok()
             .map(|s| s.trim().to_string())
+    }
+
+    /// `uname -v` output, or `None` if the command could not be run at all --
+    /// which leaves the caller with no second opinion, not a false one.
+    fn uname_v() -> Option<String> {
+        std::process::Command::new("uname")
+            .arg("-v")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     }
 }
 
@@ -214,5 +248,21 @@ mod tests {
         // Runs on whatever the CI runner is, privileged or not.
         let status = acquire(None);
         assert!(!status.summary().is_empty());
+    }
+
+    #[test]
+    fn uname_v_fallback_recognises_a_real_pi_rt_string() {
+        // The actual string this fallback exists for (issue #226 defect 2),
+        // reported from the CEO's Pi 5 Rev 1.1.
+        assert!(detect_preempt_rt_from_uname_v(
+            "#1 SMP PREEMPT_RT Debian 1:6.12.34-1 (2025-06-xx)"
+        ));
+    }
+
+    #[test]
+    fn uname_v_fallback_does_not_see_rt_in_a_stock_kernel_string() {
+        assert!(!detect_preempt_rt_from_uname_v(
+            "#1 SMP Debian 1:6.12.34-1 (2025-06-xx)"
+        ));
     }
 }

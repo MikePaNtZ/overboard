@@ -135,10 +135,11 @@ jobs:
             --cycles 1000 --no-rt --json /tmp/loop-profile.json
           test -s /tmp/loop-profile.json
           python3 -c "import json,sys; d=json.load(open('/tmp/loop-profile.json')); \
-            assert d['schema_version']==1, d; \
+            assert d['schema_version']==2, d; \
             assert d['wake_late']['count']==1000, d['wake_late']; \
             assert d['compute']['max_ns']>0, 'control law did not execute'; \
             assert d['ac5']['verdict'] is None, 'a non-RT runner must not return a verdict'; \
+            assert len(d['ac5']['gaps'])>0, 'a withheld verdict must say why (issue #226)'; \
             print('harness ok:', d['platform'])"
 
       # I4 (issue #182): no credential may enter a public repository. Runs in

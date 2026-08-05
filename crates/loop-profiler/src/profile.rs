@@ -43,6 +43,12 @@ pub const DEFAULT_PERIOD_NS: u64 = 2_000_000;
 pub const AC5_P999_LIMIT_NS: u64 = 150_000;
 pub const AC5_MAX_LIMIT_NS: u64 = 500_000;
 
+/// AC-5's duration requirement: `-D 30m`. At the default 500 Hz that is
+/// 900,000 counted cycles, not the 100,000 (200 s) this tool's own `Config`
+/// default runs -- so a default-configured run must never be able to print
+/// `AC-5: PASS` (issue #226 defect 1).
+pub const AC5_MIN_DURATION_NS: u64 = 30 * 60 * 1_000_000_000;
+
 /// Control-law constants, mirroring `sim-host`'s.
 ///
 /// **Duplicated deliberately, and safe to duplicate.** Importing them would
@@ -79,6 +85,12 @@ pub struct Config {
     pub warmup: u64,
     /// `SCHED_FIFO` priority, or `None` to stay at normal priority.
     pub rt_prio: Option<i32>,
+    /// Operator attestation that `stress-ng` CPU + network load was running
+    /// throughout this run, per AC-5's `cyclictest -m -Sp95 -i 2000 -D 30m`
+    /// under load. Not something this process can observe about its own
+    /// machine, so it is a fact the caller supplies rather than one this
+    /// tool measures (issue #226 defect 1).
+    pub under_load: bool,
 }
 
 impl Default for Config {
@@ -88,12 +100,17 @@ impl Default for Config {
             // 10^5 cycles is AC-6's pre-registered run length; at 500 Hz
             // that is 200 s. Matching it here means the two measurements are
             // the same size when they are eventually read side by side.
+            // NOTE: this is well short of AC-5's own 30-minute duration --
+            // see `AC5_MIN_DURATION_NS` -- so a default run is never
+            // acceptance-grade on duration alone; `--cycles 900000` (or
+            // more) is required for an actual AC-5 attempt.
             cycles: 100_000,
             warmup: 500,
             // 80 leaves headroom below the kernel's own RT threads (the
             // mcp251xfd IRQ thread among them) rather than out-prioritising
             // the driver whose latency we care about.
             rt_prio: Some(80),
+            under_load: false,
         }
     }
 }
@@ -114,17 +131,61 @@ pub struct Report {
     /// the run. Reported because it is included in every `compute` sample
     /// and is not negligible at these magnitudes.
     pub clock_overhead_ns: u64,
+    /// Measured wall-clock span of the counted cycles (warmup excluded).
+    /// Because the loop paces to real deadlines this tracks `cycles *
+    /// period_ns` closely, but it is measured rather than assumed so a
+    /// duration gate means what it says.
+    pub elapsed_ns: u64,
 }
 
 impl Report {
+    /// Every AC-5 gate this run fails to clear, checked independently so a
+    /// withheld verdict says exactly what is missing instead of one bare
+    /// "NOT ASSESSED" (issue #226 defect 1).
+    ///
+    /// The `cyclictest` gap is unconditional: this tool is not `cyclictest`
+    /// and can never satisfy that condition of AC-5 by gating anything, so
+    /// it is always named rather than checked.
+    pub fn ac5_gaps(&self) -> Vec<&'static str> {
+        let mut gaps = Vec::new();
+        if !self.rt.is_acceptance_grade() {
+            gaps.push(
+                "platform: not confirmed PREEMPT_RT + mlockall + SCHED_FIFO (see platform line)",
+            );
+        }
+        if self.elapsed_ns < AC5_MIN_DURATION_NS {
+            gaps.push("duration: AC-5 requires >= 30 min measured; this run was shorter");
+        }
+        if !self.config.under_load {
+            gaps.push(
+                "load: not confirmed under CPU + network load (rerun with --under-load once \
+                 stress-ng is confirmed running)",
+            );
+        }
+        gaps.push(
+            "instrument: this tool is not cyclictest, the AC-5 instrument of record -- run \
+             cyclictest alongside it",
+        );
+        gaps
+    }
+
     /// Whether this run clears AC-5's thresholds.
     ///
-    /// `None` when the run was not acceptance-grade (wrong kernel, no
-    /// privileges) -- deliberately not `Some(false)`, because "we could not
+    /// `None` when any gate in [`Self::ac5_gaps`] besides the cyclictest one
+    /// is unmet -- deliberately not `Some(false)`, because "we could not
     /// measure this properly" and "the platform failed" are different
-    /// findings and only one of them is about the platform.
+    /// findings and only one of them is about the platform. The cyclictest
+    /// gap alone does not withhold a verdict: this tool can still say
+    /// whether ITS OWN measurement passed the pre-registered thresholds,
+    /// which `ac5_gaps` reports as a caveat next to any verdict.
     pub fn ac5_verdict(&self) -> Option<bool> {
         if !self.rt.is_acceptance_grade() {
+            return None;
+        }
+        if self.elapsed_ns < AC5_MIN_DURATION_NS {
+            return None;
+        }
+        if !self.config.under_load {
             return None;
         }
         Some(
@@ -230,8 +291,12 @@ pub fn run(cfg: Config) -> Report {
     let period = Duration::from_nanos(cfg.period_ns);
     let start = Instant::now();
     let mut deadline = start + period;
+    let mut counted_start: Option<Instant> = None;
 
     for i in 0..(cfg.warmup + cfg.cycles) {
+        if i == cfg.warmup {
+            counted_start = Some(Instant::now());
+        }
         // Built outside the timed span: synthesising an observation is this
         // harness's cost, not the control law's.
         let obs = synth_observation(i, cfg.period_ns);
@@ -284,6 +349,13 @@ pub fn run(cfg: Config) -> Report {
         deadline += period;
     }
 
+    // `unwrap_or(0)` covers `cfg.cycles == 0` only: the loop body above
+    // always sets `counted_start` on its first iteration whenever there is
+    // at least one cycle to run, counted or warmup.
+    let elapsed_ns = counted_start
+        .map(|s| s.elapsed().as_nanos() as u64)
+        .unwrap_or(0);
+
     Report {
         config: cfg,
         rt: status,
@@ -291,6 +363,7 @@ pub fn run(cfg: Config) -> Report {
         compute: summarise(&mut compute_ns),
         overruns,
         clock_overhead_ns,
+        elapsed_ns,
     }
 }
 
@@ -306,6 +379,7 @@ mod tests {
             // Never request RT in a test: on a privileged CI runner it would
             // actually succeed and pin a test thread at FIFO 80.
             rt_prio: None,
+            under_load: false,
         }
     }
 
@@ -333,6 +407,75 @@ mod tests {
         let r = run(short_run());
         assert!(!r.rt.is_acceptance_grade());
         assert_eq!(r.ac5_verdict(), None);
+    }
+
+    /// A `Report` built directly rather than via `run()`, so the AC-5 gating
+    /// tests below don't need a real 30-minute timed loop to exercise the
+    /// duration/load gates (issue #226 defect 1).
+    fn full_platform_report() -> Report {
+        Report {
+            config: Config {
+                under_load: true,
+                ..short_run()
+            },
+            rt: RtStatus {
+                memory_locked: Some(true),
+                sched_fifo_prio: Some(80),
+                preempt_rt: Some(true),
+                ..Default::default()
+            },
+            wake_late: Percentiles {
+                p999_ns: AC5_P999_LIMIT_NS,
+                max_ns: AC5_MAX_LIMIT_NS,
+                ..Percentiles::EMPTY
+            },
+            compute: Percentiles::EMPTY,
+            overruns: 0,
+            clock_overhead_ns: 0,
+            elapsed_ns: AC5_MIN_DURATION_NS,
+        }
+    }
+
+    #[test]
+    fn a_default_configured_run_is_too_short_to_pass_ac5_by_duration_alone() {
+        // The exact bug issue #226 reported: an idle 200 s run must not be
+        // able to print AC-5: PASS.
+        let d = Config::default();
+        assert!(
+            d.cycles * d.period_ns < AC5_MIN_DURATION_NS,
+            "default cycles*period must stay short of AC-5's 30-minute floor"
+        );
+    }
+
+    #[test]
+    fn full_platform_and_duration_but_no_load_withholds_the_verdict() {
+        let mut r = full_platform_report();
+        r.config.under_load = false;
+        assert_eq!(r.ac5_verdict(), None);
+        assert!(r.ac5_gaps().iter().any(|g| g.starts_with("load:")));
+    }
+
+    #[test]
+    fn full_platform_and_load_but_short_duration_withholds_the_verdict() {
+        let mut r = full_platform_report();
+        r.elapsed_ns = AC5_MIN_DURATION_NS - 1;
+        assert_eq!(r.ac5_verdict(), None);
+        assert!(r.ac5_gaps().iter().any(|g| g.starts_with("duration:")));
+    }
+
+    #[test]
+    fn every_gate_met_yields_a_real_verdict_with_the_cyclictest_gap_still_named() {
+        let r = full_platform_report();
+        assert_eq!(r.ac5_verdict(), Some(true));
+        // The one gap that gating can never close: this tool is not the
+        // instrument AC-5 names, so it is always disclosed alongside a PASS.
+        assert!(r.ac5_gaps().iter().any(|g| g.starts_with("instrument:")));
+        assert_eq!(
+            r.ac5_gaps().len(),
+            1,
+            "only the unconditional gap should remain: {:?}",
+            r.ac5_gaps()
+        );
     }
 
     #[test]
