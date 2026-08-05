@@ -1,0 +1,36 @@
+# Installs the credentials flash_pi.sh staged on the boot partition, then
+# shreds them from it.
+#
+# This is the mechanism that lets the published image be credential-free: the
+# card carries the operator's Wi-Fi and SSH details, the image does not.
+#
+# A plain oneshot rather than Raspberry Pi Imager's approach, which hooks a
+# script from cmdline.txt and has that script edit cmdline.txt back out during
+# the same boot. Rewriting a boot-critical file from a script running off it
+# means an interrupted first boot can leave a card that will not boot at all.
+# Because we build the image, we can simply ship a unit and never touch
+# cmdline.txt.
+[Unit]
+Description=Overboard first-boot credential installation
+# The staged files live on the vfat boot partition, so it must be mounted.
+RequiresMountsFor=/boot/firmware
+# NetworkManager must exist before profiles are dropped into its directory,
+# but must not be RUNNING first -- the installer reloads it afterwards.
+Before=NetworkManager.service
+Wants=NetworkManager.service
+# Idempotent, but the unit still guards on the marker so a normal boot does
+# not pay for a script that will immediately no-op.
+ConditionPathExists=/boot/firmware/overboard-userconf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/overboard-firstboot
+# Deliberately NOT `StandardOutput=null`: on a headless board with no user yet
+# configured, the journal is the only record of why the network did not come
+# up, and that is the failure this unit exists around.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

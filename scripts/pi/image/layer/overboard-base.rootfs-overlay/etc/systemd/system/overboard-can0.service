@@ -1,0 +1,39 @@
+# Bring can0 up at the ICD bitrate, at boot, without anyone typing `ip link`.
+#
+# Issue #182 I3: "CAN reachable from first boot". The interface is created by
+# the mcp251xfd driver once the overlay in config.txt loads; it comes up DOWN,
+# and a bench session that starts by remembering a bitrate is a bench session
+# that eventually gets it wrong.
+#
+# 500 kbit/s is the ICD bus rate. The Waveshare HAT is CAN FD capable
+# (MCP2518FD), but data-phase bitrate switching is NOT enabled here: Stage 0B
+# measures a latency distribution against the Little FOCer, and adding an
+# untested FD data phase would change the transport under the measurement.
+# Classic CAN 2.0 first; FD is a later, deliberate change.
+[Unit]
+Description=Overboard CAN0 (mcp251xfd) up at 500 kbit/s
+# The interface only exists once the SPI driver has probed, which is not
+# ordered against basic.target. Failing quietly when the HAT is absent is
+# intended -- see the ExecStart guard.
+After=sys-subsystem-net-devices-can0.device
+Wants=sys-subsystem-net-devices-can0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A card with no HAT fitted is a normal, supported state: the vcan0 self-test
+# path exists precisely so the stack can be exercised with no hardware. So a
+# missing can0 must not produce a failed unit on every boot -- it reports and
+# exits clean.
+ExecStart=/bin/sh -c 'if ip link show can0 >/dev/null 2>&1; then \
+    ip link set can0 down 2>/dev/null || true; \
+    ip link set can0 type can bitrate 500000 restart-ms 100; \
+    ip link set can0 up; \
+    echo "can0 up at 500000 bit/s"; \
+  else \
+    echo "can0 not present - no CAN HAT detected, skipping (this is not an error)"; \
+  fi'
+ExecStop=/bin/sh -c 'ip link set can0 down 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

@@ -85,6 +85,83 @@ jobs:
         run: bash scripts/pi/verify_kernel.sh
 
   # -------------------------------------------------------------------------
+  # The kernel pin exists in two files (pins.env, and the image layer, which
+  # is YAML and cannot source a shell file). Seconds to check, and issue #124
+  # is this repo's standing evidence for what an unchecked duplicate costs.
+  # -------------------------------------------------------------------------
+  check-pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: The image layer installs exactly the pinned kernel, and holds it
+        run: python3 scripts/pi/check_image_pin.py
+
+      # A malformed METABEGIN block does not fail where the mistake is -- it
+      # makes the layer INVISIBLE, and the build then fails 40 minutes later
+      # complaining that some other layer references one that is "not found".
+      # Seconds here against a full image build there.
+      - name: Layer headers parse as DEB822
+        run: python3 scripts/pi/check_layer_headers.py
+
+  # -------------------------------------------------------------------------
+  # I1 -- build the actual Overboard image.
+  #
+  # Same host shape the spike proved out: privileged debian:trixie on
+  # ubuntu-24.04-arm, native arm64, no QEMU.
+  #
+  # Not a required check, and not yet a publishing job. It builds and hashes;
+  # uploading to a release comes once the artefact format question is settled
+  # (rpi-image-gen deploys .img.zst, design §2 says .img.xz, flash_pi.sh
+  # expects .img.xz -- one of the three has to move, and publishing before
+  # that is decided would put the wrong extension in front of the CEO).
+  # -------------------------------------------------------------------------
+  build-image:
+    runs-on: ubuntu-24.04-arm
+    needs: [check-pin]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Overboard Stage-0B image
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/overboard-image
+          docker run --privileged --rm \
+            -e OVERBOARD_GIT_SHA="${{ github.sha }}" \
+            -e OVERBOARD_CI_RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -v "$PWD:/work" -w /work \
+            -v /tmp/overboard-image:/tmp/overboard-image \
+            debian:trixie \
+            bash scripts/pi/build_image.sh 2>&1 | tee /tmp/build.log
+
+      - name: Publish the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-build-log-${{ github.run_id }}
+          path: /tmp/build.log
+          retention-days: 30
+
+      # The image itself is 100-300 MB. Uploaded so the first restore test
+      # (AC-11) has something to flash the moment the hardware lands, rather
+      # than waiting on another 90-minute build.
+      - name: Publish the image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: overboard-image-${{ github.sha }}
+          path: |
+            /tmp/overboard-image/*.img.*
+            /tmp/overboard-image/*.sha256
+            /tmp/overboard-image/overboard-image.json
+            /tmp/overboard-image/overboard-packages.txt
+          retention-days: 14
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
   # I0 -- the D3 spike. Gates the builder choice for everything after it.
   #
   # Native arm64, no QEMU: `ubuntu-24.04-arm` hosted runners are GA and free

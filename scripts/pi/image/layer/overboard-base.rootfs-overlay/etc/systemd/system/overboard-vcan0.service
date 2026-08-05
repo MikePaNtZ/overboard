@@ -1,0 +1,31 @@
+# A virtual CAN bus, always present, on every boot.
+#
+# Issue #182 I3. This is what lets the whole CAN stack -- framing, socket
+# setup, timeouts, error paths, MCAP capture, arm/disarm -- be exercised on a
+# board with NO HAT FITTED AND NO MOTOR IN THE ROOM. The `can-harness` crate
+# (#52) already proves round-trip fidelity against vcan with no hardware; this
+# makes that runnable on the Pi the hour it boots, before any transceiver is
+# wired and long before anything can turn.
+#
+# It is NOT a substitute for the real bus, and the distinction is load-bearing
+# for Stage 0B: vcan proves our FRAMING, it says nothing about timing. A
+# latency number from vcan would be meaningless. The complement is the
+# CAN_0<->CAN_1 hardware loopback the two-channel Waveshare HAT allows, which
+# exercises real transceivers, real arbitration and real bit timing.
+[Unit]
+Description=Overboard virtual CAN (vcan0) for hardware-free self-test
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'modprobe vcan; \
+  ip link show vcan0 >/dev/null 2>&1 || ip link add dev vcan0 type vcan; \
+  ip link set vcan0 up; \
+  echo "vcan0 up"'
+ExecStop=/bin/sh -c 'ip link set vcan0 down 2>/dev/null || true; \
+  ip link delete vcan0 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

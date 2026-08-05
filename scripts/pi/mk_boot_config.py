@@ -10,7 +10,8 @@ The card has two partitions: a FAT32 boot partition and an ext4 rootfs. macOS
 cannot mount ext4 without third-party kernel extensions, and the CEO flashes
 from a Mac. So every byte of configuration this script produces has to land on
 the FAT32 side, and something on the Pi has to install it at first boot --
-``firstboot_install.sh``, shipped in the image (I1).
+``overboard-firstboot``, shipped in the image (I1) from
+scripts/pi/image/layer/overboard-base.rootfs-overlay/usr/local/sbin/.
 
 That rules out writing NetworkManager profiles directly to
 ``/etc/NetworkManager/system-connections/``, which is the obvious approach and

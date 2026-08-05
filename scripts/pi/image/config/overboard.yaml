@@ -1,0 +1,28 @@
+# The Overboard Stage-0B image.
+#
+#     rpi-image-gen build -S scripts/pi/image -c overboard.yaml
+#
+# Composed from rpi-image-gen's own layers wherever one exists, with custom
+# layers only where the stock ones cannot express what Stage 0B needs. There
+# is exactly one such place and it is the kernel -- see layer/linux-v8-rt.yaml
+# and device/overboard-pi5/device.yaml.
+#
+# NO CREDENTIALS HERE, EVER. No user, no password, no Wi-Fi. The published
+# image is a public artefact, and everything identifying is placed at flash
+# time by scripts/pi/flash_pi.sh and installed on first boot by
+# overboard-firstboot.service. See scripts/pi/pi-secrets.example.env.
+
+device:
+  layer: overboard-pi5
+
+image:
+  # Stock Raspberry Pi OS-style layout: MBR, vfat boot partition, ext4 root.
+  # Deliberately not a bespoke layout -- flash_pi.sh writes credentials to the
+  # vfat boot partition precisely because macOS cannot mount ext4, and
+  # overboard-firstboot.service moves them across on first boot. That
+  # arrangement depends on this being an ordinary two-partition Pi OS card.
+  layer: image-rpios
+  name: overboard-stage0b
+
+layer:
+  base: overboard-base

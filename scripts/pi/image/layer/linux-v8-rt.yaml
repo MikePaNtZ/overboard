@@ -1,0 +1,73 @@
+# METABEGIN
+# X-Env-Layer-Name: overboard-linux-v8-rt
+# X-Env-Layer-Category: kernel
+# X-Env-Layer-Desc: PREEMPT_RT kernel for Stage 0B, pinned to an explicit
+#  version and held. Replaces rpi-linux-2712, which has no RT build.
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: linux-base
+# METAEND
+#
+# ---------------------------------------------------------------------------
+# THIS LAYER IS THE ONE PLACE DESIGN SECTION 4'S TRADEOFF IS MADE REAL.
+#
+# rpi-image-gen ships `rpi-linux-2712` (the Pi 5's own 16K-page flavour) and
+# `rpi-linux-v8` (generic, 4K pages). The stock `rpi5` device layer requires
+# the 2712 one. Neither is real-time, and crucially THERE IS NO
+# `rpi-2712-rt` IN THE ARCHIVE -- established by enumerating the Packages
+# index, not recalled (docs/design-pi-image-stage0b-verification.md), and the
+# single fact that shapes this whole layer.
+#
+# So choosing RT on a Pi 5 means dropping to the generic v8 kernel. Design
+# section 4 weighed that and accepted it:
+#
+#   - 4K pages instead of 16K: largely irrelevant for a 500 Hz loop with a
+#     small working set, and smaller pages can IMPROVE determinism.
+#   - No CONFIG_NO_HZ_FULL: the real cost. CONFIG_CPU_ISOLATION=y is set so
+#     isolcpus works, but an isolated core still takes the 250 Hz tick. A
+#     floor, not a knob -- stated in advance and included in the measurement
+#     rather than discovered mid-debug.
+#
+# Note what is deliberately ABSENT compared to rpi-linux-2712: that layer
+# forces IGconf_linux_page_size=16384. This one does not set it, so the 4K
+# default stands and the image layout's mkfs args follow it automatically.
+#
+# The version is pinned rather than floated to `linux-image-rpi-v8-rt`. The
+# metapackage resolved to 6.18.34 on 2026-07-27 and will resolve to something
+# else tomorrow, and the kernel is the single variable that invalidates every
+# latency number Stage 0B produces. scripts/pi/verify_kernel.sh asserts this
+# exact package ships mcp251xfd, vcan, gs_usb and the Pi 5 device tree, on
+# every PR.
+#
+# KEEP IN SYNC WITH scripts/pi/pins.env. Duplicated because rpi-image-gen
+# reads YAML and cannot source a shell file; scripts/pi/check_image_pin.py
+# fails the build if the two ever disagree, so this is a checked duplicate
+# rather than a hopeful one.
+# ---------------------------------------------------------------------------
+---
+env:
+  INITRD: "No"
+mmdebstrap:
+  architectures:
+    - arm64
+  packages:
+    - linux-image-6.12.75+rpt-rpi-v8-rt=1:6.12.75-1+rpt1
+  customize-hooks:
+    # AC-2: held, so an unattended upgrade on the bench cannot silently move
+    # the one variable every Stage-0B measurement is conditioned on.
+    #
+    # `dpkg --set-selections`, NOT `apt-mark hold`. This is a slim image and
+    # apt is not installed in the target -- `apt-mark` failed with "No such
+    # file or directory" after the entire rootfs had already bootstrapped.
+    # dpkg is always present (it is what installed everything), and a dpkg
+    # hold is what apt-mark writes anyway.
+    - echo 'linux-image-6.12.75+rpt-rpi-v8-rt hold' | chroot $1 dpkg --set-selections
+    # Read back, because a hold that silently did not take is worse than no
+    # hold: it would look pinned in review and float on the bench.
+    - |
+      set -eu
+      state="$(chroot "$1" dpkg --get-selections linux-image-6.12.75+rpt-rpi-v8-rt)"
+      echo "kernel hold state: $state"
+      case "$state" in
+        *hold*) ;;
+        *) echo "E: kernel is NOT held (got: $state)" >&2; exit 1 ;;
+      esac
