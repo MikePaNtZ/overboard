@@ -132,32 +132,25 @@ def test_subthreshold_impulse_does_not_topple(model):
     """The other half of causality: a small push must be survivable, with
     margin. Together with the nominal case this brackets the real threshold.
 
-    **RE-MEASURED against the frozen plant (drag: the derived three-term
-    model) -- FLAGGED, not just re-pinned, because the margin nearly
-    vanished.** This is the passive, OPEN-LOOP plant (no controller): was
-    `< 0.75 * nose_strike_angle_deg`, `SUBTHRESHOLD_IMPULSE_NS` (6.0 N*s)
-    measured to peak at roughly half the 18.57 deg strike angle, by design
-    ("as much margin as the [nominal] positive case"). It now measures
-    17.35 deg -- 93.4% of the strike angle, 1.22 deg of margin left, not
-    "half". Sweeping magnitude confirms this is not a one-point fluke: the
-    open-loop knee (docstring in `sim/scenarios/impulse_response.py`:
-    "~12.5 N*s, ... 20 N*s sits ~60% clear of it") has moved down to
-    somewhere around 6-8 N*s -- `SUBTHRESHOLD_IMPULSE_NS` is now sitting
-    almost exactly ON the knee it was chosen to sit well clear of, rather
-    than the knee having simply shifted underneath an unchanged constant.
-    Re-pinned to `< 0.95` (just above the measured 0.934) so the test still
-    catches a further regression, but this docstring is the record that the
-    passive plant's own topple margin -- independent of the current/Kt
-    changes, since nothing here involves the motor -- shrank by roughly a
-    factor of 2 in impulse terms. Left for a driver/oracle call on whether
-    `SUBTHRESHOLD_IMPULSE_NS` and the open-loop knee docstring should be
-    re-derived properly; not done here since that constant is shared
-    production code (`sim/scenarios/impulse_response.py`), not a test-local
-    pin.
+    NOT RE-MEASURED (widened) this session (issue: realistic-motor-torque) --
+    left FAILING. This is a margin criterion ("survivable, WITH MARGIN"), not
+    a descriptive pin, and the finding underneath it is the reason not to
+    touch the bound: `SUBTHRESHOLD_IMPULSE_NS` (6.0 N*s) now peaks at 17.35
+    deg -- 93.4% of the 18.57 deg strike angle, not "roughly half" as
+    designed -- because the passive open-loop knee (docstring in `sim/
+    scenarios/impulse_response.py`: "~12.5 N*s") has moved down to
+    somewhere around 6-8 N*s. A "subthreshold" constant sitting almost
+    exactly ON the knee it was chosen to sit well clear of is a safety-margin
+    collapse, not a number that drifted -- widening the 0.75x bound to match
+    would conceal exactly that. Left failing and reported; `sim/scenarios/
+    impulse_response.py`'s `SUBTHRESHOLD_IMPULSE_NS` and its knee docstring
+    are shared production code, not a test-local pin, and are deliberately
+    NOT touched here either -- this needs a driver/oracle decision, not an
+    edit.
     """
     m = run(ImpulseParams(magnitude_ns=SUBTHRESHOLD_IMPULSE_NS), model=model).metrics
     assert not m.nose_strike
-    assert m.peak_abs_pitch_deg < 0.95 * nose_strike_angle_deg(model)
+    assert m.peak_abs_pitch_deg < 0.75 * nose_strike_angle_deg(model)
     assert m.travel_m > 0.1, "it should still roll -- otherwise the kick did nothing"
 
 

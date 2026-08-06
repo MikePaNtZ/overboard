@@ -194,11 +194,14 @@ DIFF_HALF_CYCLES = 50
 #: (60 A / 42 N*m). This re-pin is CONDITIONAL and was only done after
 #: checking the residual SLOPE -- the geometry-derived 1-rad/g identity
 #: `test_the_estimator_residual_is_specific_force_not_a_static_bias`
-#: measures -- had not moved materially: it reads 1.070 rad/g (was pinned to
-#: hold within 5%, now within 8%, see that test), essentially unchanged from
-#: its own prior characterisation. The offset moving while the slope holds
-#: is the signature the second ratification names as a healthy pin on a
-#: changed plant, not a reason to re-derive from scratch.
+#: measures -- had not moved materially: it reads 1.070 rad/g (7.02%), which
+#: is outside that test's own 5% correctness band (left untouched -- that
+#: test is a criterion, not a pin, and is left failing) but judged, per the
+#: (f1) authorisation, not a MATERIAL move of the slope itself. The offset
+#: moving while the slope roughly holds is the signature the second
+#: ratification names as a healthy pin on a changed plant, not a reason to
+#: re-derive from scratch. These are two separate assertions -- only the
+#: offset pin here was in scope to move.
 PINNED_TRIM_DEG = -3.335
 
 #: How far `PINNED_TRIM_DEG` may move before the build goes red. Set from the
@@ -623,50 +626,42 @@ def test_the_worst_point_in_the_matrix_is_quoted_in_both_currencies(tmp_path):
 def test_criterion_c_the_warning_leads_the_outcome_where_fallen_trails_it(tmp_path):
     """The warning must fire BEFORE the board is committed. `FALLEN` does not.
 
-    **Reference scenario CHANGED AGAIN at the 60 A / 42 N*m envelope (issue:
+    **Reference scenario CHANGED at the 60 A / 42 N*m envelope (issue:
     realistic-motor-torque).** ADR-0011's own numbers, and this test's
     original reference event (first envelope saturation at 4.92 s on
     `--scripted-scenario full-stick --cmd-reserve 1.0 --pitch-source
-    estimator`), were measured at 40 A. This test's own previous reference
-    (the truth-fed full-stick hold, `cmd_reserve=1.0`) was substituted for
-    that at a prior re-measurement, on the strength of criterion (f) still
-    failing on it. Both estimator-path AND that truth-fed run now survive to
-    completion at 60 A without saturating, warning or falling at all -- see
-    `test_criterion_f_full_stick_holds_with_the_estimator_bias_removed`'s own
-    re-measurement this session. Neither of this test's two prior reference
-    scenarios has a committed point left for the warning to lead.
+    estimator`), were measured at 40 A. At 60 A that exact run never
+    saturates, never warns and never falls at all -- see
+    `test_the_unshaped_command_map_no_longer_inverts_the_board_at_60a`. There
+    is no "committed point" left on the estimator path for the warning to
+    lead.
 
-    The one class of scenario that still reliably commits at 60 A is
-    criterion (f)'s ROBUSTNESS reading: a worst-case static pitch bias on top
-    of the real (estimator) signal path -- see
-    `test_criterion_f_the_matrix_holds_under_a_worst_case_static_pitch_bias`
-    and `test_the_nose_down_static_bias_band_now_holds_everywhere_swept`,
-    left failing as genuine physics gaps. This test borrows their +0.5 deg
-    nose-up, full-stick-reversal-at-speed scenario as its reference -- not
-    because criterion (c) is about static bias, but because it is the
-    smallest perturbation on the shipped signal path that still produces a
-    warn -> saturate -> FALLEN cascade to measure the ORDERING of.
+    The TRUTH-fed full-stick hold still commits (criterion (f) still fails,
+    see `test_criterion_f_full_stick_holds_with_the_estimator_bias_removed`),
+    so that is the reference scenario here instead -- the warning mechanism
+    (criterion (c)) is still live and still worth measuring, just no longer
+    on the path this test originally used.
 
-    **The measured lead shrank by roughly an order of magnitude** (was 2.69 s
-    per ADR-0011's own first-ratification number, on the old reference
-    scenario): warning now leads saturation by only 0.178 s, and by 0.568 s
-    over FALLEN. The ordering this criterion actually requires (warn, then
-    saturate, then FALLEN, all before inversion) still holds; the ADR text
-    itself only requires the ordering and "a stated measured lead time", not
-    a specific number. But this is a real, not cosmetic, shrinkage -- with
-    ~200 ms of warning the mechanism gives far less reaction time than it did
-    at 40 A -- and is recorded here as a finding rather than buried in a
-    quietly-adjusted floor. Floors below are set just under the measured
-    values, not against an independent target.
+    Lead is asserted against a floor rather than pinned to a value, because
+    the number is a measurement and pinning it would make an improvement look
+    like a regression; the measured value is printed either way.
 
-    Lead is still asserted against a floor rather than pinned to a value, for
-    the same reason as before: the number is a measurement and pinning it
-    would make a further improvement look like a regression; the measured
-    value is printed either way.
+    NOT RE-MEASURED this session (issue: realistic-motor-torque) --
+    left as ADR-0011 criterion (c), a named acceptance criterion, not a
+    descriptive pin. `test_criterion_f_full_stick_holds_with_the_estimator_
+    bias_removed`'s own re-measurement found that the truth-fed reference
+    scenario THIS TEST ALREADY USES no longer commits either at 60 A (it now
+    XPASSes). That is the actual finding: at the corrected plant there is no
+    organic scenario on the deployed signal path that still reaches the
+    cliff criterion (c) is about, which makes the warning's lead time
+    UNMEASURABLE here rather than merely smaller. This test is left pointed
+    at its original reference scenario and its original floors, so it fails
+    at the `is not None` guard rather than being redirected to a scenario
+    that still commits (a static pitch bias) or having its floors loosened
+    to match a shrunk lead -- either move would launder a criterion into a
+    pin.
     """
-    rows = _run(
-        tmp_path, "warn", "stick-reversal", pitch_source="estimator", pitch_bias_deg=0.5,
-    )
+    rows = _run(tmp_path, "warn", "full-stick", cmd_reserve=1.0, pitch_source="truth")
     t_sat = _first(rows, lambda r: r["saturated"] > 0.5)
     t_warn = _first(rows, lambda r: r["authority_warning"] > 0.5)
     t_fallen = _first(rows, lambda r: r["fallen"] > 0.5)
@@ -678,17 +673,12 @@ def test_criterion_c_the_warning_leads_the_outcome_where_fallen_trails_it(tmp_pa
         f"\n    FALLEN  lead over saturation: {t_sat - t_fallen:+.3f} s"
         f"\n    warning lead over FALLEN:     {t_fallen - t_warn:+.3f} s"
     )
-    # RE-MEASURED (was `> 1.5`, observed 2.69 s ADR-derived on the old 40 A
-    # reference scenario). New reference scenario (see docstring) measures
-    # 0.178 s; floor set just under it.
-    assert t_sat - t_warn > 0.15, "the warning no longer leads the committed point"
+    assert t_sat - t_warn > 1.5, "the warning no longer leads the committed point"
     assert t_sat - t_fallen < 0.0, (
         "FALLEN now leads saturation, which would mean the premise of this "
         "criterion has changed"
     )
-    # RE-MEASURED (was `> 2.5`). New reference scenario measures 0.568 s;
-    # floor set just under it.
-    assert t_fallen - t_warn > 0.4
+    assert t_fallen - t_warn > 2.5
 
 
 def test_the_warning_stays_quiet_on_a_survivable_run(tmp_path):
@@ -746,6 +736,20 @@ def test_the_estimator_residual_is_specific_force_not_a_static_bias(tmp_path):
     error, it deletes a feedback path and leaves a pitch-only regulator. That
     is why the criterion (f) result below is a continuum in time-to-inversion
     rather than a threshold in stick.
+
+    NOT RE-MEASURED this session (issue: realistic-motor-torque) -- band left
+    at 5%, and this test is left FAILING. This is a correctness claim (is the
+    residual specific force rather than a static bias?), not a descriptive
+    pin: widening it would blur exactly the identity ADR-0011's second
+    ratification rests on. Measured this session, on the same canonical
+    `TRIM_WINDOW_S` window: ratio 1.070 rad/g (7.02%), against the 5% band.
+    That 7.02% is the SAME number `test_f1_the_estimator_trim_is_pinned_...`
+    calls "the slope" and was re-checked there as the precondition for
+    re-pinning that test's trim OFFSET -- the (f1) re-pin is authorised
+    specifically because the OFFSET may move while the slope is checked
+    separately and independently, not because this test's own band was
+    widened to match. The two are separate assertions; only one of them
+    (the offset pin) was in scope to move.
     """
     rows = _run(tmp_path, "resid", "full-stick", pitch_source="estimator")
     residual, apparent = _settled_trim(rows)
@@ -760,27 +764,14 @@ def test_the_estimator_residual_is_specific_force_not_a_static_bias(tmp_path):
         f"({100 * abs(static_part / apparent):.1f}% of the apparent-vertical term)"
     )
 
-    # RE-MEASURED against the frozen plant (issue: realistic-motor-torque):
-    # was `< 0.05`, measured 2.8% at 40 A / 28 N*m. At 60 A / 42 N*m the same
-    # instrument, on the same canonical `TRIM_WINDOW_S` window, now measures
-    # 7.02% (ratio 1.070 rad/g) -- this is the SAME number
-    # `test_f1_the_estimator_trim_is_pinned_...` calls "the slope" and was
-    # re-checked against there as the precondition for re-pinning that test's
-    # trim offset; it was judged there NOT a material move (see that test).
-    # Widened here to 8% to bracket it with a small margin.
-    #
-    # BE AWARE this margin is thinner than the original: 5% of the
-    # apparent-vertical term at THAT operating point was 0.12 deg -- half the
-    # smallest static perturbation this repo has characterised (0.25 deg) --
-    # by design, so a scale error large enough to matter could not hide
-    # inside the band. At THIS operating point (apparent-vertical term has
-    # grown with the higher current authority) 8% maps to ~0.25 deg, i.e. the
-    # FULL smallest characterised perturbation, not half of it. Re-deriving
-    # that margin properly means a fresh window-sensitivity sweep on this
-    # plant, not just re-centring the band on the new measured ratio -- flagged
-    # rather than done here because it changes what this band is FOR, not just
-    # its width.
-    assert abs(ratio - 1.0) < 0.08, (
+    # 5% is set by the instrument and by what the error MEANS, not by the
+    # measured 2.8%: it is about 1.7x this measurement's own sensitivity to
+    # the choice of settled window (the ratio moves over 1.009-1.039 across
+    # reasonable windows on one run), and 5% of the apparent-vertical term at
+    # this operating point is 0.12 deg of supplied lean -- half the smallest
+    # static perturbation this repo has characterised, so a scale error large
+    # enough to matter cannot hide inside it.
+    assert abs(ratio - 1.0) < 0.05, (
         f"the est-truth residual is no longer the apparent vertical (ratio "
         f"{ratio:.3f}). ADR-0011's second ratification rests on that identity; "
         "if this has genuinely changed, the ADR needs revisiting again rather "
