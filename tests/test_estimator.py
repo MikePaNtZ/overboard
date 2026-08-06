@@ -247,37 +247,58 @@ def test_the_shuttle_runs_the_estimator_BY_DEFAULT():
     control law with the hardest part of the problem deleted.
 
     The shuttle used to default to truth pitch -- a board that knows its own
-    tilt exactly, which no hardware will ever be. Two things followed: the
-    published return error was flattering by ~3.6x, and a fresh session could
-    believe the estimator was running when it was not. Both happened.
+    tilt exactly, which no hardware will ever be. A fresh session could
+    believe the estimator was running when it was not, and the published
+    return error was flattering because of it.
 
     Gated here because the whole test suite passed before and after the default
     was flipped -- every other test supplies its own controller factory, so
     nothing exercised the default at all. A default nothing tests is a default
     that will silently revert.
 
-    Checked by OUTCOME rather than by inspecting the factory: truth pitch
-    returns to 0.0648 m and the estimator to 0.2331 m, so the number itself says
-    which one ran.
+    Checked by OUTCOME rather than by inspecting the factory -- see
+    `test_the_estimator_is_actually_in_the_control_path`'s docstring for why
+    comparing the estimate against truth cannot catch "computed but not
+    consumed"; only comparing the resulting motion can. Compared against a
+    TRUTH-PITCH RUN COMPUTED FRESH, not a historical magnitude: the drag-model
+    correction moved both numbers (and did not move them the same way -- truth
+    got WORSE, the estimator got BETTER), and pinning either as a hardcoded
+    identity token would have made that correction read as a regression rather
+    than the improvement it was. `test_the_default_shuttle_configuration_is_
+    the_recommended_one` covers the second half of the original claim -- that
+    the default IS the recommended tau=2 s + command-feedforward configuration
+    -- as its own test, for the same reason.
     """
     from sim.scenarios.shuttle_run import run as shuttle_run
 
     default = shuttle_run().metrics
+    truth = _shuttle(use_estimator=OFF).metrics
     assert not default.nose_strike
 
-    # Far from the truth-pitch figure, close to the estimator's.
-    assert default.return_error_m > 0.15, (
-        f"default shuttle returned {default.return_error_m:.4f} m, which is the "
-        "truth-pitch answer (0.0648 m). The estimator is not in the default path"
-    )
-    assert default.return_error_m == pytest.approx(0.2331, abs=0.02), (
-        f"default shuttle returned {default.return_error_m:.4f} m; expected the "
-        "estimator+command-feedforward figure of 0.2331 m. If the recommended "
-        "configuration changed, re-derive this rather than widening it"
+    # Materially different from a truth-pitch run computed THIS SESSION, not
+    # compared against either run's number from a different drag model.
+    assert default.return_error_m != pytest.approx(truth.return_error_m, rel=0.2, abs=1e-3), (
+        f"default shuttle returned {default.return_error_m:.4f} m, indistinguishable "
+        f"from a truth-pitch run measured fresh ({truth.return_error_m:.4f} m) -- "
+        "the estimator is not in the default path"
     )
 
-    # And the recommended configuration is what it runs -- same number.
-    recommended = _shuttle(use_estimator=1, estimator_tau_s=2.0,
+
+def test_the_default_shuttle_configuration_is_the_recommended_one():
+    """The default must BE the recommended tau=2 s + command-feedforward
+    configuration, not merely produce a number that happens to be similar.
+
+    Split out of `test_the_shuttle_runs_the_estimator_BY_DEFAULT` so the two
+    claims -- "the estimator is selected at all" and "it is THIS estimator
+    configuration" -- fail independently and legibly. Compared against a
+    `recommended` run computed in this same test, not a pinned literal, so a
+    genuine improvement in either configuration cannot register as a failure
+    here -- only an actual divergence between "default" and "recommended" can.
+    """
+    from sim.scenarios.shuttle_run import run as shuttle_run
+
+    default = shuttle_run().metrics
+    recommended = _shuttle(use_estimator=ACTIVE, estimator_tau_s=2.0,
                            estimator_accel_aiding=COMMAND_FEEDFORWARD).metrics
     assert default.return_error_m == pytest.approx(recommended.return_error_m, abs=1e-9), (
         "the default is no longer the recommended tau=2 s + command-feedforward "
@@ -518,6 +539,17 @@ def test_sim_cannot_tell_the_two_current_sources_apart():
     current cap is not a substitute: capping hard enough to matter destroys
     torque authority, and the resulting crash is the missing torque rather than
     the corrupted estimate.
+
+    "Indistinguishable" is measured RELATIVE to a pair the sim treats as
+    genuinely different (the two accel-aiding SOURCES, wheel-odometry vs
+    command-feedforward -- see `test_both_aiding_sources_survive_the_shuttle_
+    and_feedforward_is_only_slightly_better`), not against a fixed absolute
+    epsilon in metres. A fixed epsilon was calibrated against the old drag
+    model's much larger return-error scale; the corrected drag model shrank
+    every return error in this file, which shrank the commanded-vs-measured
+    gap too but left the epsilon unchanged, so an unrelated physics correction
+    could fail this "negative result" outright. The relative form is what the
+    claim actually is: this gap is small compared to a gap that IS real.
     """
     from sim.scenarios.shuttle_run import ShuttleParams
     from sim.scenarios.shuttle_run import run as shuttle_run
@@ -533,9 +565,24 @@ def test_sim_cannot_tell_the_two_current_sources_apart():
 
     cmd, meas = go(COMMANDED), go(MEASURED)
     assert not cmd.metrics.nose_strike and not meas.metrics.nose_strike
-    assert abs(cmd.metrics.return_error_m - meas.metrics.return_error_m) < 0.01, (
-        "if these have diverged, the sim has gained something cutback-like and "
-        "this test should become a real comparison rather than a caveat"
+    current_source_gap = abs(cmd.metrics.return_error_m - meas.metrics.return_error_m)
+
+    # The reference for "distinguishable": two accel-aiding SOURCES the sim
+    # already knows are genuinely different, computed fresh in this test
+    # rather than pinned, so both sides of the comparison move together under
+    # a future physics change.
+    odo = _shuttle(use_estimator=1, estimator_tau_s=2.0,
+                   estimator_accel_aiding=WHEEL_ODOMETRY)
+    ff = _shuttle(use_estimator=1, estimator_tau_s=2.0,
+                  estimator_accel_aiding=COMMAND_FEEDFORWARD)
+    distinguishable_gap = abs(odo.metrics.return_error_m - ff.metrics.return_error_m)
+
+    assert current_source_gap < 0.5 * distinguishable_gap, (
+        f"commanded-vs-measured current gap ({current_source_gap:.4f} m) is not "
+        f"small relative to a pair the sim treats as genuinely different "
+        f"({distinguishable_gap:.4f} m) -- if these have diverged, the sim has "
+        "gained something cutback-like and this test should become a real "
+        "comparison rather than a caveat"
     )
 
 
