@@ -234,6 +234,74 @@ fn rider_model_path() -> PathBuf {
 //     has not been re-run against.
 // None of these three is touched by this patch -- see the retune session
 // report for the full account. This is a judgement call, not a clean win.
+//
+// **REJECTED as a shippable operating point (issue: kd-safe-point).** 40.0
+// sits ~5% above the measured 37/38 inversion cliff, and this file's own
+// account above already said that is tuning to a cliff -- ADR-0011 forbids
+// that by name. It also does not even buy the green: (a)-2 stays RED on the
+// pitch ceiling (15.91 deg vs the 15.43 deg ceiling, 0.4% current headroom)
+// while three OTHER scenarios regressed to pay for it. Three regressions
+// for a red-to-red transition is not a trade worth making.
+//
+// A gain cannot remove the Coulomb step at the wheel-speed zero crossing --
+// `frictionloss` flips sign there, a fixed +/-2.368 N*m -> 4.74 N*m swing
+// regardless of KD_NM_PER_RAD_S (see `overboard_rider.xml`'s wheel_hinge
+// comment for that number's derivation). What KD *does* do is shape the
+// STATE the trajectory is in when it meets that step: more damping means a
+// lower pitch RATE and less committed lean at the crossing, so the same
+// fixed torque step lands on a fatter margin. That is real dynamics, not an
+// artifact -- it is also exactly why the effect is a narrow, sharp cliff
+// rather than a smooth margin: the step itself never moves, only where the
+// trajectory happens to be standing when it lands.
+//
+// **The search for a safer point in [25, 30] (issue: kd-safe-point) found
+// no candidate that clears every gate, and the reason is structural, not a
+// missed value.** Sweeping this constant (and every mirrored site) across
+// [21, 40] against the three named regressions above:
+//   * `test_imperfections.py::test_enough_delay_does_break_it` only PASSES
+//     for KD <= 23 -- it flips at the 23/24 boundary and stays flipped for
+//     every value tried through 40, including the entire [25, 30] band.
+//   * `test_estimator.py::test_both_aiding_sources_survive_the_shuttle_...`
+//     does the OPPOSITE of what the 21->40 narrative above suggests: it is
+//     not a monotonic widening gap. Command feedforward's return-error
+//     advantage over wheel odometry INVERTS (feedforward becomes the worse
+//     configuration) at KD=25..28 and again at KD=32..33, and only clears
+//     both its own assertions in a narrow KD=29..31 pocket before the
+//     gap-widening failure mode from the KD=40 measurement above takes over
+//     at KD>=34. It PASSES at KD=21 (matching the pinned 0.045 m figure)
+//     and PASSES in the 29-31 pocket, and FAILS everywhere sampled between
+//     and around those two islands.
+// The two failure regions do not overlap with each other, anywhere in
+// [21, 40] at integer resolution, let alone inside [25, 30]: imperfections
+// needs KD <= 23, the estimator ordering test's only clean window sampled
+// is KD in [29, 31]. There is no gain in this range that both backs (a)-2
+// off its cliff-adjacent margin AND clears the other two pinned regressions
+// -- moving KD does not trade one cliff for a flat margin, it trades one
+// cliff for a *different* one, on a different test, with a narrower and
+// less certain basin. KD_NM_PER_RAD_S is left at 40.0 pending a decision
+// that is not this file's to make alone; see the kd-safe-point session
+// report for the full sweep table.
+//
+// **What would make either cliff -- (a)-2's 37/38 boundary or the
+// estimator's 29-31 pocket -- trustworthy enough to tune against:**
+//   * An IMU noise model at datasheet levels. This whole sweep runs on a
+//     deterministic, noiseless plant; every boundary measured above is a
+//     boundary in a simulation with no gyro noise, no quantisation noise,
+//     and no loop-delay jitter, all three of which couple directly into a
+//     derivative term. A cliff this narrow disappearing under noise, or
+//     moving by more than the noise floor, is the expected outcome for a
+//     KD-sensitive result, not a surprising one.
+//   * The delay budget re-measured including the 80 ms case at whatever KD
+//     is actually shipped -- `test_enough_delay_does_break_it`'s own pinned
+//     "breaks between 40 and 60 ms" figure is already stale at KD=40 and
+//     would need re-deriving at any other value too.
+//   * The cliff re-mapped as a JOINT sweep over KD x Crr x delay, not KD
+//     alone. A basin that is 5% wide (or, per the search above, entirely
+//     absent) in one dimension may vanish, move, or reappear somewhere else
+//     under joint perturbation. Only re-map it as shippable if it recedes to
+//     >= 25-30% real parameter distance under that joint sweep -- a margin
+//     measured on one axis while the others are frozen at their nominal
+//     value is not evidence that the margin survives when they are not.
 const KP_NM_PER_RAD: f32 = 140.0;
 const KD_NM_PER_RAD_S: f32 = 40.0;
 /// Motor torque constant, N*m per amp -- DERIVED (issue: real-motor-
