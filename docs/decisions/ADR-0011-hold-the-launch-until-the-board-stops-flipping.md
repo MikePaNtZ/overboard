@@ -71,6 +71,137 @@ claim ("the board never became unstable at any aggression level tested") is fals
 be reinstated in any softened form; measurements taken against the de-rated delivery support
 nothing and may not be cited.
 
+### 🛑 THIRD RATIFICATION 2026-08-05 — every number below this line is SUPERSEDED
+
+**Read this before anything else in this document, including the second ratification.**
+
+The drag model the entire measurement base rests on was **wrong in shape, not merely
+undocumented**. It has been replaced. Consequently:
+
+**1. Every quantitative claim in this ADR that predates 2026-08-05 is superseded.** Margins,
+current headroom, pitch headroom, stopping distances, the peak-demand slope, criterion (c)'s
+warning lead, the (f1)/(f2) trim pin, and the `0.80` reserve derivation. Not "approximately
+still valid" — *superseded*. None may be cited, propagated to the hardware spec, or used to
+argue an exit until re-measured against the corrected model. This ADR's own standing rule
+about the de-rated delivery applies here with equal force.
+
+**2. The 60 A / 42 N·m exit packet is WITHDRAWN in its entirety.** Every number in it was
+measured on the old model. The 60 A work is not discarded — it is **reframed from an exit
+into a candidate remedy**, to be judged at the same bar as everything else: does (a)-2 hold
+across the physical drag band, with stated margin?
+
+**3. The hold stands, and its factual basis is worse than when it was opened.**
+
+#### What was wrong with `damping="0.08"`
+
+This ADR already named it — *"the only load-bearing constant in the MJCF with no provenance
+comment"* — and conditioned its non-blocking status on criterion (g) holding. **That
+conditional has now come due, and (g) was never measured at either ceiling until 2026-08-05.**
+
+The defect is worse than missing provenance. A single viscous term makes drag **proportional
+to speed**, so it vanishes at zero speed. Real drag does not:
+
+| mechanism | scales with | modelled before? |
+|---|---|---|
+| Rolling resistance, `Crr × W` | **constant** | **no** |
+| Bearings + BLDC iron/windage | linear | yes — this was the whole model |
+| Rider aerodynamic, `½ρ·CdA·v²` | **quadratic** | **no** |
+
+Measured against reality, ground-level resisting force:
+
+| speed | old model | real (low–high) |
+|---|---|---|
+| 1 m/s | **3.8 N** | 12.5 – 20.8 N |
+| 4 m/s | 15.1 N | 18.0 – 29.0 N |
+| 8.34 m/s | 31.6 N | 37.7 – 58.6 N |
+
+At walking pace the model produced **a third to a fifth** of real drag. No value of a single
+linear coefficient fixes this: a pure-viscous fit to total drag lands at 0.09–0.15 N·m·s/rad,
+which is *above* the shipped 0.08 and straddles the value at which the board flips. The
+parameter was not merely uncalibrated — it was the wrong parameter.
+
+#### The corrected model
+
+```
+frictionloss = Crr × loaded_weight × r_wheel    (Coulomb, constant)   Crr = 0.02
+damping      = 0.009 N·m·s/rad                  (bearings + motor, from 20–40 W at top speed)
+rider aero   = MuJoCo ellipsoid fluid model     (measured effective CdA 0.754 m²)
+```
+
+Derived, not chosen, and validated against three independent anchors — total drag inside all
+three published bands; CdA inside the 0.6–0.9 m² upright-rider band, identical to four
+significant figures at three speeds; energy consumption crossing the published Onewheel-class
+figure (10–11.5 Wh/km, 29–33 N mechanical) at 5.0–5.5 m/s cruise.
+
+Two traps found and closed. MuJoCo's `<option density>` **silently** activates a legacy
+per-body fluid model on every body lacking an ellipsoid-flagged geom — *including bodies with
+no geom at all* — injecting up to 12.4 N of invisible drag; nulled and verified by
+measurement. And the Python weld path gave rider-mass runs **driverless** rolling resistance,
+understating it ~6.6×; now derived from compiled mass rather than any literal.
+
+#### Criterion (g): FAILS — measured for the first time
+
+The old sweep varied a lumped, unphysical coefficient by an arbitrary factor of two. Swept
+instead over `Crr`, which has published bounds, **(a)-2 inverts at Crr = 0.02 — the central,
+shipped value, at the SHIPPED 40 A envelope.** It was an ordinary passing test before.
+
+**Verified real, not a solver artefact**, by a four-test battery:
+
+- Solver iterations 100 → 200 → 500: traces **byte-identical**. Newton already converged.
+- Nominal inversion persists at every timestep tested (×1, ×½, ×¼).
+- **Decisive:** rebuilt as smooth explicit Coulomb (`τ = −2.368·tanh(ω/ε)`) applied passively,
+  bypassing the constraint solver entirely — **the inversion reproduces.**
+- Friction torque legal throughout: max exactly 2.368 N·m, never over bound; 0.055 W of
+  stiction slop at near-zero speed, negligible.
+
+**The mechanism is arithmetic.** Worst-matrix-point headroom was 3.41 A = **2.39 N·m**.
+Coulomb friction at a wheel-speed zero crossing is a torque **discontinuity** of
+2 × 2.368 = **4.74 N·m**, and the reversal drives the wheel through zero at its worst-loaded
+instant. The jolt is ~2× the entire available headroom, landing exactly where the old model
+said drag vanished.
+
+**There is no margin anywhere in the band.** No swept `Crr` holds (a)-2 with positive current
+headroom. Best case (Crr = 0.007, least realistic) demands **74.8 A against 40 A** — −34.8 A;
+every other point is −36 to −377 A. The runs that "held" are not engineered margin: at
+Crr = 0.022, `1.10` holds while `1.0999999999999999` inverts. That is genuine dynamical chaos
+at ULP scale, not solver noise, and no refinement will settle it. **Criterion (b) fails
+regardless of which side of the chaos a given run lands on.**
+
+#### What this does to (f1)/(f2)
+
+**Re-characterise; do not re-derive.** The construction did its job — the plant changed and
+the pin went red, which is the mechanism working. Two conditions on the re-pin: it happens
+only after the corrected model is **frozen** (pinning against a moving model repeats the
+original sin), and re-characterisation must assert the residual **slope** is still ≈1 rad/g.
+The slope is geometry and must not have moved with drag; the offset moving 0.365° while the
+slope holds is the signature of a healthy pin on a changed plant. If the slope moved,
+(f1)/(f2) genuinely needs re-derivation. Fold in #227 at re-pin time.
+
+#### What survives from the second ratification
+
+The **structural** rulings stand and now apply to the re-measurement: keep the command-envelope
+reserve with its invariant restated as *peak demand ≤ stated fraction × envelope*; state the
+pin's flat-ground scope; extend pin coverage to the wheel-odometry path actually used; and the
+headroom-based fix remains the named prerequisite at world expansion and the hardware gate.
+**No quantitative content from that ratification survives.**
+
+Note also that the honest 40 A reserve re-derives to **0.752**, not the shipped 0.80 — meaning
+0.80 was *under*-reserved even on its own terms, before drag is considered.
+
+#### Open work this raises
+
+`#227` (pin has no wheel-odometry coverage; flat-ground scope unstated) · `#228` (a test
+attributes its result to an estimator path that scenario does not run) · `#229` (criterion (g)
+had no instrument until now) · `#232` (tilted-ground and rotated-gravity hill formulations
+disagree 3.5%, no solver setting fixes it) · `#235` (**braking authority is
+state-of-charge-dependent — a full pack cannot absorb regen; manufacturer-documented, and
+absent from every model and criterion we have**).
+
+Independent research also establishes that **motor torque, not rider lean angle, binds
+steady-state braking** (real boards measure 3.15–3.37 m/s²; our own is ~1.4), and that the
+2023 CPSC recall litigation alleges a warning mechanism which *shares fate with the resource
+whose exhaustion it warns about*. Both bear directly on the eventual fix.
+
 ### ⚠️ SECOND RATIFICATION 2026-08-02 — the exit bar below is RESPECIFIED
 
 **Read this before the criteria list.** The fix this ADR specified was built, measured and
