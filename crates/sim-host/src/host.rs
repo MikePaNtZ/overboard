@@ -135,6 +135,7 @@ use control_core::{CommandFeedforward, ComplementaryFilter, Estimator, PitchRegu
 use hal::BoardObserve;
 use hal_actuate::BoardActuate;
 use safety::Envelope;
+use sim_backend::imperfections::{ImperfectionProfile, IMU_NOISE_DATASHEET_V1};
 use sim_backend::SimBackend;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
@@ -1263,6 +1264,27 @@ pub struct HostConfig {
     /// gravity.
     pub crr_scale: f64,
 
+    /// **Verification only.** Seeds and enables the datasheet-derived IMU
+    /// sensor-noise model (`sim_backend::imperfections::
+    /// IMU_NOISE_DATASHEET_V1` -- see that constant's doc comment for the
+    /// full noise-density-to-sigma derivation). `None` (the default) leaves
+    /// [`sim_backend::SimBackend`] on [`sim_backend::imperfections::IDEAL`],
+    /// unchanged from every run before this knob existed -- a plant this
+    /// gate exists to stop being noiseless does not become noisy by
+    /// accident.
+    ///
+    /// `Some(seed)` re-seeds the profile's noise generator with exactly this
+    /// value and applies it via [`sim_backend::SimBackend::
+    /// set_imperfection_profile`] before `open()`. A noise-on run is
+    /// otherwise deterministic (the plant's RK4 integrator has no other
+    /// stochastic term), so two runs with the same seed reproduce bit-for-
+    /// bit -- the same reproducibility [`HostConfig::free_run`]'s own doc
+    /// comment leans on. This is why the seed is a required argument to the
+    /// flag rather than an internally-generated one: a noise stream nobody
+    /// else can re-seed is not a measurement (see `sim-host.rs`'s
+    /// `--imu-noise-seed`, which prints the seed it used).
+    pub imu_noise_seed: Option<u64>,
+
     /// **Verification only.** Writes one CSV row per control cycle to this
     /// path when the run ends. Buffered in memory and written once, never
     /// during the loop: a 500 Hz control thread does not do file I/O per
@@ -1344,6 +1366,7 @@ impl Default for HostConfig {
             disturbance: None,
             incline_deg: 0.0,
             crr_scale: 1.0,
+            imu_noise_seed: None,
             trace_path: None,
         }
     }
@@ -1609,6 +1632,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     backend.set_incline_deg(cfg.incline_deg);
     // Same reasoning, same timing -- see `HostConfig::crr_scale`.
     backend.set_crr_scale(cfg.crr_scale);
+    // Same timing again -- see `HostConfig::imu_noise_seed`. Leaves the
+    // backend on `imperfections::IDEAL` (its own default) when `None`, so a
+    // run that never sets this flag is bit-identical to one before it
+    // existed.
+    if let Some(seed) = cfg.imu_noise_seed {
+        backend.set_imperfection_profile(ImperfectionProfile {
+            seed,
+            ..IMU_NOISE_DATASHEET_V1
+        });
+    }
     backend.open().map_err(HostError::Backend)?;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own

@@ -311,6 +311,22 @@ impl SimBackend {
         self.crr_scale = Some(scale);
     }
 
+    /// **Verification only.** Replaces the whole imperfection profile,
+    /// taking effect at the next `open()` -- same timing as
+    /// [`SimBackend::set_incline_deg`] and [`SimBackend::set_crr_scale`], so
+    /// a caller building up a verification run sets all three the same way.
+    ///
+    /// A run that never calls this stays on [`imperfections::IDEAL`] (this
+    /// struct's `#[derive(Default)]`), bit-identical to a backend built
+    /// before this method existed. Modelled on the setter pattern above
+    /// rather than on [`SimBackend::with_profile`], because that constructor
+    /// does not carry `model_path_override` -- callers of
+    /// [`SimBackend::with_model_path`] (i.e. `sim-host`) need a way to set
+    /// the profile without losing the rider model.
+    pub fn set_imperfection_profile(&mut self, profile: ImperfectionProfile) {
+        self.imperfection_profile = profile;
+    }
+
     /// As [`SimBackend::with_params`], but with a non-default imperfection
     /// profile (issue #129). Without this constructor the profile is
     /// [`imperfections::IDEAL`], preserving every pre-#129 backend's exact

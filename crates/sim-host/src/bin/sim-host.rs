@@ -15,6 +15,7 @@
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--crr-scale FACTOR]
+//!          [--imu-noise-seed SEED]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -249,6 +250,25 @@ fn main() -> ExitCode {
                 cfg.crr_scale = scale;
                 i += 2;
             }
+            // The datasheet-derived sensor-noise model
+            // (`sim_backend::imperfections::IMU_NOISE_DATASHEET_V1`),
+            // seeded and enabled -- see `HostConfig::imu_noise_seed`. No
+            // flag, no noise: this is the one knob in this list that
+            // changes the SENSOR chain rather than the plant or the
+            // envelope, and it stays off by default for the same reason
+            // every other verification knob does.
+            "--imu-noise-seed" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --imu-noise-seed needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(seed) = v.parse::<u64>() else {
+                    eprintln!("sim-host: --imu-noise-seed value '{v}' is not a u64");
+                    return ExitCode::FAILURE;
+                };
+                cfg.imu_noise_seed = Some(seed);
+                i += 2;
+            }
             // `t0,duration,fx,fy,fz,tx,ty,tz` -- world frame, SI. The kerb
             // strike of ADR-0011's criterion (a) matrix is fed in this way
             // rather than derived here; see HostConfig::disturbance for why
@@ -309,12 +329,13 @@ fn main() -> ExitCode {
 
     eprintln!(
         "sim-host: starting -- state out to {}, input in on {}, duration={:?}, \
-         startup_kick={}, scripted={}",
+         startup_kick={}, scripted={}, imu_noise_seed={:?}",
         cfg.state_out_addr,
         cfg.input_in_addr,
         cfg.duration,
         cfg.startup_kick,
-        cfg.scripted_scenario.is_some()
+        cfg.scripted_scenario.is_some(),
+        cfg.imu_noise_seed
     );
 
     let handle = sim_host::spawn(cfg);

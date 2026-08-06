@@ -334,9 +334,26 @@ def test_there_is_large_margin_on_actuation_delay(ridden):
 
 def test_enough_delay_does_break_it(ridden):
     """The other half, so the margin above is a measurement rather than an
-    untested hope. Breaks between 40 and 60 ms."""
-    r = _impulse(ridden, STAGE0_PLACEHOLDER, delay_s=0.080)
-    assert r.metrics.nose_strike, "80 ms of delay should be fatal; if not, re-derive the margin"
+    untested hope.
+
+    RE-PINNED (issue: imu-noise-model). The "breaks between 40 and 60 ms"
+    figure predated the real-motor-constants retune (KD 21 -> 40, issue:
+    realistic-motor-torque) -- that retune's own doc comment
+    (`crates/sim-host/src/host.rs`'s `KD_NM_PER_RAD_S`) flags this exact test
+    as stale: "80 ms of actuation delay no longer strikes... the delay
+    margin moved and the pinned figure is now stale and needs
+    re-measuring, not a defect in itself." Re-measured against the frozen
+    plant (bisecting in 1 ms steps): 151 ms does not strike (14.46 deg peak,
+    well clear of the 18.57 deg strike angle); 152 ms strikes outright (the
+    board goes over, 180 deg). This is a legitimate re-baselining of a
+    descriptive measurement, not a change to an acceptance criterion -- the
+    plant and controller are unchanged, only the number was stale.
+    200 ms is used below (not 152 ms) for the same margin-past-the-boundary
+    reason the original 80 ms was chosen relative to its own 40-60 ms
+    window: comfortably past the break, not sitting on it.
+    """
+    r = _impulse(ridden, STAGE0_PLACEHOLDER, delay_s=0.200)
+    assert r.metrics.nose_strike, "200 ms of delay should be fatal; if not, re-derive the margin"
 
 
 def test_runs_with_the_profile_are_deterministic(ridden):

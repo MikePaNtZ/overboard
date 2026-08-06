@@ -143,6 +143,161 @@ pub const STAGE0_CUTBACK: ImperfectionProfile = ImperfectionProfile {
     seed: 12345,
 };
 
+/// **Sensor noise only, derived (not chosen) from the ICM-42688-P datasheet
+/// — the part `STAGE0_PLACEHOLDER`/`STAGE0_CUTBACK` already cite by name for
+/// their own gyro/accel rows. Everything else is left at [`IDEAL`]'s zero:**
+/// no actuation delay, no current-loop lag, no wheel-rate quantisation or
+/// cutback. This exists to isolate ONE question -- what does the sensor
+/// chain's own noise floor cost a margin claimed on a noiseless plant --
+/// from the other, already-modelled imperfections above, which have their
+/// own knobs and their own margin numbers.
+///
+/// **PROVENANCE CAVEAT, stated once and binding for every figure below:**
+/// the ICM-42688-P is not sourced from a BoM line here -- it is the part
+/// `sim/scenarios/imperfections.py`'s own `STAGE0_PLACEHOLDER` comment
+/// already names, so this profile uses ITS datasheet, per the same
+/// convention. The datasheet figures below are transcribed from the
+/// commonly-published ICM-42688-P spec (the same "rate noise spectral
+/// density" / "noise spectral density" numbers widely quoted for this part)
+/// from this session's own knowledge, **not fetched from the live PDF** --
+/// this sandbox has no network access. Cross-check every number below
+/// against the actual TDK InvenSense datasheet before this profile is
+/// treated as a bench-validated spec rather than a first-principles
+/// estimate; that is a stronger caveat than "BoM pending" and is flagged
+/// here for exactly that reason.
+///
+/// THE CONVERSION EVERYONE GETS WRONG: noise DENSITY (deg/s/sqrt(Hz),
+/// ug/sqrt(Hz)) is a power-spectral-density amplitude, not a sigma. For a
+/// white-noise process sampled at `f_s`, the discrete-sample standard
+/// deviation is `sigma = density * sqrt(f_s / 2)` -- the sqrt(Nyquist
+/// bandwidth) term is not optional, and using `f_s` instead of `f_s / 2`
+/// (or skipping the bandwidth term altogether) is the single most common way
+/// this conversion is silently wrong.
+///
+/// **Which `f_s`?** Not the ICD's headroom figure. `board_types::
+/// MAX_IMU_SAMPLES`'s own doc comment reserves room for "a 4 kHz ODR at a
+/// 500 Hz loop", but `SimBackend::wait_observe` only ever emits ONE
+/// `ImuSample` per cycle (`obs.imu_count = 1`, above) -- this backend does
+/// not sub-sample a faster stream, so the rate noise is actually being drawn
+/// AT here is the 500 Hz cycle rate, not the IMU's own native ODR. Using the
+/// higher, unexercised ODR figure would understate the per-sample sigma this
+/// sim actually needs; this derivation uses the rate the backend truly runs
+/// at. (If `wait_observe` ever grows to emit multiple samples per cycle at
+/// the true ODR, this derivation is where to redo the arithmetic.)
+///
+/// ```text
+/// f_s          = 500 Hz (CYCLE_NS, this crate)
+/// Nyquist BW   = f_s / 2 = 250 Hz
+/// sqrt(BW)     = 15.8114
+/// ```
+///
+/// GYRO (pitch-rate channel -- lands directly on the inner loop's D term):
+///
+/// ```text
+/// ND_gyro (ICM-42688-P, "Rate Noise Spectral Density", typ, all FSR)
+///     = 2.8 mdps/sqrt(Hz) = 0.0028 deg/s/sqrt(Hz)
+///     = 0.0028 * (pi/180) rad/s/sqrt(Hz) = 4.887e-5 rad/s/sqrt(Hz)
+/// sigma_1x  = 4.887e-5 * 15.8114               = 7.729e-4 rad/s
+/// sigma     = sigma_1x * 2 (ICD SS12 "datasheet x2" margin convention --
+///             the same doubling STAGE0_PLACEHOLDER's own comment
+///             cites for its gyro/accel rows, applied here rather than
+///             invented fresh)
+///           = 1.546e-3 rad/s  (~0.0885 deg/s, 1 sigma per sample)
+/// ```
+///
+/// ACCEL (feeds the attitude estimate through atan2, per this crate's own
+/// `accel_vec` comment):
+///
+/// ```text
+/// ND_accel (ICM-42688-P, "Noise Spectral Density", typ)
+///     = 70 ug/sqrt(Hz) = 70e-6 * 9.80665 m/s^2/sqrt(Hz)
+///     = 6.865e-4 m/s^2/sqrt(Hz)
+/// sigma_1x  = 6.865e-4 * 15.8114               = 1.0854e-2 m/s^2
+/// sigma     = sigma_1x * 2 (same SS12 convention)
+///           = 2.171e-2 m/s^2  (1 sigma per sample)
+/// ```
+///
+/// Both land close to `STAGE0_PLACEHOLDER`'s own placeholder figures (0.02
+/// m/s^2 accel, 8.5% away from 0.02171) -- EXCEPT gyro, where the
+/// placeholder's 0.004 rad/s is ~2.6x this derivation's 1.546e-3 rad/s. That
+/// gap is consistent with the placeholder's gyro row having been computed at
+/// something closer to the IMU's native ~4 kHz ODR (Nyquist 2 kHz) rather
+/// than the 500 Hz rate `wait_observe` actually samples at -- i.e. the two
+/// existing placeholder rows appear to have used two DIFFERENT bandwidth
+/// conventions. Noted here as a finding for whoever owns `STAGE0_PLACEHOLDER`
+/// (Sr. Mechanical & Systems); **not corrected there** -- that profile backs
+/// the existing ADR-0011 acceptance history and changing its numbers is a
+/// re-baselining decision this derivation does not make unilaterally.
+///
+/// BIAS: this struct's `gyro_bias_rad_s` is a FIXED per-run offset (added
+/// identically to every sample -- see `gyro_vec` above), which is the right
+/// model for a CALIBRATION RESIDUAL, not for true Allan-variance "bias
+/// instability" (a slow in-run WANDER of the bias, usually quoted deg/hr).
+/// The ICM-42688-P's main datasheet table does not headline an Allan-variance
+/// figure (typical of this consumer-MEMS class -- tactical-grade parts like
+/// the ADIS16467 do, this part does not); the closest published number is the
+/// gyro's initial, un-calibrated zero-rate offset, on the order of +/-0.5
+/// deg/s turn-on-to-turn-on. Used here AS the fixed bias, uncalibrated
+/// (conservative -- no startup bias trim assumed):
+///
+/// ```text
+/// gyro_bias_rad_s = 0.5 * (pi/180) = 8.727e-3 rad/s
+/// ```
+///
+/// **Bias instability proper is NOT modelled** -- there is no time-varying
+/// bias term anywhere in this chain (Rust or Python); see the omissions list
+/// below. Class-typical Allan-variance figures for this tier of MEMS gyro run
+/// a few deg/hr, which is negligible against the fixed offset above at any
+/// run length this sim exercises (tens of seconds), so its absence is a
+/// stated gap, not a load-bearing one.
+///
+/// QUANTISATION (16-bit ADC, both channels -- present because the task asks
+/// for it if the datasheet gives a resolution, NOT because it changes
+/// anything here):
+///
+/// ```text
+/// Gyro,  FSR +/-2000 deg/s: LSB = 4000/65536 = 0.06104 deg/s
+///        sigma_q = LSB/sqrt(12) = 0.01762 deg/s = 3.075e-4 rad/s
+/// Accel, FSR +/-16 g:       LSB = 32/65536 g = 4.883e-4 g
+///        sigma_q = LSB/sqrt(12) * 9.80665 = 1.383e-3 m/s^2
+/// ```
+///
+/// Both are sub-dominant to the noise-density sigma above by 5x (gyro) and
+/// 16x (accel) at these FSRs, so quantisation is NOT separately wired into
+/// `gyro_vec`/`accel_vec` -- folding a term this much smaller into the
+/// existing Gaussian draw would not be a distinguishable behaviour change.
+/// Revisit if a lower-FSR configuration or a different part ever makes it
+/// non-negligible.
+///
+/// NOT MODELLED, stated rather than left silent: vibration (motor/wheel
+/// mechanical coupling into the IMU -- `docs/sim-fidelity-session-prep.md`
+/// names this explicitly), temperature drift (offset AND noise-density
+/// temperature coefficients), misalignment (an unknown/uncalibrated mounting
+/// axis error -- distinct from `RunMetadata::imu_mounting_rotation`, which is
+/// a KNOWN, deliberately-applied rotation, not an error term), scale-factor
+/// error, cross-axis sensitivity, and bias instability as a time-varying
+/// process (see above).
+///
+/// `seed` below is a placeholder like every other profile's; the CLI knob
+/// that wires this in (`sim-host --imu-noise-seed`, `HostConfig::
+/// imu_noise_seed`) always overrides it, because a noise stream nobody else
+/// can re-seed is not a measurement.
+pub const IMU_NOISE_DATASHEET_V1: ImperfectionProfile = ImperfectionProfile {
+    profile_id: "imu-noise-datasheet-v1",
+    actuation_delay_s: 0.0,
+    current_loop_tau_s: 0.0,
+    gyro_noise_rad_s: 1.546e-3,
+    gyro_bias_rad_s: 8.727e-3,
+    accel_noise_m_s2: 2.171e-2,
+    wheel_rate_quantum_rad_s: 0.0,
+    wheel_rate_update_hz: 0.0,
+    max_current_a: 60.0,
+    derate_onset_rad_s: 0.0,
+    derate_full_rad_s: 0.0,
+    derate_floor_frac: 1.0,
+    seed: 12345,
+};
+
 /// A tiny, dependency-free, seeded PRNG (SplitMix64) feeding a Box-Muller
 /// transform for Gaussian noise.
 ///
@@ -359,6 +514,27 @@ mod tests {
     fn only_cutback_profile_models_cutback() {
         assert!(!STAGE0_PLACEHOLDER.models_cutback());
         assert!(STAGE0_CUTBACK.models_cutback());
+    }
+
+    #[test]
+    fn imu_noise_datasheet_profile_is_not_ideal() {
+        assert!(!IMU_NOISE_DATASHEET_V1.is_ideal());
+    }
+
+    #[test]
+    fn imu_noise_datasheet_profile_models_nothing_but_the_sensor_chain() {
+        // The whole point of this profile: isolate sensor noise from every
+        // other imperfection row this module models. Any nonzero value here
+        // would silently mix a delay/lag/cutback/quantisation cost into a
+        // measurement meant to be about the IMU alone.
+        let p = IMU_NOISE_DATASHEET_V1;
+        assert_eq!(p.actuation_delay_s, 0.0);
+        assert_eq!(p.current_loop_tau_s, 0.0);
+        assert_eq!(p.wheel_rate_quantum_rad_s, 0.0);
+        assert!(!p.models_cutback());
+        assert!(p.gyro_noise_rad_s > 0.0);
+        assert!(p.gyro_bias_rad_s > 0.0);
+        assert!(p.accel_noise_m_s2 > 0.0);
     }
 
     #[test]
