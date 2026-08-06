@@ -104,7 +104,7 @@ class ShuttleParams:
     ramp_s: float = RAMP_S
     ballast_mass_kg: float = 70.0
     ballast_height_m: float = 0.75
-    max_current_a: float = 40.0
+    max_current_a: float = 60.0
     #: Band the board must stay inside during a pause to count as holding.
     hold_band_m: float = 0.10
 

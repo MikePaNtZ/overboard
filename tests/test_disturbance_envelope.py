@@ -105,12 +105,22 @@ def test_recovery_boundary_has_large_margin_over_the_nominal_impulse(model):
     gains change, the same convention `NOMINAL_IMPULSE_NS` and
     `EXPECTED_STRIKE_ANGLE_DEG` already use.
 
-    260 N*s is 13x `NOMINAL_IMPULSE_NS` (20 N*s), which is itself already
+    **Re-baselined for issue: realistic-motor-torque (`MAX_CURRENT_A` 40 -> 60
+    A / 28 -> 42 N*m) -- `RustController()`'s default moved with it
+    (`rust_controller.py::DEFAULT_MAX_CURRENT_A`), and the disturbance-
+    rejection envelope genuinely widened: 280/260 N*s (first failure/recovery
+    boundary at 40 A) become 320/300 N*s at 60 A.** Re-swept to 400 N*s to
+    confirm 320 is a real first failure and not an artifact of the sweep's
+    old top -- 340 N*s survives again (the pre-existing non-monotonic
+    knife's-edge `test_recovery_boundary_ignores_a_later_reversion_to_
+    survival` exists for), so 320 stands as measured.
+
+    300 N*s is 15x `NOMINAL_IMPULSE_NS` (20 N*s), which is itself already
     ~60% clear of the open-loop topple threshold -- so the closed-loop
     controller carries a large, now-measured margin rather than an assumed
     one.
     """
     result = sweep_closed_loop(model, RustController, SWEEP_MAGNITUDES_NS)
-    assert result.first_failure_ns == 280.0
-    assert result.recovery_boundary_ns == 260.0
+    assert result.first_failure_ns == 320.0
+    assert result.recovery_boundary_ns == 300.0
     assert result.recovery_boundary_ns > 10 * NOMINAL_IMPULSE_NS

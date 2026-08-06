@@ -99,7 +99,7 @@ fn main() -> ExitCode {
     // values are a Stage-0 output; these exist only so the envelope is not
     // trivially inert while the plant is still a stub.
     let params = Params {
-        max_current_a: 40.0,
+        max_current_a: 60.0,
         max_abs_pitch_rad: 0.5,
         ..Params::default()
     };

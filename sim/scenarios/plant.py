@@ -542,8 +542,24 @@ def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
 
     xml = tilt_ground(MODEL_PATH.read_text(), grade_pct)
     if clamp_a is not None:
+        # Regex, not a literal string match: the base model's OWN ctrlrange
+        # moved 28 -> 42 N*m (issue: realistic-motor-torque) and a hardcoded
+        # `'ctrlrange="-28 28"'` search silently stopped matching anything --
+        # `str.replace` on a non-matching substring is a no-op, not an error,
+        # so every caller passing an explicit `clamp_a` was silently getting
+        # the model's OWN ctrlrange instead of the one it asked for. There is
+        # exactly one `ctrlrange` in this model (the `wheel_motor` actuator),
+        # asserted below so a second one added later fails loudly rather than
+        # being silently mismatched again.
+        import re
+
+        matches = re.findall(r'ctrlrange="[^"]*"', xml)
+        assert len(matches) == 1, (
+            f"expected exactly one ctrlrange in {MODEL_PATH.name}, found {len(matches)}: "
+            f"{matches} -- this substitution can no longer assume it targets wheel_motor"
+        )
         lim = clamp_a * KT_NM_PER_A
-        xml = xml.replace('ctrlrange="-28 28"', f'ctrlrange="{-lim:g} {lim:g}"')
+        xml = re.sub(r'ctrlrange="[^"]*"', f'ctrlrange="{-lim:g} {lim:g}"', xml, count=1)
     if ballast_mass > 0:
         # The geom is VISUAL ONLY -- contype/conaffinity 0 so it collides with
         # nothing, and the explicit <inertial> means it contributes no mass of

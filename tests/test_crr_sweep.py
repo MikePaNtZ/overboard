@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import csv
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -101,10 +102,31 @@ from sim.scenarios.plant import kerb_strike_impulse  # noqa: E402
 STATE_OUT = "127.0.0.1:19701"
 INPUT_IN = "127.0.0.1:19702"
 
-#: ICD 10.1 / `host.rs`'s own constants, at the SHIPPED 40 A envelope --
-#: unlike the banked `damping-sweep-instrument` branch, this file does not
-#: assume the 60 A candidate.
-MAX_CURRENT_A = 40.0
+HOST_RS = REPO / "crates" / "sim-host" / "src" / "host.rs"
+
+
+def _rust_constant(name: str) -> float:
+    """Read a `const NAME: f32 = value;` straight out of `host.rs` -- same
+    mechanism `test_cmd_envelope_reserve.py` and `test_braking_authority.py`
+    use, and for the same reason: this file was written labelled against the
+    SHIPPED 40 A envelope (issue: drag-model), but the 40-vs-60 A campaign
+    (issue: campaign-40-vs-60) builds this exact binary at either ceiling. A
+    literal copy here would silently mislabel every headroom number in this
+    file's own printed table against the wrong envelope the moment the
+    compiled binary's `MAX_CURRENT_A` and this module's copy disagree -- which
+    is exactly what happened before this was wired live: 60 A demand compared
+    against a stale 40 A headroom threshold read as a false (a)-1 regression.
+    """
+    m = re.search(rf"^const {name}: f32 = ([0-9.]+);", HOST_RS.read_text(), re.M)
+    assert m is not None, f"{name} is not a plain f32 const in {HOST_RS}"
+    return float(m.group(1))
+
+
+#: ICD 10.1 / `host.rs`'s own constant, READ LIVE (not copied) -- see
+#: `_rust_constant`'s own doc comment for why. This file's headroom numbers
+#: are therefore always labelled against whichever envelope the compiled
+#: `target/release/sim-host` actually is, at either campaign ceiling.
+MAX_CURRENT_A = _rust_constant("MAX_CURRENT_A")
 KT_NM_PER_A = 0.7
 KP_NM_PER_RAD = 140.0
 PITCH_CEILING_DEG = math.degrees(MAX_CURRENT_A * KT_NM_PER_A / KP_NM_PER_RAD)

@@ -70,9 +70,10 @@ const CYCLE_NS: u64 = 2_000_000;
 /// `sim/scenarios/plant.py::KT_NM_PER_A` exactly -- duplicated the same way
 /// `board_types::DEFAULT_R_EFF_M` duplicates the model's tire radius, because
 /// this crate has no Python binding to check itself against directly. The
-/// model's own `ctrlrange="-28 28"` is the derived, checkable consequence
-/// (40 A * 0.7 N*m/A = 28 N*m), and `kt_nm_per_a_matches_the_models_ctrlrange`
-/// below pins it against the compiled model so the two cannot silently drift.
+/// model's own `ctrlrange="-42 42"` is the derived, checkable consequence
+/// (60 A * 0.7 N*m/A = 42 N*m, issue: realistic-motor-torque raised this from
+/// 40 A / 28 N*m), and `kt_nm_per_a_matches_the_models_ctrlrange` below pins
+/// it against the compiled model so the two cannot silently drift.
 const KT_NM_PER_A: f64 = 0.7;
 
 /// The model this backend steps BY DEFAULT -- the driverless onewheel plant,
@@ -961,9 +962,16 @@ impl BoardActuate for SimBackend {
 mod tests {
     use super::*;
 
+    /// The single source for these tests' `max_current_a` fixture, so a test
+    /// that needs the ceiling as a literal (`stage_three_clamp_bounds_and_
+    /// reports`) reads it from here rather than copying the number -- a
+    /// hardcoded 40.0 there is exactly what broke when this fixture moved to
+    /// 60.0 A.
+    const TEST_MAX_CURRENT_A: f32 = 60.0;
+
     fn opened() -> SimBackend {
         let mut b = SimBackend::with_params(Params {
-            max_current_a: 40.0,
+            max_current_a: TEST_MAX_CURRENT_A,
             ..Params::default()
         });
         b.open().unwrap();
@@ -1179,7 +1187,12 @@ mod tests {
         let mut b = armed();
         b.wait_observe().unwrap();
         let applied = b.apply(&Command::MotorCurrent { amps: 999.0 }).unwrap();
-        assert_eq!(applied.commanded, Command::MotorCurrent { amps: 40.0 });
+        assert_eq!(
+            applied.commanded,
+            Command::MotorCurrent {
+                amps: TEST_MAX_CURRENT_A
+            }
+        );
         assert_eq!(applied.saturated, Saturation::Yes);
     }
 
@@ -1329,17 +1342,22 @@ mod tests {
     /// `sim/scenarios/plant.py::KT_NM_PER_A`, whose derived, checkable
     /// consequence is the model's own `ctrlrange`. If the model's clamp ever
     /// changes independently of this constant, applying `max_current_a`
-    /// (40 A, the model's own derived limit) must land exactly on the
-    /// model's `ctrlrange` bound rather than saturating early or leaving
-    /// headroom -- either of which would mean the two have silently
-    /// diverged.
+    /// (60 A, the model's own derived limit -- issue: realistic-motor-torque
+    /// raised this from 40 A) must land exactly on the model's `ctrlrange`
+    /// bound rather than saturating early or leaving headroom -- either of
+    /// which would mean the two have silently diverged. No MuJoCo binding
+    /// here to read the compiled model's `ctrlrange` back (same limit this
+    /// crate's own header notes for `KT_NM_PER_A` itself), so -- like
+    /// `board_types::rad_s_per_erpm_matches_...` -- this is a literal pin
+    /// against the model's own comment, not a live query.
     #[test]
     fn kt_nm_per_a_matches_the_models_ctrlrange() {
+        const MODEL_MAX_CURRENT_A: f64 = TEST_MAX_CURRENT_A as f64;
         assert_eq!(
-            KT_NM_PER_A * 40.0,
-            28.0,
-            "40 A * KT_NM_PER_A must equal the model's ctrlrange bound (28 N*m); \
-             see overboard_onewheel.xml's <motor ... ctrlrange=\"-28 28\">"
+            KT_NM_PER_A * MODEL_MAX_CURRENT_A,
+            42.0,
+            "60 A * KT_NM_PER_A must equal the model's ctrlrange bound (42 N*m); \
+             see overboard_onewheel.xml's <motor ... ctrlrange=\"-42 42\">"
         );
     }
 

@@ -526,7 +526,7 @@ mod tests {
             kp_nm_per_rad: 56.0,
             kd_nm_per_rad_s: 7.7,
             kt_nm_per_a: 0.7,
-            max_current_a: 40.0,
+            max_current_a: 60.0,
             kp_v_rad_per_m_s: 0.0,
             ki_v_rad_per_m: 0.0,
             max_pitch_ref_rad: 0.087,
@@ -606,7 +606,10 @@ mod tests {
         let h = armed();
         let (o, mut c) = (obs(-1.0, 0.0), out());
         assert_eq!(unsafe { ob_controller_update(h.0, &o, &mut c) }, OB_OK);
-        assert_eq!(c.amps, 40.0);
+        // Asserted against the fixture's own `max_current_a`, not a copied
+        // literal -- a hardcoded 40.0 here is exactly what broke this test
+        // when the fixture moved to 60.0 A.
+        assert_eq!(c.amps, params().max_current_a);
         assert_eq!(c.saturated, 1, "anti-windup needs to see this");
     }
 
@@ -720,23 +723,36 @@ mod tests {
 
     #[test]
     fn headroom_moves_with_kt_at_a_fixed_current_limit() {
-        // pitch = -0.5 rad asks the law (kp_nm_per_rad = 56.0) for 28 N*m,
-        // exactly halfway between kt=0.5's ceiling (0.5*40 = 20 N*m) and
-        // kt=0.9's ceiling (0.9*40 = 36 N*m) -- so the SAME command saturates
-        // at one kt and not the other. Same max_current_a (40 A) throughout;
-        // only the belief about kt changes what that 40 A is worth in torque.
-        let (lo, hi) = (controller_with_kt(0.5), controller_with_kt(0.9));
-        let (o, mut c_lo) = (obs(-0.5, 0.0), out());
+        // Derived from the fixture, not from a copied pair of literals (a
+        // hardcoded 40 A / 28 N*m pitch here is exactly what broke this test
+        // when `max_current_a` moved from 40 to 60 A): pick a pitch that asks
+        // the law for a torque exactly halfway between kt=0.5's ceiling
+        // (0.5 * max_current_a) and kt=0.9's ceiling (0.9 * max_current_a),
+        // so the SAME command saturates at one kt and not the other. Same
+        // max_current_a throughout; only the belief about kt changes what
+        // that current is worth in torque.
+        let max_current_a = params().max_current_a;
+        let kp_nm_per_rad = params().kp_nm_per_rad;
+        let (kt_lo, kt_hi) = (0.5, 0.9);
+        let (ceiling_lo, ceiling_hi) = (kt_lo * max_current_a, kt_hi * max_current_a);
+        let torque_asked_nm = (ceiling_lo + ceiling_hi) / 2.0;
+        let pitch = -torque_asked_nm / kp_nm_per_rad;
+
+        let (lo, hi) = (controller_with_kt(kt_lo), controller_with_kt(kt_hi));
+        let (o, mut c_lo) = (obs(pitch, 0.0), out());
         let mut c_hi = out();
         assert_eq!(unsafe { ob_controller_update(lo.0, &o, &mut c_lo) }, OB_OK);
         assert_eq!(unsafe { ob_controller_update(hi.0, &o, &mut c_hi) }, OB_OK);
 
-        assert_eq!(c_lo.saturated, 1, "kt=0.5: 28 N*m exceeds a 20 N*m ceiling");
+        assert_eq!(
+            c_lo.saturated, 1,
+            "kt={kt_lo}: {torque_asked_nm} N*m exceeds a {ceiling_lo} N*m ceiling"
+        );
         assert_eq!(
             c_hi.saturated, 0,
-            "kt=0.9: 28 N*m is within a 36 N*m ceiling"
+            "kt={kt_hi}: {torque_asked_nm} N*m is within a {ceiling_hi} N*m ceiling"
         );
-        assert_eq!(c_lo.amps, 40.0);
-        assert!(c_hi.amps < 40.0, "got {}", c_hi.amps);
+        assert_eq!(c_lo.amps, max_current_a);
+        assert!(c_hi.amps < max_current_a, "got {}", c_hi.amps);
     }
 }
