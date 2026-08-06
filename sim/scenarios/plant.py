@@ -357,6 +357,172 @@ def strike_angles_deg(model, grade_pct: float = 0.0) -> dict:
     return out
 
 
+#: Rolling-resistance coefficient. NOT re-derived here -- the centre of the
+#: 0.015-0.025 working band for an 18 psi wide pneumatic tyre, cited and
+#: derived in full in either model file's own `wheel_hinge` comment
+#: (`overboard_onewheel.xml`, `overboard_rider.xml`). Kept here only so the
+#: welded-ballast correction below can multiply it against THIS model's own
+#: compiled load, rather than by trusting whichever load the XML literal it
+#: inherited happened to be sized for.
+CRR = 0.02
+
+
+def correct_wheel_drag_for_load(model) -> float:
+    """Re-derive `wheel_hinge`'s rolling-resistance `frictionloss` from what
+    the COMPILED model actually weighs, and write it back.
+
+    THE CONFOUND THIS CLOSES. `overboard_onewheel.xml` and
+    `overboard_rider.xml` each carry a `frictionloss` literal sized for THEIR
+    OWN total mass (12.5 kg -> 0.3565 N*m; 83.0 kg -> 2.368 N*m -- see either
+    file's `wheel_hinge` comment for `frictionloss = Crr * W * r`). But
+    `build_model`/`build_terrain_model` weld a rider-scale ballast onto the
+    DRIVERLESS xml, so the model they hand back inherited the driverless
+    12.5 kg literal regardless of how much mass was then bolted on top -- an
+    83 kg welded-ballast run was carrying a rolling-resistance term sized for
+    12.5 kg, understating it ~6.6x, and nothing in that path ever read the
+    number back off the model it had actually produced to notice.
+
+    This reads the load THE SAME WAY `tests/test_rider_drag_model.py` reads
+    it to verify the two model files' own literals -- by body/joint/geom
+    NAME off the compiled model, never a second literal -- so it can never
+    silently drift the way the original constant did. Called
+    UNCONDITIONALLY, ballast or none: the driverless case must re-derive to
+    the SAME 0.3565 N*m the XML already carries, not merely be left alone,
+    because "skip this on the model with no ballast" is exactly the kind of
+    implicit assumption that let the confound in unnoticed the first time.
+    """
+    import mujoco
+
+    frame_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
+    if frame_id < 0:
+        raise KeyError("model has no body named 'frame'")
+    # `frame` is the one body directly under `worldbody` in both model files,
+    # and everything else (wheel, ballast, ballast carrier) is its kinematic
+    # descendant -- so its subtree mass IS the model's total supported mass,
+    # by construction rather than by a second, separately-summed literal.
+    total_mass_kg = float(model.body_subtreemass[frame_id])
+
+    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "wheel_hinge")
+    if jid < 0:
+        raise KeyError("model has no joint named 'wheel_hinge'")
+    dof = int(model.jnt_dofadr[jid])
+
+    wheel_gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "wheel_geom")
+    if wheel_gid < 0:
+        raise KeyError("model has no geom named 'wheel_geom'")
+    r = float(model.geom_size[wheel_gid][0])
+
+    import numpy as np
+
+    g = float(np.linalg.norm(model.opt.gravity))
+    frictionloss = CRR * total_mass_kg * g * r
+    model.dof_frictionloss[dof] = frictionloss
+    return frictionloss
+
+
+#: Rider aerodynamic drag, reused VERBATIM from `overboard_rider.xml`'s own
+#: `rider_aero_geom` -- same box, same position, same (MuJoCo default, left
+#: unspecified) fluid coefficient -- so a welded-ballast Python run gets the
+#: SAME measured effective CdA (0.754 m^2, see
+#: `tests/test_rider_drag_model.py::test_rider_aero_geom_achieves_the_targeted_cda`)
+#: rather than a second, independently-derived number that could drift from
+#: it. See `add_rider_aero`'s docstring for the mechanism and the MuJoCo trap
+#: it has to null.
+_RIDER_AERO_GEOM = (
+    '<geom name="rider_aero_geom" type="box" size="0.15 0.3 0.8" pos="0 0 0.9" '
+    'contype="0" conaffinity="0" group="1" rgba="0 0 0 0" fluidshape="ellipsoid"/>'
+)
+
+#: A null override: zero fluid coefficients on an explicit ellipsoid shape.
+#: See `add_rider_aero`'s docstring for why anything at all is needed here.
+_NULL_FLUID_OVERRIDE = 'fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"'
+
+#: A tiny, invisible, non-colliding stub -- for a ballast body whose own
+#: geoms (`rider_geoms()`'s "figure"/"sphere" styles) carry no fluid override
+#: of their own, and which therefore needs exactly one to null the legacy
+#: per-body drag `add_rider_aero`'s `<option density>` would otherwise derive
+#: from the ballast's own (rider-scale) mass and inertia. `size="0.001"` and
+#: an explicit `<inertial>` on the ballast body it is added to means it
+#: perturbs neither the render nor the compiled mass -- same reasoning as
+#: `overboard_rider.xml`'s own `ballast_fa_carrier_fluid_null_geom`.
+BALLAST_FLUID_NULL_GEOM = (
+    '<geom name="ballast_fluid_null_geom" type="sphere" size="0.001" '
+    f'contype="0" conaffinity="0" group="1" rgba="0 0 0 0" {_NULL_FLUID_OVERRIDE}/>'
+)
+
+#: The driverless model's own `<option>` line, matched verbatim so enabling
+#: the fluid model is a targeted edit rather than a blind string splice.
+_ONEWHEEL_OPTION = '<option gravity="0 0 -9.81" timestep="0.002" integrator="RK4"/>'
+
+#: The tail of the driverless model's own `wheel_geom`, matched verbatim for
+#: the same reason.
+_ONEWHEEL_WHEEL_GEOM_TAIL = 'material="tire_mat" condim="4"/>'
+
+
+def add_rider_aero(xml: str) -> str:
+    """Give a welded-ballast driverless model the rider aerodynamic drag term
+    it is otherwise missing ENTIRELY -- call only once ballast mass has
+    actually been welded on; never on the bare driverless model, which
+    `overboard_onewheel.xml`'s own header note says must carry none.
+
+    THE GAP THIS CLOSES. `overboard_rider.xml` derives a rider-silhouette
+    aero term (CdA 0.754 m^2) because a standing rider is most of a
+    onewheel's frontal area. The Python scenarios that weld ballast onto
+    `overboard_onewheel.xml` instead (`build_model`, `terrain.build_terrain_
+    model`) carry rider-SCALE MASS but no aero drag whatever -- their
+    high-speed results were wrong in the opposite direction from the
+    frictionloss confound: too LITTLE drag, not too much.
+
+    THE MUJOCO TRAP (see `overboard_rider.xml`'s own `<option>` comment, and
+    this module's docstring for the empirical check that motivated it):
+    turning on `density` activates MuJoCo's LEGACY per-body fluid model on
+    every body that does not carry an explicit `fluidshape="ellipsoid"`
+    override, INCLUDING bodies with no rendered geom at all. `wheel_geom` and
+    a welded ballast body's own geoms carry no such override, so both get one
+    here -- the wheel's on its existing geom, the ballast's via
+    `BALLAST_FLUID_NULL_GEOM`, which the CALLER must splice into the ballast
+    body it is building (this function cannot see that body's markup, since
+    it is assembled by the caller, not here).
+
+    Verified empirically (not by inspection) that a single override geom on
+    a body suppresses the WHOLE body's legacy contribution regardless of how
+    many other, non-overridden geoms that body also carries -- the same
+    property `overboard_rider.xml`'s own null overrides rely on.
+    """
+    if xml.count(_ONEWHEEL_OPTION) != 1:
+        raise RuntimeError(
+            "expected exactly one <option> line matching the driverless "
+            "model's own to enable the fluid model on -- the markup in "
+            "overboard_onewheel.xml changed; update _ONEWHEEL_OPTION."
+        )
+    xml = xml.replace(
+        _ONEWHEEL_OPTION,
+        _ONEWHEEL_OPTION.replace("/>", ' density="1.225" viscosity="0"/>'),
+        1,
+    )
+
+    if xml.count(_ONEWHEEL_WHEEL_GEOM_TAIL) != 1:
+        raise RuntimeError(
+            "expected exactly one wheel_geom to null-override -- the markup "
+            "in overboard_onewheel.xml changed; update "
+            "_ONEWHEEL_WHEEL_GEOM_TAIL."
+        )
+    xml = xml.replace(
+        _ONEWHEEL_WHEEL_GEOM_TAIL,
+        _ONEWHEEL_WHEEL_GEOM_TAIL.replace("/>", f" {_NULL_FLUID_OVERRIDE}/>"),
+        1,
+    )
+
+    if xml.count('      <site name="imu"') != 1:
+        raise RuntimeError(
+            "expected exactly one imu site to anchor the aero geom before -- "
+            "the markup in overboard_onewheel.xml changed."
+        )
+    return xml.replace(
+        '      <site name="imu"', _RIDER_AERO_GEOM + '\n      <site name="imu"', 1
+    )
+
+
 def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
                 rider_style: str = "figure", grade_pct: float = 0.0):
     """The stock model, optionally with a rigid rider-proxy mass above the axle.
@@ -391,6 +557,7 @@ def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
             f'diaginertia="{ballast_mass * 0.15:.4f} {ballast_mass * 0.15:.4f} '
             f'{ballast_mass * 0.08:.4f}"/>'
             + rider_geoms(rider_style, ballast_height)
+            + BALLAST_FLUID_NULL_GEOM
             + f'</body>\n'
         )
         xml = xml.replace('      <site name="imu"', body + '      <site name="imu"', 1)
@@ -402,6 +569,14 @@ def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
         # the pane's label bar then clipped the helmet, so this carries the
         # extra headroom the overlay eats.
         xml = xml.replace('fovy="26"', 'fovy="66"').replace('fovy="24"', 'fovy="64"')
+
+        # RIDER AERO -- a welded-ballast run carries rider-scale MASS and must
+        # therefore also carry rider-scale aerodynamic drag; see
+        # `add_rider_aero`'s docstring for the gap this closes and the MuJoCo
+        # trap it has to null. Gated on ballast_mass > 0, same as the ballast
+        # body itself: the driverless model's own header note says it must
+        # carry no aero whatever, and this must not be the thing that adds it.
+        xml = add_rider_aero(xml)
 
     # A WORLD-FIXED camera, for scenarios about travel.
     #
@@ -424,7 +599,14 @@ def build_model(ballast_mass: float, ballast_height: float, clamp_a: float,
     # indistinguishable from a real model to the next person who looks.
     mesh_dir = MODEL_PATH.parent / "meshes" / "openwheel"
     assets = {p.name: p.read_bytes() for p in mesh_dir.glob("*.stl")}
-    return mujoco.MjModel.from_xml_string(xml, assets)
+    model = mujoco.MjModel.from_xml_string(xml, assets)
+    # Re-derive wheel_hinge's rolling resistance from what THIS compiled
+    # model actually weighs -- see `correct_wheel_drag_for_load`'s docstring
+    # for the confound this closes. Unconditional: the driverless case (no
+    # ballast) must derive to the SAME 0.3565 N*m the XML literal carries,
+    # not merely be left alone.
+    correct_wheel_drag_for_load(model)
+    return model
 
 
 def plant_summary(model) -> dict:

@@ -69,7 +69,10 @@ from .impulse_response import KT_NM_PER_A, _bumper_ground_contact, frame_pitch_r
 from .plant import (
     _FRAME_BODY,
     _GROUND_GEOM,
+    BALLAST_FLUID_NULL_GEOM,
     MODEL_PATH,
+    add_rider_aero,
+    correct_wheel_drag_for_load,
     imu_readings,
     plant_summary,
     rider_geoms,
@@ -284,6 +287,7 @@ def build_terrain_model(params: TerrainParams):
             f'<inertial pos="0 0 0" mass="{m_b}" '
             f'diaginertia="{m_b * 0.15:.4f} {m_b * 0.15:.4f} {m_b * 0.08:.4f}"/>'
             + rider_geoms(params.rider_style, h_b)
+            + BALLAST_FLUID_NULL_GEOM
             + "</body>\n"
         )
         xml = xml.replace('      <site name="imu"', body + '      <site name="imu"', 1)
@@ -291,6 +295,11 @@ def build_terrain_model(params: TerrainParams):
         # Widen the stock cameras, which are framed for a bare 0.3 m board and
         # crop out a rider 0.75 m above the axle.
         xml = xml.replace('fovy="26"', 'fovy="66"').replace('fovy="24"', 'fovy="64"')
+
+        # RIDER AERO -- see `plant.add_rider_aero`'s docstring for the gap
+        # this closes and the MuJoCo trap it has to null. Gated on
+        # ballast_mass_kg > 0 for the same reason the ballast body itself is.
+        xml = add_rider_aero(xml)
 
     # A world-fixed camera that can hold the whole ride. The stock cameras are
     # `trackcom`: tracked, a crest-to-crest descent looks like a stationary
@@ -322,6 +331,12 @@ def build_terrain_model(params: TerrainParams):
     assets = {f"meshes/openwheel/{p.name}": p.read_bytes()
               for p in mesh_dir.glob("*.stl")}
     model = mujoco.MjModel.from_xml_string(xml, assets)
+    # Re-derive wheel_hinge's rolling resistance from what THIS compiled
+    # model actually weighs -- see `plant.correct_wheel_drag_for_load`'s
+    # docstring for the confound this closes. Unconditional, same as
+    # `plant.build_model`: the driverless case must derive to the same
+    # 0.3565 N*m the XML literal carries, not merely be left alone.
+    correct_wheel_drag_for_load(model)
 
     # Fill the elevation data. `data` is in [0, 1] and scales the field's
     # elevation, so (cos + 1) / 2 maps the profile onto the full range.
