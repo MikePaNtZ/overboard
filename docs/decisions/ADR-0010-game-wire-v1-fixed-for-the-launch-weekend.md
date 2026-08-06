@@ -1,13 +1,16 @@
 # ADR-0010 — The game wire v1 is fixed by the COO for the launch weekend, and expires
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0012
 - **Date:** 2026-08-01
 - **Ratified by:** COO
 - **Closes:** none — CEO direction, 2026-08-01 (formal approval of the M3 Revision 3 re-cut)
 - **Constrains:** `sim-host` in `overboard`; the UE client in `overboard-game`; both until superseded
 - **Enforced by:** a compile-time size assertion and a byte-size unit test in `sim-host`, plus
   fail-loud `magic`/`schema_version` rejection on both sides
-- **Expires:** Tuesday 2026-08-04, when schema ownership reverts to Senior Controls per ADR-0009
+- **Expires:** Tuesday 2026-08-04, when schema ownership reverts to Senior Controls per ADR-0009.
+  It did expire, and sat unreplaced for two days. **ADR-0012 supersedes it** as of 2026-08-06:
+  the packet becomes v3, and the frame-transform and fail-loud rules below are carried forward
+  unchanged rather than re-decided.
 
 ## Context
 
