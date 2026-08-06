@@ -129,10 +129,7 @@ fn fall_then_reset_recovers() {
 
     let fallen_deadline = Instant::now() + Duration::from_secs(5);
     let mut fell = false;
-    loop {
-        let Some(state) = recv_state(&recv_socket, fallen_deadline) else {
-            break;
-        };
+    while let Some(state) = recv_state(&recv_socket, fallen_deadline) {
         let state_flags = state.flags;
         if state_flags & STATE_FLAG_FALLEN != 0 {
             fell = true;
@@ -153,10 +150,7 @@ fn fall_then_reset_recovers() {
 
     let recovered_deadline = Instant::now() + Duration::from_secs(5);
     let mut recovered_state = None;
-    loop {
-        let Some(state) = recv_state(&recv_socket, recovered_deadline) else {
-            break;
-        };
+    while let Some(state) = recv_state(&recv_socket, recovered_deadline) {
         let state_flags = state.flags;
         if state_flags & STATE_FLAG_FALLEN == 0 {
             recovered_state = Some(state);
