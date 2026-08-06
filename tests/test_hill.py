@@ -20,9 +20,9 @@ so the "observed" column is a fact about this commit, not an inherited claim.
 
 | Assertion (grade, v_ref)                          | Threshold            | Observed this session          | Status |
 |-----------------------------------------------------|-----------------------|---------------------------------|--------|
-| medium descent, 10% @ {1,2,3} m/s: `abs(v_final-v_ref)` | `< 0.25 m/s`       | 0.062 / 0.085 / 0.097 m/s        | MEASURED -- band is 2.6-4x the actual error, not a guessed number |
+| medium descent, 10% @ {1,2,3} m/s: `abs(v_final-v_ref)` | `< 0.5 m/s` (was `< 0.25 m/s`) | 0.430 / 0.044 / 0.099 m/s (was 0.062/0.085/0.097) | RE-MEASURED against the frozen plant (issue: realistic-motor-torque) -- v_ref=1 alone got materially worse |
 | medium climb, -5% @ 2 m/s: `held_speed`              | survives + holds      | survived, held                  | MEASURED |
-| climbing is harder: 10% descent vs -10% climb        | descent survives, climb does not | descent survived; climb did not | MEASURED |
+| climbing is harder: 10% descent vs -10% climb        | both survive; climb's tracking error is >5x descent's | descent max err 0.049 m/s, climb 1.217 m/s (25x) | RE-MEASURED -- both now survive +-10% (used to be descent-survives/climb-fails); re-derived as a magnitude comparison, see the test's own docstring |
 | estimator headline: 15% descent, truth vs estimate   | truth survives, estimate strikes the tail | truth: survived, held; estimate: struck, `struck_end="tail"` | MEASURED |
 | estimator absorbs the slope, 5%/10% @ 1 m/s          | `0.6 < err/slope < 1.3` | 0.785 (5%), 0.820 (10%)       | MEASURED -- band brackets the observed ~0.8x with real headroom on both sides, not just above it |
 | crash statistics, 20% descent: `peak_abs_pitch_deg`  | `< 25.0`              | 18.5° (this run's actual peak)  | ASSUMED / sanity ceiling -- 25° bounds against the wreckage-scale numbers the bug produced (179.97°), not a tight margin on today's 18.5°; not re-derived from a stated worst case |
@@ -216,7 +216,16 @@ def test_the_board_holds_a_medium_descent(v_ref):
     m = run(HillParams(grade_pct=10.0, v_ref_m_s=v_ref, duration_s=SHORT)).metrics
     assert m.survived, f"struck the {m.struck_end} at {m.t_strike_s}s"
     assert m.held_speed, f"v_ref {v_ref} -> v_final {m.v_final_m_s:.2f}"
-    assert abs(m.v_final_m_s - v_ref) < 0.25, (
+    # RE-MEASURED against the frozen plant (drag: the derived three-term
+    # model; `MAX_CURRENT_A` 40 -> 60 A): was `< 0.25`, observed
+    # 0.062/0.085/0.097 m/s at {1,2,3} m/s. Now observed 0.430/0.044/0.099 --
+    # v_ref=1 m/s alone got materially worse (0.062 -> 0.430 m/s), the other
+    # two barely moved. The extra current authority makes the low-speed
+    # transient overshoot harder before `SHORT` (10 s) settles it, which
+    # `held_speed`'s own separate check still passes; this bound just needs
+    # to cover it too. Re-pinned to `< 0.5`, just above the new v_ref=1
+    # figure.
+    assert abs(m.v_final_m_s - v_ref) < 0.5, (
         f"commanded {v_ref} m/s, finished at {m.v_final_m_s:.2f} m/s"
     )
 
@@ -232,11 +241,38 @@ def test_the_board_holds_a_medium_climb():
 def test_climbing_is_the_harder_direction():
     """Symmetric grades, opposite signs: the climb fails where the descent does
     not. Sweeping only descents -- as the original measurement did -- would
-    have missed the tighter limit entirely."""
+    have missed the tighter limit entirely.
+
+    RE-MEASURED against the frozen plant (drag: the derived three-term model;
+    `MAX_CURRENT_A` 40 -> 60 A). **Both directions now survive +-10%** -- the
+    extra current authority genuinely closes the gap that used to make the
+    climb fail outright here. Picking a bigger magnitude to restore a bare
+    `survived` / `not survived` contrast means walking a knife's edge only a
+    few tenths of a percentage point wide (descent still survives at 11.5%,
+    fails at 11.8%; climb survives at 11.0%, fails at 11.2%), where BOTH
+    directions' behaviour near the edge is a degenerate mix of stalling and
+    reversing travel direction rather than the clean hold-vs-strike contrast
+    this test wants -- exactly the kind of fragile, knife's-edge pin this
+    session's own guardrails warn against re-baselining onto.
+
+    Re-derived instead to compare the SAME +-10% grade on a continuous
+    measure. Descent's max tracking error is 0.049 m/s (peak pitch 15.82 deg,
+    2.75 deg of margin over the 18.57 deg strike line); climb's is 1.217 m/s
+    (peak pitch 17.07 deg, 1.50 deg of margin) -- about 25x the tracking
+    error and under half the pitch margin, at the identical grade magnitude.
+    Climbing is still measurably the harder direction; it no longer fails
+    outright at +-10% the way it used to, so "harder" is now asserted as a
+    magnitude comparison rather than a pass/fail one.
+    """
     descent = run(HillParams(grade_pct=10.0, v_ref_m_s=2.0, duration_s=SHORT)).metrics
     climb = run(HillParams(grade_pct=-10.0, v_ref_m_s=2.0, duration_s=SHORT)).metrics
-    assert descent.survived, "expected a 10% descent to be inside the envelope"
-    assert not climb.survived, "expected a 10% climb to be outside it"
+    assert descent.survived and climb.survived, (
+        "expected both +-10% grades to survive at the 60 A envelope"
+    )
+    assert climb.max_speed_error_m_s > 5 * descent.max_speed_error_m_s, (
+        "expected climbing to still show a much larger tracking error than "
+        "descending at the same grade magnitude"
+    )
 
 
 def test_the_estimator_is_what_loses_the_hill_not_the_motor():

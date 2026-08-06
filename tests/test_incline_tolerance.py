@@ -88,6 +88,47 @@ control for all of it.
 Every run is `--scripted-scenario ... --free-run`, so the whole sweep is
 deterministic and costs seconds. THE BINARY MUST BE BUILT -- same rule as
 `tests/test_cmd_envelope_reserve.py`, for the same reason.
+
+RE-MEASURED against the frozen plant (drag: the derived three-term model;
+`MAX_CURRENT_A` 40 -> 60 A) -- THREE TESTS BELOW ARE LEFT FAILING, NOT
+RE-PINNED, as genuine findings rather than pin drift
+--------------------------------------------------------------------------
+`test_the_incline_knob_is_a_slope_and_not_something_else`,
+`test_a_released_board_does_not_stay_put_on_any_incline`, and
+`test_the_downgrade_at_which_full_braking_stops_arresting_the_roll` all
+fail differently now, and all three trace to the same underlying cause: at
+very small slope angles the drag model's own (now more significant) terms
+are no longer negligible next to `g sin(phi)`, which the "released board
+free-rolls, proportional to sin(phi)" model these tests were built on
+assumes away. Concretely:
+
+* The positive control's free-roll ratio no longer holds across ANY of its
+  swept range (0.25-10 deg): it runs from ~4.0 (at 0.25 deg, drag-dominated)
+  through ~0.86 (near 1 deg, close to the old expectation) down through
+  zero to a SIGN REVERSAL at 7-10 deg, where the balance loop's own now
+  larger current authority pushes the released board slightly UPHILL
+  rather than down. The knob (`--incline-deg` itself, checked by the
+  bit-identical zero-is-a-no-op assertion, which still passes) is not the
+  problem; the small-perturbation free-roll model this test checks it
+  against no longer describes this plant at any angle it currently sweeps.
+* The station-keeping test finds a narrow band (-0.25 to -0.5 deg) where the
+  released board does not keep gaining speed by the end of the run --
+  contradicting "there is no incline small enough to stay put" at those
+  specific angles, though angles both shallower (-0.1, -0.15 deg) and
+  steeper (-0.75 deg and beyond) still gain speed as expected.
+* The braking-arrest test finds the boundary moved into a genuine
+  non-monotonic region rather than a clean single edge -- see that test's
+  own docstring.
+
+This is reported rather than fixed by picking friendlier sample points,
+per this file's own stated policy (`test_the_downgrade_...`'s assertion
+message) and because the underlying claim -- that a released board on ANY
+slope keeps accelerating forever, which is central to ADR-0011's
+world-authoring safety argument -- is exactly what these three findings
+call into question at the low-angle end. A driver/oracle call on whether
+this file's free-roll model needs re-deriving for the new drag term (not
+attempted here) is recommended before leaning further on this file's
+"station-keeping is zero at every nonzero incline" headline.
 """
 
 from __future__ import annotations
@@ -200,6 +241,16 @@ def test_the_incline_knob_is_a_slope_and_not_something_else(tmp_path):
        range is a property a mis-scaled or mis-framed transform does not have.
     3. **The sign is right.** Positive is uphill in the forward direction, so
        a released board rolls BACKWARD.
+
+    **NOT RE-PINNED against the frozen plant -- left failing as a genuine
+    finding.** See the file docstring's dedicated section. The zero-is-a-
+    no-op check still passes; the free-roll checks (2) and (3) no longer
+    hold across this test's own swept range, including a sign reversal at
+    7-10 deg. The incline knob is not implicated -- this is the small-
+    perturbation free-roll model breaking down against the new drag terms
+    and the balance loop's own larger current authority, not evidence that
+    `--incline-deg` applies something other than a uniform gravitational
+    field.
     """
     flat = _run(tmp_path, "ctrl_flat", "full-stick", incline_deg=0.0)
     unset = _run(tmp_path, "ctrl_unset", "full-stick")
@@ -308,6 +359,16 @@ def test_a_released_board_does_not_stay_put_on_any_incline(tmp_path):
     The run-out distances printed alongside are kinematics from the measured
     acceleration, and are labelled derived rather than measured because the
     18.5 s schedule is far too short to drive them.
+
+    **NOT RE-PINNED against the frozen plant -- left failing as a genuine
+    finding.** See the file docstring's dedicated section. -0.25 deg (and,
+    checked ad hoc, -0.3/-0.4/-0.5 deg too) no longer keeps gaining speed by
+    the end of the run, while shallower (-0.1/-0.15 deg) and steeper
+    (-0.75 deg and beyond) angles still do -- a narrow band where this
+    test's own headline ("no incline small enough to stay put") does not
+    hold at this envelope. That is itself a safety-relevant finding for the
+    world-authoring constraint this file exists to inform, not a number to
+    quietly widen past.
     """
     print("\nreleased on a downgrade, does it stay put?")
     print(f"{'incline':>8} {'a (m/s^2)':>10} {'v at end':>9} {'still gaining':>14} "
@@ -363,11 +424,33 @@ def test_the_downgrade_at_which_full_braking_stops_arresting_the_roll(tmp_path):
     Deliberately NOT bisected finer than the 0.5 deg sweep. A more precise
     answer would be a number precise enough to be mistaken for a limit, which
     is exactly what this file must not produce.
+
+    **NOT RE-PINNED -- left failing as a genuine finding, per this test's own
+    stated policy, against the frozen plant (drag: the derived three-term
+    model; `MAX_CURRENT_A` 40 -> 60 A).** The original (4.0, 5.0, 5.5, ...)
+    grid has a 1 deg gap between its first two points (inconsistent with the
+    "0.5 deg sweep" the docstring above claims), and the boundary moved into
+    that gap: 4.0 deg now reads OUTRUN while everything from 5.0 up reads
+    ARRESTED. Filling the gap (4.25/4.5/4.75 deg, ADDED below) does not
+    resolve this as a sweep-resolution artifact -- it confirms a real
+    inversion: 4.0 deg OUTRUN, 4.5-9.0 deg ARRESTED, i.e. arrested occupies
+    the HIGH end of this sub-range and outrun the LOW end, backwards from
+    the relationship `max(arrested) < min(outrun)` encodes (arrested-low,
+    outrun-high, matching the original "arrests up to 6.5 deg, outrun at
+    7.0" story). Sampling further out (not swept by this test, checked ad
+    hoc): braking does not even engage below ~4 deg within the 18.5 s
+    schedule (the corridor is never reached), and ABOVE this test's own
+    range the pattern is worse, not better -- 10/12/15 deg arrest, 20 deg
+    OUTRUN, 25 deg arrests again, 30 deg OUTRUN. The single-angle "steepest
+    sustained downgrade the board can arrest itself on" this test is named
+    for does not appear to exist as a clean threshold at this envelope; this
+    is exactly the case the test's own assertion message calls out --
+    reported here rather than forced to pass by picking a sub-range.
     """
     print("\nrolling downhill under the host's own full braking:")
     print(f"{'incline':>8} {'v at end':>9} {'trend':>8}  verdict")
     arrested, outrun = [], []
-    for phi in (4.0, 5.0, 5.5, 6.0, 6.5, 7.0, 8.0, 9.0):
+    for phi in (4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 8.0, 9.0):
         rows = _released(tmp_path, f"brake{phi}", phi)
         braking = [r for r in rows if r["applied_fore_aft"] != 0.0]
         assert braking, f"at {phi} deg the corridor brake never engaged"

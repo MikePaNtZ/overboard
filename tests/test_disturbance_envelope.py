@@ -105,22 +105,28 @@ def test_recovery_boundary_has_large_margin_over_the_nominal_impulse(model):
     gains change, the same convention `NOMINAL_IMPULSE_NS` and
     `EXPECTED_STRIKE_ANGLE_DEG` already use.
 
-    **Re-baselined for issue: realistic-motor-torque (`MAX_CURRENT_A` 40 -> 60
-    A / 28 -> 42 N*m) -- `RustController()`'s default moved with it
-    (`rust_controller.py::DEFAULT_MAX_CURRENT_A`), and the disturbance-
-    rejection envelope genuinely widened: 280/260 N*s (first failure/recovery
-    boundary at 40 A) become 320/300 N*s at 60 A.** Re-swept to 400 N*s to
-    confirm 320 is a real first failure and not an artifact of the sweep's
-    old top -- 340 N*s survives again (the pre-existing non-monotonic
-    knife's-edge `test_recovery_boundary_ignores_a_later_reversion_to_
-    survival` exists for), so 320 stands as measured.
+    **RE-MEASURED again this session against the frozen plant (drag: the
+    derived three-term model, on top of the `realistic-motor-torque` 60 A /
+    42 N*m envelope this docstring previously cited).** Was 320/300 N*s
+    (first failure/recovery boundary) as of that prior re-baseline; now
+    measures 260/240 N*s -- the drag model's own settlement moved the
+    envelope back down, even though the current envelope did not change
+    again. Extended the sweep to 480 N*s to check this was not a sweep-top
+    artifact: it is not, but the region above 260 N*s is NOT a clean
+    monotonic wall -- 280 and 320-340 strike, 300 survives again, and the
+    pattern gets noisier out to 480. `first_failure_ns`/`recovery_boundary_ns`
+    correctly ignore that later reversion (see
+    `test_recovery_boundary_ignores_a_later_reversion_to_survival`), and 260
+    is reinforced by 280 also striking immediately above it, so 260 stands as
+    the measured boundary rather than an isolated blip.
 
-    300 N*s is 15x `NOMINAL_IMPULSE_NS` (20 N*s), which is itself already
+    240 N*s is 12x `NOMINAL_IMPULSE_NS` (20 N*s), which is itself already
     ~60% clear of the open-loop topple threshold -- so the closed-loop
-    controller carries a large, now-measured margin rather than an assumed
-    one.
+    controller still carries a large, now-measured margin, smaller than the
+    prior re-baseline's but well above the `> 10x` floor this test also
+    asserts.
     """
     result = sweep_closed_loop(model, RustController, SWEEP_MAGNITUDES_NS)
-    assert result.first_failure_ns == 320.0
-    assert result.recovery_boundary_ns == 300.0
+    assert result.first_failure_ns == 260.0
+    assert result.recovery_boundary_ns == 240.0
     assert result.recovery_boundary_ns > 10 * NOMINAL_IMPULSE_NS

@@ -30,6 +30,27 @@ disclosure this audit exists to require, and re-deriving tighter margins is
 tuning work outside AC5's scope (an audit, not a re-tune). Recorded here so a
 future tightening pass has today's actual numbers to start from instead of
 re-measuring blind.
+
+`test_it_holds_station_during_the_pauses` and `test_the_pitch_reference_
+stays_off_its_clamp` are LEFT FAILING, NOT RE-PINNED, against the frozen
+plant (drag: the derived three-term model; `MAX_CURRENT_A` 40 -> 60 A)
+------------------------------------------------------------------------
+`max_hold_drift_m` moved from 0.198 m to 1.724 m -- not a proportional drift
+but a qualitative change. Plotting position during the "hold-out" pause
+shows the board overshoots the +2.0 m target to a peak of ~3.46 m, then
+swings all the way back down through the target to ~0.99 m before the next
+leg starts pulling it further -- a single slow, large, lightly-damped
+oscillation across the ~4 s hold window, not station-keeping creep. All
+three hold windows in the route show the same pattern (drift 0.96-1.73 m).
+`peak_abs_pitch_ref_deg` (4.98 vs the 4.5 deg bound, 3.467 deg previously
+observed) is the smaller of the two failures in absolute terms but is the
+same finding: the pitch reference has to swing further to drive that larger
+position overshoot. This reads as the outer velocity/position loop -- tuned
+against the 40 A plant -- now underdamped at 60 A, not as either bound
+having been loosely chosen (which the table above already discloses for
+other reasons). Left failing and reported rather than re-pinned, since
+raising `max_hold_drift_m` by 8.7x would hide a real outer-loop damping
+regression rather than record a measurement.
 """
 
 import pytest
@@ -103,7 +124,12 @@ def test_it_returns_to_home(result):
 
 def test_it_holds_station_during_the_pauses(result):
     """Measured over the settled half of each pause, so this is creep rather
-    than the tail of the previous leg's deceleration."""
+    than the tail of the previous leg's deceleration.
+
+    NOT RE-PINNED against the frozen plant -- left failing as a genuine
+    finding. See the file docstring's dedicated section: this is now a large,
+    slow position oscillation across the hold window, not creep.
+    """
     assert result.metrics.max_hold_drift_m < 0.40
 
 
@@ -117,7 +143,12 @@ def test_it_never_strikes_and_never_saturates(result):
 def test_the_pitch_reference_stays_off_its_clamp(result):
     """A reference pinned at the clamp is the signature of an outer loop that
     has run out of authority — how E05's divergence on the driverless board
-    announced itself. On the ridden plant it should have room to spare."""
+    announced itself. On the ridden plant it should have room to spare.
+
+    NOT RE-PINNED against the frozen plant -- left failing as a genuine
+    finding, the same one as `test_it_holds_station_during_the_pauses`. See
+    the file docstring's dedicated section.
+    """
     assert result.metrics.peak_abs_pitch_ref_deg < 4.5
 
 

@@ -192,12 +192,22 @@ def test_estimator_error_is_worse_while_accelerating(ridden):
 
     If the error ever stops correlating with acceleration, the cause has
     changed and the planned fix may no longer be the right one.
+
+    RE-MEASURED against the frozen plant (drag: the derived three-term
+    model; `MAX_CURRENT_A` 40 -> 60 A; `Kt` 0.7 -> 0.6284 N*m/A): was
+    `quiet < 0.5 * disturbed` (old absolute quiet/disturbed figures not
+    recorded in this file). Now measures quiet 0.098 deg / disturbed
+    0.182 deg, ratio ~0.539 -- just over the old 0.5 bound. The correlation
+    this test exists to check (error is worse while accelerating) still
+    holds -- quiet is still clearly the smaller of the two -- just with a
+    narrower gap than the old bound allowed for. Re-pinned to `< 0.6`, just
+    above the measured ratio.
     """
     # A genuinely undisturbed run, not a short window -- a 3 s run still
     # contains the impulse at t = 0.5 s and is not quiet at all.
     quiet = _run(ridden, SHADOW, impulse=0.0)
     disturbed = _run(ridden, SHADOW, impulse=NOMINAL_IMPULSE_NS)
-    assert quiet.metrics.pitch_est_rms_deg < 0.5 * disturbed.metrics.pitch_est_rms_deg, (
+    assert quiet.metrics.pitch_est_rms_deg < 0.6 * disturbed.metrics.pitch_est_rms_deg, (
         f"quiet {quiet.metrics.pitch_est_rms_deg:.2f} deg vs "
         f"disturbed {disturbed.metrics.pitch_est_rms_deg:.2f} deg -- if these are "
         "close, acceleration is no longer the dominant error source and the "
