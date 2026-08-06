@@ -187,12 +187,14 @@ IDEAL = ImperfectionProfile(profile_id="ideal-v1")
 #:   gyro bias         0.002 rad/s  a small fixed offset, un-calibrated
 #:   wheel quantum     0.007 rad/s  1 ERPM = 6.98e-3 rad/s (ICD §10.5)
 #:   wheel update      500 Hz       the STATUS rate (ICD §11.2)
-#:   current cap       60 A         the envelope limit (FLAG: Sr. Mechanical
-#:                                  & Systems owns whether 60 A / 42 N*m is
-#:                                  defensible against the real drive; raised
-#:                                  here only for consistency with the rest of
-#:                                  the sweep, see `crates/sim-host/src/host.rs`
-#:                                  `MAX_CURRENT_A`)
+#:   current cap       60 A         the envelope limit -- RESOLVED (issue:
+#:                                  real-motor-constants): 60 A * derived
+#:                                  KT_NM_PER_A (0.6284) = 37.704 N*m, which
+#:                                  lands almost exactly on the Pint's
+#:                                  measured-braking anchor of 37.8 N*m -- see
+#:                                  `crates/sim-host/src/host.rs`
+#:                                  `MAX_CURRENT_A`'s own doc comment for the
+#:                                  full derivation
 STAGE0_PLACEHOLDER = ImperfectionProfile(
     profile_id="stage0-placeholder-v1",
     actuation_delay_s=0.001,
@@ -226,13 +228,13 @@ STAGE0_PLACEHOLDER = ImperfectionProfile(
 #:   floor  0.35      → 21 A of the 60 A cap still available
 #:
 #: **Sr. Mechanical & Systems owns whether these match the real drive.** They
-#: are shaped to be defensible, not measured. That includes `max_current_a`
-#: itself: raised 40 -> 60 A here only to stay consistent with
-#: `crates/sim-host/src/host.rs`'s `MAX_CURRENT_A` (issue: realistic-motor-
-#: torque) -- NOT a claim that the cutback breakpoints above are still
-#: defensible at the new ceiling, which is exactly the kind of question this
-#: profile's ownership note exists to route to Sr. Mechanical rather than to
-#: decide unilaterally here.
+#: are shaped to be defensible, not measured. `max_current_a` itself now IS
+#: measured, not merely kept consistent: 60 A is cross-checked against real
+#: Onewheel braking data (issue: real-motor-constants; see
+#: `crates/sim-host/src/host.rs`'s `MAX_CURRENT_A` doc comment) -- NOT a claim
+#: that the cutback breakpoints above are still defensible at that ceiling,
+#: which is exactly the kind of question this profile's ownership note exists
+#: to route to Sr. Mechanical rather than to decide unilaterally here.
 STAGE0_CUTBACK = ImperfectionProfile(
     profile_id="stage0-cutback-v1",
     actuation_delay_s=0.001,

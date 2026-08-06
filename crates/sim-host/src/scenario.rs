@@ -99,13 +99,16 @@ pub const SCURVE4_BUILD_S: f64 = 15.0;
 ///
 /// **This is the constant issue #190 is about.** Held for 15 s and actually
 /// delivered, full stick was past what the 40 A / 28 N*m actuator envelope
-/// could hold the frame against once the board was up to speed --
-/// **NO LONGER TRUE at the 60 A / 42 N*m envelope (issue:
-/// realistic-motor-torque)**: on the deployed estimator path this same
-/// schedule now survives the full build with peak pitch around 10-11 deg;
-/// see `host.rs`'s `CMD_ENVELOPE_RESERVE` doc comment for the measurement.
-/// The truth-fed reading of issue #190/ADR-0011 criterion (f) still
-/// eventually flips, just later.
+/// could hold the frame against once the board was up to speed. This was
+/// reported as **NO LONGER TRUE at the 60 A / 42 N*m envelope (issue:
+/// realistic-motor-torque)**, with the deployed estimator path surviving
+/// the full build at peak pitch around 10-11 deg -- **that reading pre-dates
+/// `KT_NM_PER_A`'s correction to 0.6284 (issue: real-motor-constants), which
+/// moves the envelope to 60 A / 37.704 N*m and has not been re-run against
+/// this scenario**; see `host.rs`'s `CMD_ENVELOPE_RESERVE` doc comment for
+/// the current measurement this file's own reserve constants rest on. The
+/// truth-fed reading of issue #190/ADR-0011 criterion (f) still eventually
+/// flips, just later.
 pub const SCURVE4_BUILD_LEAN: f32 = 1.0;
 /// Zero: any sustained in-weave trim keeps adding speed rather than holding
 /// it, more so at higher entry speed (Revision 2's finding).

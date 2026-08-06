@@ -79,7 +79,14 @@ const FORCE_N: [f64; 3] = [-(NOMINAL_IMPULSE_NS / DURATION_S), 0.0, 0.0];
 // `Command::MotorCurrent` is built, mirroring `control-ffi`'s boundary.
 const KP_NM_PER_RAD: f32 = 56.0;
 const KD_NM_PER_RAD_S: f32 = 7.7;
-const KT_NM_PER_A: f32 = 0.7;
+// DERIVED (issue: real-motor-constants), mirroring
+// sim/scenarios/rust_controller.py::DEFAULT_KT_NM_PER_A / plant.py's own
+// KT_NM_PER_A: the Onewheel Hypercore hub motor's VESC-detected flux
+// linkage/pole count give Kt = 1.5 * 15 * 0.02793 = 0.6284 N*m/A. See
+// plant.py::KT_NM_PER_A for the full derivation and the independent
+// measured-braking cross-check. Replaces the previous unfitted placeholder
+// of 0.7 the paragraph above still describes historically.
+const KT_NM_PER_A: f32 = 0.6284;
 const MAX_CURRENT_A: f32 = 60.0;
 const ESTIMATOR_TAU_S: f32 = 1.0;
 /// `RustController()`'s own default (`sim/scenarios/rust_controller.py`,

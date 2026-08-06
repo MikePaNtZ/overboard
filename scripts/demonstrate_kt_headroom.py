@@ -9,7 +9,9 @@ converting a torque command to the amps the drive accepts.
 
 **Deliberately NOT run against the MuJoCo plant.** The plant has its own
 fixed, real `kt` (`sim/scenarios/plant.py::KT_NM_PER_A`, out of scope for this
-issue -- it stays 0.7). Sweeping the CONTROLLER's assumed `kt` against a plant
+issue -- it is 0.6284, derived from the Onewheel Hypercore hub motor as of
+issue: real-motor-constants; was 0.7 when this script's demonstration was
+written). Sweeping the CONTROLLER's assumed `kt` against a plant
 whose real `kt` does not move demonstrates a *model-mismatch* effect (a real
 and separate concern), not the property this issue's law change buys. To
 isolate that property cleanly, this script drives `control_core::PitchRegulator`

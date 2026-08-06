@@ -127,7 +127,12 @@ def _rust_constant(name: str) -> float:
 #: are therefore always labelled against whichever envelope the compiled
 #: `target/release/sim-host` actually is, at either campaign ceiling.
 MAX_CURRENT_A = _rust_constant("MAX_CURRENT_A")
-KT_NM_PER_A = 0.7
+#: READ LIVE too (issue: real-motor-constants) -- same reasoning as
+#: `MAX_CURRENT_A` just above: a copied literal would silently mislabel this
+#: file's headroom numbers the moment `KT_NM_PER_A` moves in `host.rs`
+#: without moving here, exactly the failure mode `_rust_constant`'s own doc
+#: comment describes for `MAX_CURRENT_A`.
+KT_NM_PER_A = _rust_constant("KT_NM_PER_A")
 KP_NM_PER_RAD = 140.0
 PITCH_CEILING_DEG = math.degrees(MAX_CURRENT_A * KT_NM_PER_A / KP_NM_PER_RAD)
 

@@ -108,7 +108,11 @@ INVERTED_DEG = 90.0
 #: `CMD_ENVELOPE_RESERVE` (now saturated at 1.00) and on this file's own
 #: numbers, which this docstring's braking-vs-envelope comparisons predate.
 MAX_CURRENT_A = 60.0
-KT_NM_PER_A = 0.7
+#: DERIVED (issue: real-motor-constants) -- see `host.rs`'s own `KT_NM_PER_A`
+#: doc comment for the Hypercore hub motor derivation. Was 0.7 (unfitted
+#: placeholder) when this file's braking-vs-envelope narrative above was
+#: written; that narrative predates this correction too.
+KT_NM_PER_A = 0.6284
 KP_NM_PER_RAD = 140.0
 PITCH_CEILING_DEG = math.degrees(MAX_CURRENT_A * KT_NM_PER_A / KP_NM_PER_RAD)
 

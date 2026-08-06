@@ -166,17 +166,47 @@ fn rider_model_path() -> PathBuf {
 // precedent for THIS plant's mass/inertia, not for the outer loop's absence.
 const KP_NM_PER_RAD: f32 = 140.0;
 const KD_NM_PER_RAD_S: f32 = 21.0;
-const KT_NM_PER_A: f32 = 0.7;
+/// Motor torque constant, N*m per amp -- DERIVED (issue: real-motor-
+/// constants), not fitted or guessed. Real Onewheels (Pint/XR/GT) share the
+/// "Hypercore" hub motor; VESC FOC detection on that motor measures flux
+/// linkage lambda = 27.93 mWb and pole pairs p = 15 (30 poles). For a PMSM,
+/// `Kt = 1.5 * p * lambda`:
+///     Kt = 1.5 * 15 * 0.02793 = 0.6284 N*m/A
+/// Corroborated independently from measured stopping distances (82.5 kg
+/// rider+board, r = 0.1454 m): Pint 3.15 m/s^2 -> 260 N -> 37.8 N*m implies
+/// 60.1 A of MOTOR current at this Kt; GT 3.37 m/s^2 -> 278 N -> 40.4 N*m
+/// implies 64.3 A -- both landing in the same ~60-64 A band [`MAX_CURRENT_A`]
+/// derives from, a second measurement agreeing with the FOC-detected value
+/// rather than a fit to either. See `sim/scenarios/plant.py::KT_NM_PER_A` for
+/// the full derivation. Replaces the previous unfitted placeholder of 0.7,
+/// which this derivation shows was 11.4% optimistic.
+const KT_NM_PER_A: f32 = 0.6284;
+/// Envelope clamp on commanded current, amps.
+///
+/// **RE-DERIVED (issue: real-motor-constants), not a chosen number.** At
+/// `KT_NM_PER_A` = 0.6284, 60 A gives `tau_max` = 60 * 0.6284 = 37.704 N*m,
+/// which lands almost exactly on the measured-braking anchor of 37.8 N*m
+/// (Pint's implied torque -- see [`KT_NM_PER_A`]'s own doc comment): 37.704
+/// is 0.25% below it. 60 A is therefore the value the evidence itself
+/// points at, not merely the value this constant already carried -- it
+/// previously moved 40 -> 60 A on an "Onewheel-XR-class peak" annotation
+/// that was banked without validation (issue: realistic-motor-torque); this
+/// derivation is the validation that annotation never got, and it happens
+/// to confirm the same number.
 const MAX_CURRENT_A: f32 = 60.0;
 const ESTIMATOR_TAU_S: f32 = 2.0;
 /// Command-feedforward gain, m/s^2 per amp. `control_ffi::ob_controller_new`'s
-/// own hardcoded fallback for `kt` 0.7 N*m/A / (`r_eff` 0.1454 m * 82.5 kg
-/// total ridden mass) -- 8 kg frame + 4.5 kg wheel + 0.5 kg ballast carrier +
-/// 70 kg rider = 82.5 kg, matching `overboard_rider.xml` exactly.
-/// `shuttle_run.py`'s tuned controller relies on this same FFI fallback
-/// rather than passing its own gain, so this host does too, duplicated here
-/// because this host does not link `control-ffi`.
-const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
+/// own hardcoded fallback for `kt` 0.6284 N*m/A (DERIVED, issue:
+/// real-motor-constants -- see `KT_NM_PER_A`'s own doc comment; was 0.7 N*m/A
+/// when this constant was first derived) / (`r_eff` 0.1454 m * 82.5 kg total
+/// ridden mass) -- 8 kg frame + 4.5 kg wheel + 0.5 kg ballast carrier + 70 kg
+/// rider = 82.5 kg, matching `overboard_rider.xml` exactly:
+///     0.6284 / (0.1454 * 82.5) = 0.0524
+/// Re-derived from the corrected kt, not left at the value the old kt
+/// produced -- `shuttle_run.py`'s tuned controller relies on this same FFI
+/// fallback rather than passing its own gain, so this host does too,
+/// duplicated here because this host does not link `control-ffi`.
+const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0524;
 
 /// `weight_shift_fore_aft` / `weight_shift_lateral`, both clamped to
 /// `[-1, 1]` on the wire, map linearly onto this range -- the SAME +/-0.05 m
@@ -351,34 +381,40 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// stated disturbance reserve*:
 ///
 /// 1. **Measured** -- peak fore/aft current demand at
-///    [`PEAK_DEMAND_A_PER_UNIT_STICK`] = **44.68 A per unit**, re-measured on
-///    the COMBINED drag+60A model for the 40-vs-60 A campaign (issue:
-///    campaign-40-vs-60); see that constant's own doc comment for the method
-///    and for why "linear in stick" is now an approximation rather than a
-///    near-exact fit -- measured IDENTICALLY at MAX_CURRENT_A 40 and 60,
-///    confirming it is a property of the plant/control law, not of the
-///    envelope it is compared against. Full stick therefore demands ~44.7 A
-///    against a **60 A** envelope: **the present map no longer over-commands
-///    the actuator at all** -- the opposite of the 40 A finding this whole
-///    mechanism was built to answer, and the opposite of what the corrected
-///    drag model does at the 40 A envelope (see [`PEAK_DEMAND_A_PER_UNIT_
-///    STICK`]: 44.68/40 = 112%, a 12% over-command).
+///    [`PEAK_DEMAND_A_PER_UNIT_STICK`] = **49.79 A per unit**, re-measured
+///    for `KT_NM_PER_A`'s correction to a derived 0.6284 (issue:
+///    real-motor-constants; supersedes the 44.68 A/unit figure taken at the
+///    unfitted kt=0.7); see that constant's own doc comment for the method,
+///    for why this DOES scale cleanly as `1/kt` (unlike an earlier
+///    measurement taken before `ACCEL_FF_GAIN_M_S2_PER_A` was re-derived
+///    alongside it), and for why "linear in stick" is an approximation
+///    rather than a near-exact fit. Full stick therefore demands ~49.8 A
+///    against a **60 A** envelope: **the present map still does not
+///    over-command the actuator** -- less margin than the 44.68 A/unit
+///    figure gave (83.0% utilisation vs 74.5%), but not over the line, and
+///    the opposite of the 40 A finding this whole mechanism was built to
+///    answer (see [`PEAK_DEMAND_A_PER_UNIT_STICK`]: 49.79/40 = 124.5%, an
+///    over-command).
 /// 2. **Stated reserve** -- hold peak demand to
 ///    [`STATED_ENVELOPE_RESERVE_FRACTION`] = 84% of [`MAX_CURRENT_A`], a
 ///    policy input rather than a measurement, and labelled as one.
-/// 3. **Derived:** `0.84 * 60 A / 44.68 A per unit = 1.128`, which is **out of
+/// 3. **Derived:** `0.84 * 60 A / 49.79 A per unit = 1.012`, which is **out of
 ///    the domain a shaping fraction can sensibly occupy** -- multiplying the
 ///    stick by more than 1.0 would command MORE than full stick, which is not
 ///    a reserve, it is amplification. [`CMD_ENVELOPE_RESERVE`] therefore
 ///    SATURATES at its domain ceiling, **1.00 -- i.e. no shaping at all.**
-///    This is a finding, not a tuning choice: at 42 N*m, ADR-0011's founding
+///    This is a finding, not a tuning choice: at 37.704 N*m, ADR-0011's founding
 ///    premise (full stick over-commands the actuator) is gone, so the
-///    mechanism this constant drives degenerates to a no-op. At the 40 A
-///    envelope the same arithmetic gives `0.84 * 40 / 44.68 = 0.752` --
-///    ADR-0011's third ratification's own figure, independently reproduced
-///    here -- so at 40 A the mechanism is NOT a no-op and would need to ship
-///    at 0.75, not the previously-shipped 0.80, if 40 A were the shipped
-///    envelope. Pinned as
+///    mechanism this constant drives degenerates to a no-op -- **only just:
+///    the real, lower kt pushed the raw figure to within 1.2% of 1.0 (down
+///    from the old kt=0.7 belief's 1.128), close enough that a slightly
+///    higher `PEAK_DEMAND_A_PER_UNIT_STICK` measurement would flip this
+///    mechanism back to actually shaping something.** At the 40 A
+///    envelope the same arithmetic gives `0.84 * 40 / 49.79 = 0.675` --
+///    lower than ADR-0011's third ratification's 0.752 figure (which was
+///    taken at kt=0.7) -- so at 40 A the mechanism is NOT a no-op and would
+///    need to ship at 0.67, not the previously-shipped 0.80, if 40 A were the
+///    shipped envelope. Pinned as
 ///    executable arithmetic (including the clamp) by
 ///    `the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_
 ///    measured_slope`, not merely written down here. **Whether the reserve
@@ -465,16 +501,23 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// read, and they will turn red the day somebody fixes the underlying
 /// problem, which is the only way a known failure stays known.
 ///
-/// # SATURATED AT 1.00 as of issue: realistic-motor-torque (60 A / 42 N*m)
+/// # SATURATED AT 1.00 -- issue: realistic-motor-torque (60 A / 42 N*m under
+/// the old kt=0.7), re-derived and STILL SATURATED under issue:
+/// real-motor-constants (60 A / 37.704 N*m at the corrected kt=0.6284)
 ///
 /// **This is the shipped value, not a target.** Step 3 of the derivation
-/// above computes 1.20 from the measured slope -- above 1.0, which is not a
+/// above computes 1.012 from the measured slope -- above 1.0, which is not a
 /// valid shaping fraction (it would command more than full stick). The
 /// constant clamps to the domain ceiling instead, which arithmetically means
 /// **no shaping at all**: `full_stick_over_commands_the_envelope_...`'s own
-/// premise (that unshaped demand exceeds the envelope) is now FALSE and that
-/// test is written to say so rather than to hide it. Every "what it buys"
-/// number above this note is therefore a description of the OLD (40 A)
+/// premise (that unshaped demand exceeds the envelope) is still FALSE and
+/// that test is written to say so rather than to hide it. The margin over
+/// 1.0 shrank with the real, lower kt (1.012 vs the old belief's 1.128), which
+/// is the direction the CEO's directive predicted -- less torque authority
+/// means less margin, even where the conclusion does not flip -- and it is
+/// now thin enough (1.2% above the clamp) that this conclusion should be
+/// treated as fragile, not settled. Every "what it
+/// buys" number above this note is therefore a description of the OLD (40 A)
 /// mechanism, not of what ships now -- read the note on that section.
 const CMD_ENVELOPE_RESERVE: f32 = 1.00;
 
@@ -571,8 +614,8 @@ const BRAKING_RESERVE_MIN_SPEED_M_S: f32 = 0.25;
 ///
 /// **The THIRD bound this block used to enforce -- `BRAKING >
 /// CMD_ENVELOPE_RESERVE`, "braking must have more authority than
-/// accelerating" -- is REMOVED, not relaxed to pass.** At the 60 A / 42 N*m
-/// envelope [`CMD_ENVELOPE_RESERVE`] saturates at its domain ceiling, 1.00,
+/// accelerating" -- is REMOVED, not relaxed to pass.** At the 60 A / 37.704
+/// N*m envelope [`CMD_ENVELOPE_RESERVE`] saturates at its domain ceiling, 1.00,
 /// so no value of `CMD_ENVELOPE_RESERVE_BRAKING` below 1.0 can satisfy it;
 /// enforcing it here would force this constant to 1.0 as a side effect of a
 /// compiler check, which is exactly the "tune it to make the build pass"
@@ -599,44 +642,55 @@ const _: () = {
 /// see `the_command_envelope_reserve_is_the_stated_reserve_divided_by_the_
 /// measured_slope`.
 ///
-/// **Re-measured for the 40-vs-60 A campaign (issue: campaign-40-vs-60), on
-/// the COMBINED model** -- the corrected `Crr`/aero drag model
-/// (issue: drag-model, drag-derivation-lock) plus `MAX_CURRENT_A` 40 -> 60 A.
-/// Neither the 42.00 A/unit figure inherited from realistic-motor-torque nor
-/// the 42.03/41.97 A/unit figures ADR-0011 quotes pre-date the corrected drag
-/// model and neither was trusted -- both are superseded per ADR-0011's third
-/// ratification.
+/// **Re-measured for `KT_NM_PER_A`'s correction to a derived 0.6284 (issue:
+/// real-motor-constants)** -- the previous 44.68 A/unit figure (40-vs-60 A
+/// campaign, issue: campaign-40-vs-60) was taken at the unfitted kt=0.7
+/// placeholder. Amps demanded for a given torque scale as `1/kt`, so a lower
+/// kt raises this slope even though nothing about `KP_NM_PER_RAD`,
+/// `KD_NM_PER_RAD_S` or the plant's dynamics changed: `44.68 * 0.7 / 0.6284`
+/// predicts ≈49.77 A/unit.
+///
+/// **The first re-measurement did NOT match that prediction (46.61 A/unit),
+/// and the gap was a second missed propagation, not a genuine non-linearity:
+/// [`ACCEL_FF_GAIN_M_S2_PER_A`] is ALSO derived from `KT_NM_PER_A` (`kt /
+/// (r_eff * mass)`) and was still carrying its old value (0.0584, derived
+/// from kt=0.7) when that measurement was taken.** A mismatched accel-aiding
+/// gain feeds the estimator a systematically wrong acceleration correction,
+/// which changes the closed-loop transient and hence this slope -- an
+/// artifact of an inconsistent build, not a property of the real motor.
+/// Once `ACCEL_FF_GAIN_M_S2_PER_A` was corrected to 0.0524 (the value
+/// consistent with the SAME kt), re-measuring gave 49.79 A/unit -- matching
+/// the `1/kt` prediction to within 0.04%, which is the confirmation that the
+/// slope IS just amps-per-torque scaling once every kt-derived constant
+/// agrees, not a new non-linearity.
 ///
 /// Four runs of `--scripted-scenario full-stick --pitch-source estimator` at
 /// stick fractions 0.30/0.50/0.70/0.90 (the same points
 /// `tests/test_cmd_envelope_reserve.py::test_peak_current_demand_is_linear_
 /// in_stick_at_the_documented_slope` checks), peak `|proposed_amps|` taken
-/// PRE-envelope; least squares through the origin gives **44.68 A/unit**,
-/// measured IDENTICALLY (44.6846 A/unit to 4 significant figures) on a build
-/// with `MAX_CURRENT_A` set to 40 and to 60 -- confirming this slope does not
-/// depend on the envelope it is compared against, only on the plant and the
-/// control law, neither of which the drag fix touched.
+/// PRE-envelope; least squares through the origin gives **49.79 A/unit**.
 ///
-/// **The per-point ratio is no longer flat.** Where the old viscous-only drag
-/// model gave a near-perfect line through the origin (R^2 = 0.999, ratio
-/// 41.6-43.5 A/unit across the whole swept range), the corrected model's
-/// constant `Crr` (Coulomb) term is a fixed offset independent of stick, so
-/// it dominates proportionally more at small stick: measured ratios run from
-/// ~77 A/unit at 0.20 stick down to ~41 A/unit at 0.95 stick (9-point sweep,
-/// campaign measurement, not committed as a test). The least-squares-through-
-/// origin fit is therefore no longer a description of a genuinely linear
-/// relationship -- it is the specific 4-point convention this repo's own test
-/// already uses, kept for continuity with that test and because the constant
-/// this feeds is used at FULL stick, where the local ratio (~41 A/unit) is
-/// close to the global fit (44.68 A/unit) anyway. A reader re-deriving this
-/// from scratch should not assume linearity holds away from that region.
+/// **The per-point ratio is not flat.** The corrected drag model's constant
+/// `Crr` (Coulomb) term is a fixed offset independent of stick, so it
+/// dominates proportionally more at small stick than at large -- see the
+/// 44.68 A/unit measurement's own note on this (superseded by the figure
+/// above, but the shape of the non-linearity is unchanged). The least-
+/// squares-through-origin fit is therefore not a description of a genuinely
+/// linear relationship -- it is the specific 4-point convention this repo's
+/// own test already uses, kept for continuity with that test and because the
+/// constant this feeds is used at FULL stick, where the local ratio is
+/// closest to this global fit. A reader re-deriving this from scratch should
+/// not assume linearity holds away from that region.
 ///
-/// This slope is the control law's raw, PRE-clamp response to the stick -- a
-/// property of `KP_NM_PER_RAD`, `KD_NM_PER_RAD_S` and the plant -- so raising
-/// `MAX_CURRENT_A` alone does not move it, confirmed above rather than
-/// asserted. What DOES move is what that slope means relative to the
-/// envelope: at 40 A, full stick's ~44.68 A demand over-commands the actuator
-/// by 12%; at 60 A it does not, at all. See [`CMD_ENVELOPE_RESERVE`].
+/// This slope IS sensitive to `KT_NM_PER_A` (via the `1/kt` amps-per-torque
+/// relationship above, AND via `ACCEL_FF_GAIN_M_S2_PER_A`'s own dependence on
+/// it), unlike the 44.68 A/unit measurement's own claim that raising
+/// `MAX_CURRENT_A` alone does not move it -- that claim is still true (this
+/// slope is pre-clamp and does not depend on the envelope it is compared
+/// against), but it does not extend to kt, which enters the amps conversion
+/// directly. What DOES move as a result: at the derived kt, full stick's
+/// ~49.8 A demand is 83.0% of the 60 A envelope; at 40 A it would be 124.5%,
+/// an over-command. See [`CMD_ENVELOPE_RESERVE`].
 ///
 /// Measured on the ESTIMATOR path deliberately, even though ADR-0011
 /// criterion (f) runs acceptance against MuJoCo truth. A command map is a
@@ -645,7 +699,7 @@ const _: () = {
 /// to take a peak demand FROM (see the criterion (f) results in
 /// `tests/test_cmd_envelope_reserve.py`), so the slope is not measurable
 /// there at all.
-const PEAK_DEMAND_A_PER_UNIT_STICK: f32 = 44.68;
+const PEAK_DEMAND_A_PER_UNIT_STICK: f32 = 49.79;
 
 /// The stated disturbance reserve [`CMD_ENVELOPE_RESERVE`] is derived
 /// against: peak fore/aft demand is held to this fraction of
@@ -675,7 +729,7 @@ const STATED_ENVELOPE_RESERVE_FRACTION: f32 = 0.84;
 /// which is the point -- ADR-0011 forbids moving the constant to make a
 /// scenario pass, and a rule enforced at compile time cannot be forgotten by
 /// a session that never read the ADR. The clamp does not weaken that: it is
-/// exercised right now (60 A against 44.68 A/unit gives a raw 1.128), it is a fixed
+/// exercised right now (60 A against 49.79 A/unit gives a raw 1.012), it is a fixed
 /// domain bound rather than a per-session escape hatch, and it is itself
 /// pinned by `the_command_envelope_reserve_is_the_stated_reserve_divided_by_
 /// the_measured_slope`.
@@ -2395,9 +2449,9 @@ mod tests {
         let raw = STATED_ENVELOPE_RESERVE_FRACTION * MAX_CURRENT_A / PEAK_DEMAND_A_PER_UNIT_STICK;
         // Clamped to 1.00: a shaping fraction above 1.0 would command MORE
         // than full stick, which is not a smaller reserve, it is
-        // amplification. At the 60 A / 42 N*m envelope the raw formula gives
-        // 1.20 -- see CMD_ENVELOPE_RESERVE's own doc comment for why that is
-        // itself the finding, not a bug in this clamp.
+        // amplification. At the 60 A / 37.704 N*m envelope the raw formula
+        // gives 1.012 -- see CMD_ENVELOPE_RESERVE's own doc comment for why
+        // that is itself the finding, not a bug in this clamp.
         let derived = if raw > 1.0 { 1.0 } else { raw };
         assert!(
             (CMD_ENVELOPE_RESERVE - derived).abs() <= 0.005,
@@ -2411,15 +2465,19 @@ mod tests {
     }
 
     /// **INVERTED as of the 60 A / 42 N*m envelope (issue:
-    /// realistic-motor-torque) -- read before assuming this still says what
-    /// its name implies.** The defect this constant used to document, stated
-    /// as arithmetic: at full stick the UNSHAPED command map asked for more
-    /// current than the 40 A actuator had. At 60 A it no longer does --
-    /// `unshaped` below is now LESS than `MAX_CURRENT_A`, not more. This test
-    /// asserts the CURRENT state (no over-command) rather than being deleted
-    /// or quietly inverted, per this codebase's convention of pinning a
-    /// changed finding rather than erasing the evidence it changed. See
-    /// `CMD_ENVELOPE_RESERVE`'s doc comment for what this means for ADR-0011.
+    /// realistic-motor-torque), STILL INVERTED at 60 A / 37.704 N*m under the
+    /// corrected kt (issue: real-motor-constants) -- read before assuming
+    /// this still says what its name implies.** The defect this constant
+    /// used to document, stated as arithmetic: at full stick the UNSHAPED
+    /// command map asked for more current than the 40 A actuator had. At
+    /// 60 A it still does not, even with the real, lower kt costing headroom
+    /// (49.79 A/unit measured demand vs a 60 A envelope, not the 44.68 A/unit
+    /// figure taken at the old kt=0.7) -- `unshaped` below is LESS than
+    /// `MAX_CURRENT_A`, not more. This test asserts the CURRENT state (no
+    /// over-command) rather than being deleted or quietly inverted, per this
+    /// codebase's convention of pinning a changed finding rather than erasing
+    /// the evidence it changed. See `CMD_ENVELOPE_RESERVE`'s doc comment for
+    /// what this means for ADR-0011.
     #[test]
     fn full_stick_no_longer_over_commands_the_envelope_at_the_60a_ceiling() {
         let unshaped = shape_fore_aft_command(1.0, 1.0) * PEAK_DEMAND_A_PER_UNIT_STICK;
@@ -2427,8 +2485,8 @@ mod tests {
             unshaped < MAX_CURRENT_A,
             "ADR-0011's founding premise (full stick over-commands the actuator) was \
              re-derived to be false at this envelope, but the measured demand \
-             ({unshaped} A) no longer supports even that -- re-check the 60 A / 42 N*m \
-             re-derivation if this fires"
+             ({unshaped} A) no longer supports even that -- re-check the 60 A / 37.704 \
+             N*m re-derivation if this fires"
         );
 
         // With CMD_ENVELOPE_RESERVE saturated at 1.00 (no shaping), the

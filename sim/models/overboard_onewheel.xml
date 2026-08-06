@@ -283,7 +283,12 @@
        CTRL IS TORQUE IN N*m, NOT AMPS. `gear="1"` means MuJoCo takes ctrl as
        the joint torque directly. The controller speaks amps, so the scenario
        multiplies by KT_NM_PER_A before writing here. ctrlrange is therefore
-       derived, not chosen: 60 A limit x 0.7 N*m/A = 42 N*m (Onewheel-XR-class peak, issue: realistic-motor).
+       derived, not chosen: 60 A limit x 0.6284 N*m/A = 37.704 N*m (issue:
+       real-motor-constants -- KT_NM_PER_A derived from the Hypercore hub
+       motor's VESC-detected flux linkage/pole count, see
+       `sim/scenarios/plant.py::KT_NM_PER_A`; 60 A cross-checked against
+       measured Onewheel braking distances, see
+       `crates/sim-host/src/host.rs::MAX_CURRENT_A`).
 
        An earlier revision of this comment claimed pitch was nose-down-positive
        while also writing the law as -K*pitch, which in that convention is
@@ -291,7 +296,7 @@
        comment that contradicts itself about a sign is worse than none, because
        it eventually gets believed. -->
   <actuator>
-    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-42 42" ctrllimited="true"/>
+    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-37.704 37.704" ctrllimited="true"/>
   </actuator>
 
   <!-- Sensor set mirrors the real board's IMU + drive telemetry, so the

@@ -69,12 +69,23 @@ const CYCLE_NS: u64 = 2_000_000;
 /// (`gear="1"`); the controller speaks current. Mirrors
 /// `sim/scenarios/plant.py::KT_NM_PER_A` exactly -- duplicated the same way
 /// `board_types::DEFAULT_R_EFF_M` duplicates the model's tire radius, because
-/// this crate has no Python binding to check itself against directly. The
-/// model's own `ctrlrange="-42 42"` is the derived, checkable consequence
-/// (60 A * 0.7 N*m/A = 42 N*m, issue: realistic-motor-torque raised this from
-/// 40 A / 28 N*m), and `kt_nm_per_a_matches_the_models_ctrlrange` below pins
-/// it against the compiled model so the two cannot silently drift.
-const KT_NM_PER_A: f64 = 0.7;
+/// this crate has no Python binding to check itself against directly.
+///
+/// DERIVED (issue: real-motor-constants), not fitted or guessed: the real
+/// Onewheel Hypercore hub motor's VESC-detected flux linkage (27.93 mWb) and
+/// pole pairs (15) give `Kt = 1.5 * p * lambda = 1.5 * 15 * 0.02793 =
+/// 0.6284 N*m/A` for a PMSM, corroborated independently by measured braking
+/// distances (see `sim/scenarios/plant.py::KT_NM_PER_A`'s own doc comment for
+/// both derivations in full). Replaces the previous unfitted placeholder of
+/// 0.7, which this derivation shows was 11.4% optimistic.
+///
+/// The model's own `ctrlrange="-37.704 37.704"` is the derived, checkable
+/// consequence (60 A * 0.6284 N*m/A = 37.704 N*m; issue: realistic-motor-
+/// torque had raised this from 40 A / 28 N*m to 60 A / 42 N*m under the old
+/// kt=0.7, before this issue corrected kt), and
+/// `kt_nm_per_a_matches_the_models_ctrlrange` below pins it against the
+/// compiled model so the two cannot silently drift.
+const KT_NM_PER_A: f64 = 0.6284;
 
 /// The model this backend steps BY DEFAULT -- the driverless onewheel plant,
 /// unchanged since I1c. Every existing caller (this crate's own tests,
@@ -1342,22 +1353,30 @@ mod tests {
     /// `sim/scenarios/plant.py::KT_NM_PER_A`, whose derived, checkable
     /// consequence is the model's own `ctrlrange`. If the model's clamp ever
     /// changes independently of this constant, applying `max_current_a`
-    /// (60 A, the model's own derived limit -- issue: realistic-motor-torque
-    /// raised this from 40 A) must land exactly on the model's `ctrlrange`
-    /// bound rather than saturating early or leaving headroom -- either of
-    /// which would mean the two have silently diverged. No MuJoCo binding
-    /// here to read the compiled model's `ctrlrange` back (same limit this
-    /// crate's own header notes for `KT_NM_PER_A` itself), so -- like
+    /// (60 A, cross-checked against measured Onewheel braking distances --
+    /// issue: real-motor-constants) must land exactly on the model's
+    /// `ctrlrange` bound rather than saturating early or leaving headroom --
+    /// either of which would mean the two have silently diverged. No MuJoCo
+    /// binding here to read the compiled model's `ctrlrange` back (same limit
+    /// this crate's own header notes for `KT_NM_PER_A` itself), so -- like
     /// `board_types::rad_s_per_erpm_matches_...` -- this is a literal pin
-    /// against the model's own comment, not a live query.
+    /// against the model's own comment, not a live query. The literal is the
+    /// model's ctrlrange bound, not a copy of the derivation -- the
+    /// RELATIONSHIP under test is `KT_NM_PER_A * MODEL_MAX_CURRENT_A ==
+    /// MODEL_CTRLRANGE_NM`, both sides computed here, so a change to either
+    /// factor that keeps the product correct still passes.
     #[test]
     fn kt_nm_per_a_matches_the_models_ctrlrange() {
         const MODEL_MAX_CURRENT_A: f64 = TEST_MAX_CURRENT_A as f64;
+        // Mirrors overboard_onewheel.xml's <motor ... ctrlrange="-37.704
+        // 37.704"> exactly -- 60 A * 0.6284 N*m/A = 37.704 N*m.
+        const MODEL_CTRLRANGE_NM: f64 = 37.704;
         assert_eq!(
             KT_NM_PER_A * MODEL_MAX_CURRENT_A,
-            42.0,
-            "60 A * KT_NM_PER_A must equal the model's ctrlrange bound (42 N*m); \
-             see overboard_onewheel.xml's <motor ... ctrlrange=\"-42 42\">"
+            MODEL_CTRLRANGE_NM,
+            "60 A * KT_NM_PER_A must equal the model's ctrlrange bound \
+             ({MODEL_CTRLRANGE_NM} N*m); see overboard_onewheel.xml's \
+             <motor ... ctrlrange=\"-37.704 37.704\">"
         );
     }
 

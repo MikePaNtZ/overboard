@@ -114,11 +114,16 @@ INVERTED_DEG = 90.0
 #: duplication cannot drift silently. Raised 40 -> 60 A with `host.rs`'s own
 #: `MAX_CURRENT_A` (issue: realistic-motor-torque).
 MAX_CURRENT_A = 60.0
-KT_NM_PER_A = 0.7
+#: DERIVED (issue: real-motor-constants) -- see `host.rs`'s own `KT_NM_PER_A`
+#: doc comment for the Hypercore hub motor derivation (Kt = 1.5 * 15 *
+#: 0.02793 = 0.6284 N*m/A). Was 0.7 (unfitted placeholder) when this file's
+#: docstring narrative above was written.
+KT_NM_PER_A = 0.6284
 KP_NM_PER_RAD = 140.0
 
-#: Total pitch authority, degrees: `MAX_CURRENT_A * KT / KP` = 0.2 rad. Every
-#: "pitch headroom" number in this file is measured against this.
+#: Total pitch authority, degrees: `MAX_CURRENT_A * KT / KP` = 37.704 / 140 =
+#: 0.2693 rad = 15.43 deg at the current, derived KT. Every "pitch headroom"
+#: number in this file is measured against this.
 PITCH_CEILING_DEG = math.degrees(MAX_CURRENT_A * KT_NM_PER_A / KP_NM_PER_RAD)
 
 #: The frictionless-normal strike enters the frame at the axle, this far below

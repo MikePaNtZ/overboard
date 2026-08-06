@@ -42,8 +42,10 @@
        weight shift was ABLE to tip the board over on a static torque
        comparison alone.
 
-       **NO LONGER TRUE by that same comparison at 60 A / 42 N*m (issue:
-       realistic-motor-torque): 34.3 N*m is now BELOW the drive's ceiling.**
+       **NO LONGER TRUE by that same comparison at 60 A / 37.704 N*m (issue:
+       real-motor-constants, superseding the 42 N*m figure the 60 A envelope
+       carried under the old unfitted kt=0.7): 34.3 N*m is still BELOW the
+       drive's ceiling.**
        Whether full-stick weight shift can still tip the board is therefore a
        dynamic question (lean rate, the estimator's own trim, the plant's
        response) rather than a static one this comment can settle by
@@ -360,7 +362,7 @@
   </worldbody>
 
   <actuator>
-    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-42 42" ctrllimited="true"/>
+    <motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-37.704 37.704" ctrllimited="true"/>
 
     <!--
       Ballast position actuators. `timeconst` gives the raw `ctrl` value

@@ -55,11 +55,16 @@ use safety::Envelope;
 pub const ABI_VERSION: u32 = 2;
 
 /// Motor torque constant fallback, N·m per amp — mirrors
-/// `sim/scenarios/plant.py::KT_NM_PER_A`. **Unfitted placeholder**, same
-/// caveat as that constant: nothing has been measured on the bench yet.
-/// Used only when a caller passes `kt_nm_per_a <= 0.0`, the same
-/// zero-means-use-the-default convention `r_eff_m` already follows below.
-pub const DEFAULT_KT_NM_PER_A: f32 = 0.7;
+/// `sim/scenarios/plant.py::KT_NM_PER_A`. **DERIVED**, not fitted or guessed
+/// (issue: real-motor-constants): the real Onewheel Hypercore hub motor's
+/// VESC-detected flux linkage/pole count give `Kt = 1.5 * 15 * 0.02793 =
+/// 0.6284 N*m/A`; see that constant's own doc comment for the full
+/// derivation and the independent measured-braking cross-check. Replaces the
+/// previous unfitted placeholder of 0.7, which this derivation shows was
+/// 11.4% optimistic. Used only when a caller passes `kt_nm_per_a <= 0.0`, the
+/// same zero-means-use-the-default convention `r_eff_m` already follows
+/// below.
+pub const DEFAULT_KT_NM_PER_A: f32 = 0.6284;
 
 // --- status codes ----------------------------------------------------------
 
@@ -319,11 +324,13 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV2) -> *mut Ob
                 if p.accel_ff_gain_m_s2_per_a > 0.0 {
                     p.accel_ff_gain_m_s2_per_a
                 } else {
-                    // kt 0.7 N·m/A / (r_eff 0.1454 m × 82.5 kg ridden).
-                    // Re-derived for #89: was 0.0581 against the stale
-                    // 0.14605 m r_eff, a 0.45% shift that does not change
-                    // which regime this feedforward gain lands in.
-                    0.0584
+                    // kt 0.6284 N·m/A (DERIVED, issue: real-motor-constants --
+                    // see DEFAULT_KT_NM_PER_A's own doc comment; was 0.7 when
+                    // this fallback was last derived) / (r_eff 0.1454 m ×
+                    // 82.5 kg ridden): 0.6284 / (0.1454 * 82.5) = 0.0524.
+                    // Previously 0.0584 at the old, unfitted kt -- re-derived
+                    // here rather than left stale.
+                    0.0524
                 },
             ))
         } else {

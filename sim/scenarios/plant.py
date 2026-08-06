@@ -41,20 +41,36 @@ def R_MODEL_TO_ICD():
         )
     return R
 
-#: Motor torque constant, N*m per amp. **UNFITTED PLACEHOLDER.**
+#: Motor torque constant, N*m per amp -- DERIVED from a real motor, not an
+#: unfitted guess (issue: real-motor-constants).
 #:
 #: The MJCF actuator is a torque source; the controller commands current. This
-#: is the conversion, and it is the first thing the bench must measure: a
-#: current step of known magnitude against a known inertia gives kt directly
-#: (Bench Test-Stand, Config A). 0.7 is an order-of-magnitude guess for a
-#: hoverboard-class hub motor and nothing has been fitted to it.
+#: is the conversion. Real Onewheels (Pint/XR/GT) all share the "Hypercore"
+#: hub motor, whose VESC FOC detection measures flux linkage lambda = 27.93
+#: mWb and pole pairs p = 15 (30 poles; R ~ 88 mOhm, L ~ 233 uH also measured,
+#: but neither enters this identity). For a PMSM, Kt = 1.5 * p * lambda:
+#:     Kt = 1.5 * 15 * 0.02793 = 0.6284 N*m/A
+#:
+#: Corroborated independently from measured stopping distances (82.5 kg
+#: rider+board, r = 0.1454 m): Pint 3.15 m/s^2 -> 260 N -> 37.8 N*m implies
+#: 60.1 A of MOTOR current at this Kt; GT 3.37 m/s^2 -> 278 N -> 40.4 N*m
+#: implies 64.3 A -- both landing in the same ~60-64 A band `MAX_CURRENT_A`
+#: derives from (see that constant, `sim/scenarios/rust_controller.py::
+#: DEFAULT_MAX_CURRENT_A` / `crates/sim-host/src/host.rs::MAX_CURRENT_A`), a
+#: second measurement agreeing with the FOC-detected value rather than a fit
+#: to either. The GT's published "30 A" figure is BATTERY current, not motor
+#: current, and is NOT comparable to `MAX_CURRENT_A` -- under FOC at low
+#: speed, phase current far exceeds battery draw.
+#:
+#: Replaces the previous UNFITTED PLACEHOLDER of 0.7 N*m/A, which this
+#: derivation shows was 11.4% optimistic (0.7 / 0.6284 = 1.114).
 #:
 #: It is named rather than implicit because it was previously implicit at 1.0 --
 #: amps written straight into a N*m channel -- which made `ctrlrange` (N*m) and
 #: `max_current_a` (A) look like the same number and hid the unit error.
 #:
-#: The model's ctrlrange is derived from this: 40 A x 0.7 = 28 N*m.
-KT_NM_PER_A = 0.7
+#: The model's ctrlrange is derived from this: 60 A x 0.6284 = 37.704 N*m.
+KT_NM_PER_A = 0.6284
 
 #: Rider-proxy colours, from the overboard-web palette.
 #:

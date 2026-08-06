@@ -15,6 +15,13 @@ recorded as a genuine, surprising finding from raising the torque ceiling,
 not resolved here -- the two GATE rows below quoting the 10%-grade headline
 predate it.
 
+**This "INVERTED" reading itself predates `KT_NM_PER_A`'s correction from an
+unfitted 0.7 to a derived 0.6284 (issue: real-motor-constants), which moves
+the envelope from 42 N*m to 37.704 N*m -- LESS torque authority than the
+measurement above was taken with, not the same 60 A headline.** Not re-run
+as part of that correction; see this session's re-measurement for whether it
+still holds.
+
 GATE NUMBERS -- MEASURED VS ASSUMED (issue #24 AC5 audit, this session)
 -------------------------------------------------------------------------
 | Assertion                                              | Threshold                     | Observed this session | Status |

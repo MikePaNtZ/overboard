@@ -52,7 +52,11 @@ DEFAULT_KD_NM_PER_RAD_S = 7.7
 DEFAULT_KT_NM_PER_A = KT_NM_PER_A
 
 #: Envelope clamp, amps. Matches the model's derived ctrlrange (60 A * kt =
-#: 42 N*m; raised from 40 A / 28 N*m, issue: realistic-motor-torque).
+#: 37.704 N*m at the current, derived `KT_NM_PER_A` -- issue:
+#: real-motor-constants; raised from 40 A / 28 N*m by issue:
+#: realistic-motor-torque, which quoted 42 N*m under the since-corrected
+#: kt=0.7 placeholder). Re-derived, not merely kept, against the measured-
+#: braking anchor -- see `KT_NM_PER_A`'s own doc comment.
 DEFAULT_MAX_CURRENT_A = 60.0
 
 #: Loaded rolling radius, m (ICD 10.5). Stage-0 will measure the real, loaded

@@ -57,10 +57,18 @@ pub const AC5_MAX_LIMIT_NS: u64 = 500_000;
 mod law {
     pub const KP_NM_PER_RAD: f32 = 140.0;
     pub const KD_NM_PER_RAD_S: f32 = 21.0;
-    pub const KT_NM_PER_A: f32 = 0.7;
+    // DERIVED (issue: real-motor-constants), mirroring sim-host's own
+    // KT_NM_PER_A -- see that constant's doc comment for the Onewheel
+    // Hypercore hub motor derivation (Kt = 1.5 * 15 * 0.02793 = 0.6284
+    // N*m/A). This module's own header notes that a drift here would be
+    // harmless to what this crate measures either way.
+    pub const KT_NM_PER_A: f32 = 0.6284;
     pub const MAX_CURRENT_A: f32 = 60.0;
     pub const ESTIMATOR_TAU_S: f32 = 2.0;
-    pub const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
+    // Re-derived alongside KT_NM_PER_A (issue: real-motor-constants):
+    // 0.6284 / (0.1454 * 82.5) = 0.0524. Mirrors sim-host's own
+    // ACCEL_FF_GAIN_M_S2_PER_A.
+    pub const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0524;
     /// Zero disables the accel trust gate, matching `sim-host`'s own
     /// `with_trust_band(ESTIMATOR_TAU_S, 0.0)`.
     pub const ACCEL_TRUST_BAND_M_S2: f32 = 0.0;
