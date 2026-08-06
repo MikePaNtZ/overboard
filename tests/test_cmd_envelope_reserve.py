@@ -66,13 +66,29 @@ run: the ADR's literal one, and the robustness one it was reaching for (a
 worst-case STATIC bias injected on top of the real signal path). Both fail,
 so the conclusion does not depend on which reading is right.
 
+CRITERION (a)-2 IS ON A CHAOTIC BOUNDARY -- issue: statistical-acceptance
+--------------------------------------------------------------------------
+`test_criterion_a2_a_full_stick_reversal_at_speed_does_not_invert`'s
+noiseless run does not reach a full inversion, but its peak lean already
+sits a few percent over `PITCH_CEILING_DEG` -- read on its own that looks
+like "holds, barely". It is not a real margin: run the IDENTICAL scenario
+through the datasheet-derived IMU noise model at each of 25 fixed seeds
+(`sim.scenarios.seeded_acceptance`) and the board inverts fully, 25 times out
+of 25 -- see `test_criterion_a2_the_reversal_holds_across_a_seeded_imu_noise_
+distribution`. The noiseless test is kept (it is still the cheapest way to
+see a regression on this exact point move), but it no longer stands alone as
+this criterion's evidence.
+
 DETERMINISM
 ------------
 Every run is `--scripted-scenario ... --free-run`: the schedule is indexed on
 simulated time (no wall clock, no socket, no staleness gate -- issue #190) and
 the plant is a fixed-timestep RK4 integrator with no stochastic terms, so
 these numbers are reproducible bit for bit and the whole matrix costs seconds
-rather than minutes of real time.
+rather than minutes of real time. The seeded distribution test above is the
+one exception, by design: it deliberately injects `--imu-noise-seed` so its
+"stochastic" input is itself a fixed, literal seed list -- see `sim.
+scenarios.seeded_acceptance`'s own docstring.
 
 THE BINARY MUST BE BUILT. If it is missing this FAILS, not skips -- same rule
 `test_closed_loop.py` and `test_rust_hosted_impulse_response.py` carry, for
@@ -94,6 +110,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from sim.scenarios.plant import kerb_strike_impulse  # noqa: E402
+from sim.scenarios.seeded_acceptance import run_seeded  # noqa: E402
 
 HOST_RS = REPO / "crates" / "sim-host" / "src" / "host.rs"
 
@@ -502,11 +519,55 @@ def test_criterion_a2_a_full_stick_reversal_at_speed_does_not_invert(tmp_path):
     The schedule runs it in both directions in one deterministic run; the
     ADR names the reverse-to-forward one and the forward-to-reverse one is
     its entry condition.
+
+    **NOISELESS ONLY -- read together with
+    `test_criterion_a2_the_reversal_holds_across_a_seeded_imu_noise_
+    distribution` below.** This run is deterministic and cheap, and it is
+    still the cleanest way to see a regression on this exact scenario move.
+    It is NOT, on its own, a certified margin: this scenario sits on a
+    chaotic boundary (issue: statistical-acceptance), and the seeded test
+    below is what actually measures whether the margin implied by "did not
+    invert" here is real.
     """
     rows = _run(tmp_path, "a2", "stick-reversal", pitch_source="estimator")
     assert _inversion_time(rows) is None, "a full stick reversal at speed inverted the board"
-    print(f"\n(a)2 full stick reversal at speed -- {_margin(rows)}")
+    print(f"\n(a)2 full stick reversal at speed, noiseless -- {_margin(rows)}")
     assert _peak_pitch_deg(rows) < PITCH_CEILING_DEG
+
+
+def test_criterion_a2_the_reversal_holds_across_a_seeded_imu_noise_distribution(tmp_path):
+    """The seeded-distribution reading of criterion (a)-2 -- issue:
+    statistical-acceptance.
+
+    `test_criterion_a2_a_full_stick_reversal_at_speed_does_not_invert` above
+    is a single NOISELESS point, and this scenario sits on a chaotic
+    boundary: that noiseless run does not reach a full inversion, but its
+    peak lean already sits a few percent over `PITCH_CEILING_DEG` -- a
+    result that reads as "holds, barely". It is not a real margin. Re-run
+    the IDENTICAL scenario through the datasheet-derived IMU noise model
+    (`IMU_NOISE_DATASHEET_V1`, `crates/sim-backend/src/imperfections.rs`) at
+    each of `sim.scenarios.seeded_acceptance.SEEDS` and the board inverts
+    fully, EVERY TIME -- see that module's own docstring for the measured
+    25/25 result and for why N = 25.
+
+    A binary pass/fail on the noiseless point above was measuring which side
+    of the knife's edge that one trajectory happened to land on, not the
+    controller's margin. This is the measurement that was missing: the pass
+    condition is 0 inversions out of N, full stop -- ADR-0011 criterion (a)
+    is a hard safety criterion, and a chaotic boundary does not earn a rate
+    tolerance, only an honest report of where the rate actually sits.
+    """
+    dist = run_seeded(
+        tmp_path, "a2seed", "stick-reversal", STATE_OUT, INPUT_IN, pitch_source="estimator"
+    )
+    print(f"\n(a)2 full stick reversal at speed, seeded IMU noise -- {dist.summary()}")
+    assert dist.inversions == 0, (
+        f"{dist.inversions}/{dist.n} seeded IMU-noise runs inverted the board on "
+        f"the IDENTICAL (a)-2 scenario -- {dist.summary()}. A hard safety "
+        "criterion is 0 inversions out of N, full stop; this is not a rate to "
+        "tolerate, it is the finding: the noiseless run's apparent margin above "
+        "is not real."
+    )
 
 
 def test_the_worst_point_in_the_matrix_is_quoted_in_both_currencies(tmp_path):
