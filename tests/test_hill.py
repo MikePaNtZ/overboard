@@ -20,7 +20,7 @@ so the "observed" column is a fact about this commit, not an inherited claim.
 
 | Assertion (grade, v_ref)                          | Threshold            | Observed this session          | Status |
 |-----------------------------------------------------|-----------------------|---------------------------------|--------|
-| medium descent, 10% @ {1,2,3} m/s: `abs(v_final-v_ref)` | `< 0.5 m/s` (was `< 0.25 m/s`) | 0.430 / 0.044 / 0.099 m/s (was 0.062/0.085/0.097) | RE-MEASURED against the frozen plant (issue: realistic-motor-torque) -- v_ref=1 alone got materially worse |
+| medium descent, 10% @ {1,2,3} m/s: `abs(v_final-v_ref)` | `< 0.25 m/s` | 0.430 / 0.044 / 0.099 m/s (was 0.062/0.085/0.097) | NOT RE-PINNED -- LEFT FAILING for v_ref=1.0 (capability criterion, "the gate"). v_ref=1 alone got ~7x worse; likely the same outer-loop finding as `test_shuttle_run.py`'s hold-drift failure, see that test's docstring |
 | medium climb, -5% @ 2 m/s: `held_speed`              | survives + holds      | survived, held                  | MEASURED |
 | climbing is harder: 10% descent vs -10% climb        | both survive; climb's tracking error is >5x descent's | descent max err 0.049 m/s, climb 1.217 m/s (25x) | RE-MEASURED -- both now survive +-10% (used to be descent-survives/climb-fails); re-derived as a magnitude comparison, see the test's own docstring |
 | estimator headline: 15% descent, truth vs estimate   | truth survives, estimate strikes the tail | truth: survived, held; estimate: struck, `struck_end="tail"` | MEASURED |
@@ -212,20 +212,25 @@ def test_the_board_holds_a_medium_descent(v_ref):
     10% is the medium grade the scenario is specified around: comfortably
     inside what the board can do today, and steep enough that the estimator
     error is a substantial fraction of the slope.
+
+    NOT RE-PINNED (widened) this session, against the frozen plant (drag:
+    the derived three-term model; `MAX_CURRENT_A` 40 -> 60 A) -- left
+    FAILING for v_ref=1.0. "**The gate**" names this a capability check
+    (commanded X, does it get X), not a record of plant behaviour. Observed
+    0.062/0.085/0.097 m/s at {1,2,3} m/s before; now 0.430/0.044/0.099 --
+    v_ref=1.0 alone got ~7x worse while 2.0 and 3.0 barely moved, which is
+    the tell that this is not a uniform plant-wide shift but an isolated
+    low-speed transient regression. It is very likely the SAME outer-loop
+    finding as `test_shuttle_run.py::test_it_holds_station_during_the_
+    pauses` and `test_closed_loop.py::test_the_cascade_brings_the_ridden_
+    board_back_to_rest` -- see the shared note in the shuttle-run test's
+    docstring for the suspected mechanism. Left at the original 0.25 m/s
+    bound.
     """
     m = run(HillParams(grade_pct=10.0, v_ref_m_s=v_ref, duration_s=SHORT)).metrics
     assert m.survived, f"struck the {m.struck_end} at {m.t_strike_s}s"
     assert m.held_speed, f"v_ref {v_ref} -> v_final {m.v_final_m_s:.2f}"
-    # RE-MEASURED against the frozen plant (drag: the derived three-term
-    # model; `MAX_CURRENT_A` 40 -> 60 A): was `< 0.25`, observed
-    # 0.062/0.085/0.097 m/s at {1,2,3} m/s. Now observed 0.430/0.044/0.099 --
-    # v_ref=1 m/s alone got materially worse (0.062 -> 0.430 m/s), the other
-    # two barely moved. The extra current authority makes the low-speed
-    # transient overshoot harder before `SHORT` (10 s) settles it, which
-    # `held_speed`'s own separate check still passes; this bound just needs
-    # to cover it too. Re-pinned to `< 0.5`, just above the new v_ref=1
-    # figure.
-    assert abs(m.v_final_m_s - v_ref) < 0.5, (
+    assert abs(m.v_final_m_s - v_ref) < 0.25, (
         f"commanded {v_ref} m/s, finished at {m.v_final_m_s:.2f} m/s"
     )
 

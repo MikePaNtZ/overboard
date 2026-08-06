@@ -27,7 +27,7 @@ GATE NUMBERS -- MEASURED VS ASSUMED (issue #24 AC5 audit, this session)
 | `test_closed_loop_beats_open_loop_on_the_same_disturbance`     | `closed < 0.25 * open` | ratio 0.047           | MEASURED |
 | `test_the_gains_leave_headroom` (peak current)                 | `< 20.0 A` (half the 40 A clamp) | 8.12 A, 0 saturated cycles | MEASURED |
 | `test_the_ridden_board_survives_the_impulse_at_all` (inner loop only) | `peak_abs_pitch_deg < 8.0` | 4.879 deg | MEASURED |
-| `test_the_cascade_brings_the_ridden_board_back_to_rest`        | `travel_m < 1.6`, `wheel_rate < 0.5 rad/s` | 0.666 m, 0.383 rad/s, 0 saturated cycles | RE-MEASURED (was `travel_m < 0.25`, observed 0.106 m). `max_current_a` here was also a stale 40.0 sitting next to the post-retune `kd_nm_per_rad_s=40.0` -- fixed to 60.0 to match the frozen Hypercore clamp, but that fix is not what moved the number: current never saturates in this scenario either way (0 saturated cycles at 40 A and at 60 A, identical trajectories). The drift from 0.106 m to 0.666 m is the frozen plant's derived three-term drag model and `Kt = 0.6284` changing the ridden plant's open-loop response to the same impulse; same ~2.4x margin re-applied on top of the new observed value |
+| `test_the_cascade_brings_the_ridden_board_back_to_rest`        | `travel_m < 0.25`, `wheel_rate < 0.5 rad/s` | 0.666 m, 0.383 rad/s, 0 saturated cycles | NOT RE-PINNED -- LEFT FAILING (capability criterion, not a pin). `max_current_a` here was also a stale 40.0 sitting next to the post-retune `kd_nm_per_rad_s=40.0` -- fixed to 60.0 to match the frozen Hypercore clamp, but that fix is not what moved the number: current never saturates in this scenario either way (0 saturated cycles at 40 A and at 60 A, identical trajectories). travel_m moved 0.106 m -> 0.666 m regardless; likely the same outer-loop finding as `test_shuttle_run.py`'s hold-drift failure, see that test's docstring |
 | `test_the_cascade_costs_some_pitch_and_that_is_the_trade`      | `inner < both < 2*inner` | inner 4.879 deg, cascade 7.712 deg (1.58x) | MEASURED |
 | `test_a_speed_setpoint_is_tracked` (1 m/s command)              | `abs(settled - 1.0) < 0.25` | settled at 1.003 m/s | MEASURED -- band is ~60x the actual error, deliberately loose so normal tuning drift does not flake the gate |
 | `test_the_outer_loop_does_not_suit_the_driverless_plant` (characterisation, not a gate) | `peak_abs_pitch_ref_deg > 4.9`, `travel_m > 1.0` | not re-run this session -- an intentional characterisation of a known-bad configuration, not a margin | MEASURED, per the docstring's own "-29 m at 40 s, -64 m at 90 s" figures, not re-verified here |
@@ -216,20 +216,25 @@ def test_the_cascade_brings_the_ridden_board_back_to_rest(ridden_model):
     Integrating velocity error IS position error, which is what turns "comes
     to a halt" into "holds station".
 
-    RE-MEASURED against the frozen plant (drag: derived three-term model,
-    Kt = 0.6284, MAX_CURRENT_A = 60): travel_m was 0.106 m (pinned at < 0.25),
-    now measures 0.666 m. `max_current_a` in INNER was also a stale 40.0 next
-    to the post-retune `kd_nm_per_rad_s=40.0`; fixed to 60.0 for consistency
-    with the frozen clamp, but that fix is NOT what moved this number --
-    `saturated_cycles == 0` at both 40 A and 60 A, and the trajectory is
-    identical either way, so current was never the limiter here. The 6x
-    growth in travel is the frozen drag/Kt model changing the ridden plant's
-    response to the same impulse. Re-pinned at < 1.6 m, the same ~2.4x margin
-    over the observed value that the original 0.25 m bound held over 0.106 m.
+    NOT RE-PINNED (widened) this session, against the frozen plant (drag:
+    derived three-term model, Kt = 0.6284, MAX_CURRENT_A = 60) -- left
+    FAILING. `max_current_a` in INNER was fixed from a stale 40.0 (next to
+    the post-retune `kd_nm_per_rad_s=40.0`) to 60.0 for consistency with the
+    frozen clamp; that fix changes nothing on its own (`saturated_cycles ==
+    0` and an identical trajectory at 40 A and 60 A -- current was never the
+    limiter here). travel_m moved from 0.106 m to 0.666 m regardless, a 6.4x
+    growth. This is a capability statement -- "stop, and stop roughly where
+    you started" -- not a record of plant behaviour, so the number that
+    moved is not a pin to re-baseline. It is also very likely the SAME
+    outer-loop finding as `test_shuttle_run.py::test_it_holds_station_
+    during_the_pauses` and `test_hill.py::test_the_board_holds_a_medium_
+    descent[1.0]` -- see the shared note in that shuttle-run test's
+    docstring for the suspected mechanism. Left at the original 0.25 m
+    bound.
     """
     r, c = _run(ridden_model, **INNER, **OUTER)
     assert not r.metrics.nose_strike
-    assert abs(r.metrics.travel_m) < 1.6, f"ended {r.metrics.travel_m:.2f} m away"
+    assert abs(r.metrics.travel_m) < 0.25, f"ended {r.metrics.travel_m:.2f} m away"
     assert abs(float(r.wheel_rate_rads[-1])) < 0.5, "should have stopped"
     assert c.saturated_cycles == 0
 

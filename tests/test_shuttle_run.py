@@ -51,6 +51,37 @@ having been loosely chosen (which the table above already discloses for
 other reasons). Left failing and reported rather than re-pinned, since
 raising `max_hold_drift_m` by 8.7x would hide a real outer-loop damping
 regression rather than record a measurement.
+
+ONE OUTER-LOOP FINDING, SEEN THREE TIMES -- a hypothesis, not a conclusion
+---------------------------------------------------------------------------
+The same shape recurs in two other files this session, and is recorded here
+once rather than as three orphaned red tests:
+
+  test_shuttle_run.py::test_it_holds_station_during_the_pauses
+      hold drift 0.198 -> 1.724 m (8.7x); a large, slow, lightly-damped
+      ~2.5 m oscillation across the hold window, not creep (above).
+  test_closed_loop.py::test_the_cascade_brings_the_ridden_board_back_to_rest
+      travel 0.106 -> 0.666 m (6.4x), on a single impulse-and-stop -- the
+      same loop, probed more gently.
+  test_hill.py::test_the_board_holds_a_medium_descent[1.0]
+      speed error 0.062 -> 0.430 m/s (7x) at v_ref=1.0 m/s only; v_ref=2.0
+      and 3.0 barely move, which is the low-speed-transient signature.
+
+All three sit on the outer velocity/position loop, all at low speed or in
+transient, all in the same direction (bigger excursion, slower to settle).
+SUSPECTED MECHANISM, stated as a hypothesis to be tested rather than acted
+on: the inner loop's damping was nearly doubled (`KD` 21 -> 40 A/(rad/s),
+issue: retune-real-constants) while the outer loop's own gains
+(`kp_v_rad_per_m_s`, `ki_v_rad_per_m`) were left untouched, which changes
+the inner/outer bandwidth separation the cascade's stability margin depends
+on -- a faster inner loop without a correspondingly slower or re-tuned outer
+loop is a classic route to this exact symptom (bigger overshoot, slower
+settling, one visible oscillation instead of monotonic creep). What would
+CONFIRM it: an outer-loop gain sweep at FIXED inner-loop KD (40), looking
+for the operating point where the hold-drift oscillation disappears or
+shrinks back toward the old ~0.2 m figure. Not attempted here -- this
+session's mandate is measurement, not re-tuning, and no outer-loop gain is
+touched by any of the three tests above.
 """
 
 import pytest
