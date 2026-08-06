@@ -164,8 +164,78 @@ fn rider_model_path() -> PathBuf {
 // file's header) -- the inner-loop gains and estimator config below are
 // reused unchanged regardless, because they are the closest available
 // precedent for THIS plant's mass/inertia, not for the outer loop's absence.
+//
+// KD_NM_PER_RAD_S retuned 21.0 -> 40.0 (issue: real-motor-constants
+// retune). KP_NM_PER_RAD is UNCHANGED at 140.0 -- lowering it was tried
+// first (it raises `tau_max / KP_NM_PER_RAD`'s ceiling directly) and
+// REJECTED: at 125.68 (the amps-domain-preserving re-denomination,
+// 200 A/rad * 0.6284 N*m/A) the cascade inverts on a FLAT full-stick hold
+// from rest, a case that held comfortably before this session touched
+// anything. The outer `VelocityLoop`/estimator cascade depends on the
+// inner loop's bandwidth for its own stability margin, not merely for its
+// own response speed -- lowering KP_NM_PER_RAD moves that bandwidth down
+// far enough to destabilise the WHOLE cascade, which is a materially worse
+// failure than any of the ceiling-margin problems it was meant to fix. See
+// the retune session notes for the sweep (125.68 and every value tried
+// between it and 140 inverted the flat-ground hold).
+//
+// Raising KD_NM_PER_RAD_S instead adds damping WITHOUT moving the ceiling
+// (`tau_max / KP_NM_PER_RAD` depends only on KP, so it stays exactly
+// 15.43 deg at the 60 A / 37.704 N*m envelope) and does not touch the
+// inner loop's proportional bandwidth. Swept 21 -> 60 against the ADR-0011
+// matrix (`--scripted-scenario full-stick` and `stick-reversal`, swept
+// across `--incline-deg`, plus `brake-turn`):
+//   * 25.0 already clears `test_braking_authority.py`'s braking-into-a-
+//     turn ceiling margin (peak lean 15.97 -> 15.23 deg against the
+//     15.43 deg ceiling).
+//   * The isolated `+4 deg` full-stick inversion pocket
+//     (`test_incline_tolerance.py`) and the flat-ground stick-reversal
+//     case (ADR-0011 criterion (a)-2, `t=15.47s` at KD=21) share a sharp
+//     stability CLIFF between KD=37 (still inverts) and KD=38 (holds,
+//     peak lean 16.12 deg) -- not a smooth margin. 40.0 sits ~5% above
+//     that cliff.
+// **This is a genuinely surprising finding against this session's own
+// starting assumption that criterion (a)-2 needs the reference governor
+// and "no gain absorbs it" -- a gain gets it MUCH closer than expected, in
+// this noise-free deterministic sim, though not all the way.** At 40.0 the
+// flat-ground stick-reversal case no longer INVERTS at all (it did, at
+// t=15.47s, at KD=21) -- but `tests/test_cmd_envelope_reserve.py::
+// test_criterion_a2_...` checks more than "does not invert": it also
+// requires peak lean under the 15.43 deg ceiling, and the retuned peak is
+// 15.91 deg (0.48 deg / 3.1% over, current headroom 0.26 A / 0.4%). So that
+// specific named acceptance test is STILL RED, by design -- the worst
+// failure mode (inversion) is gone, the margin requirement is not met, and
+// this constant is not being tuned further to chase it (see the "no gain
+// absorbs it" framing this retune started from). Flagged rather than
+// quietly relied on either way: the mechanism criterion (a)-2 exercises is
+// a Coulomb-friction torque-sign discontinuity at the wheel-speed zero
+// crossing, and a cliff this sharp (37 inverts, 38 holds) sitting this
+// close to a discontinuity is exactly the kind of result that should be
+// checked against sensor noise before being trusted -- this test suite's
+// estimator path has no injected measurement noise, and nearly doubling KD
+// is the classic move that buys stability in a clean sim at the cost of
+// noise amplification a real IMU would expose. Do not remove the governor
+// work on the strength of this measurement alone.
+//
+// Costs, measured against the SAME sweep, all in scenarios this gain was
+// NOT primarily chosen for:
+//   * `test_hill.py::test_the_board_holds_a_medium_descent[1.0]` -- settled
+//     speed overshoots to 1.43 m/s against a 1.0 +/- 0.25 m/s band (was
+//     inside it at KD=21).
+//   * `test_imperfections.py::test_enough_delay_does_break_it` -- 80 ms of
+//     actuation delay no longer strikes (it did at KD=21); the delay
+//     margin moved and the pinned "breaks between 40 and 60 ms" figure is
+//     now stale and needs re-measuring, not a defect in itself.
+//   * `test_estimator.py::test_both_aiding_sources_survive_the_shuttle_...`
+//     -- the wheel-odometry/command-feedforward return-error gap widens
+//     from 0.045 m to ~1.0 m; both configurations still survive, but the
+//     ordering's margin is no longer "marginally better", it is a
+//     qualitatively different result that the notebook this test backs
+//     has not been re-run against.
+// None of these three is touched by this patch -- see the retune session
+// report for the full account. This is a judgement call, not a clean win.
 const KP_NM_PER_RAD: f32 = 140.0;
-const KD_NM_PER_RAD_S: f32 = 21.0;
+const KD_NM_PER_RAD_S: f32 = 40.0;
 /// Motor torque constant, N*m per amp -- DERIVED (issue: real-motor-
 /// constants), not fitted or guessed. Real Onewheels (Pint/XR/GT) share the
 /// "Hypercore" hub motor; VESC FOC detection on that motor measures flux
@@ -699,7 +769,20 @@ const _: () = {
 /// to take a peak demand FROM (see the criterion (f) results in
 /// `tests/test_cmd_envelope_reserve.py`), so the slope is not measurable
 /// there at all.
-const PEAK_DEMAND_A_PER_UNIT_STICK: f32 = 49.79;
+///
+/// **Re-measured again for the retune session's `KD_NM_PER_RAD_S` change
+/// (21.0 -> 40.0, issue: real-motor-constants retune)** -- this slope is a
+/// property of the closed-loop TRANSIENT, and more derivative damping
+/// changes that transient even though nothing about `KT_NM_PER_A` moved
+/// again. Same four-point method, same stick fractions, re-run at the new
+/// gain: **42.88 A/unit**, DOWN from 49.79 -- more damping lowers the peak
+/// current the transient demands before it settles. `0.84 * 60 / 42.88 =
+/// 1.176`, still clamped to 1.00, so [`CMD_ENVELOPE_RESERVE`] itself does
+/// not move -- but the margin above its domain ceiling widens from 1.2%
+/// (1.012) to 17.6% (1.176), which is a genuine, measured side benefit of
+/// this retune: the reserve mechanism is no longer on the verge of
+/// re-engaging.
+const PEAK_DEMAND_A_PER_UNIT_STICK: f32 = 42.88;
 
 /// The stated disturbance reserve [`CMD_ENVELOPE_RESERVE`] is derived
 /// against: peak fore/aft demand is held to this fraction of

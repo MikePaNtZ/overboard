@@ -56,7 +56,7 @@ pub const AC5_MAX_LIMIT_NS: u64 = 500_000;
 /// what this comment is for.
 mod law {
     pub const KP_NM_PER_RAD: f32 = 140.0;
-    pub const KD_NM_PER_RAD_S: f32 = 21.0;
+    pub const KD_NM_PER_RAD_S: f32 = 40.0;
     // DERIVED (issue: real-motor-constants), mirroring sim-host's own
     // KT_NM_PER_A -- see that constant's doc comment for the Onewheel
     // Hypercore hub motor derivation (Kt = 1.5 * 15 * 0.02793 = 0.6284

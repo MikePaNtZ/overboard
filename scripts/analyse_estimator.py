@@ -73,7 +73,7 @@ def collect(kind: str) -> dict:
     # flown on the estimate.
     with RustController(
         # 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A, re-denominated (#137).
-        kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0, max_current_a=40.0,
+        kp_nm_per_rad=140.0, kd_nm_per_rad_s=40.0, max_current_a=40.0,
         kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True,
         v_ref_fn=vref_fn,
         use_estimator=False,

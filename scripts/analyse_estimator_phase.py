@@ -67,8 +67,16 @@ INK, AMBER, MINT, MUTED, RED = "#16232E", "#F2A24A", "#2AAE97", "#96A8B0", "#C25
 #: `rust_controller.DEFAULT_KP_NM_PER_RAD`'s docstring, at the ridden inertia.
 OMEGA_C = 12.0
 
-# 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A, re-denominated in torque (#137).
-GAINS = dict(kp_nm_per_rad=200.0 * KT_NM_PER_A, kd_nm_per_rad_s=30.0 * KT_NM_PER_A,
+# FROZEN to the same literals every other harness uses (`test_closed_loop.py`'s
+# `INNER`, `host.rs`'s `KP_NM_PER_RAD`/`KD_NM_PER_RAD_S`, etc.) -- issue:
+# real-motor-constants. This used to compute 200 A/rad, 30 A/(rad/s) * KT_NM_PER_A
+# LIVE (#137's re-denomination from amps to torque), which meant moving
+# `plant.KT_NM_PER_A` silently retuned this comparison harness's own
+# trajectory and, with it, `validate_replica()`'s divergence measurement --
+# an accidental coupling between the plant constant and a Python/Rust filter
+# comparison that has nothing to do with kt. Pinning the literals removes
+# that coupling; it is not a shipped-gain change.
+GAINS = dict(kp_nm_per_rad=140.0, kd_nm_per_rad_s=40.0,
              max_current_a=40.0,
              kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True)
 

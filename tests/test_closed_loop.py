@@ -169,7 +169,7 @@ def test_closed_loop_runs_are_deterministic(model):
 BALLAST_KG, BALLAST_M = 70.0, 0.75
 # 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A -- the same gains this file
 # gated on before issue #137, re-denominated (200*0.7, 30*0.7).
-INNER = dict(kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0, max_current_a=40.0)
+INNER = dict(kp_nm_per_rad=140.0, kd_nm_per_rad_s=40.0, max_current_a=40.0)
 OUTER = dict(kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True)
 
 

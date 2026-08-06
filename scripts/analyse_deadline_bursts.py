@@ -76,7 +76,7 @@ BALLAST_KG, BALLAST_M, CLAMP_A = 70.0, 0.75, 40.0
 #: same design point as the old 200 A/rad and 30 A/(rad/s) at kt = 0.7. Kept
 #: identical to `tests/test_delay_budget_stage0b.py:41` so this is measured
 #: against the same loop the delay budget was.
-GAINS = dict(kp_nm_per_rad=140.0, kd_nm_per_rad_s=21.0, max_current_a=40.0,
+GAINS = dict(kp_nm_per_rad=140.0, kd_nm_per_rad_s=40.0, max_current_a=40.0,
              kp_v_rad_per_m_s=0.05, ki_v_rad_per_m=0.02, com_above_axle=True)
 
 #: Control period, s. The burst length is expressed in these.
