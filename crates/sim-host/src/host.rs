@@ -1891,6 +1891,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if fallen {
             flags |= wire::STATE_FLAG_FALLEN;
         }
+        if authority_warning {
+            flags |= wire::STATE_FLAG_AUTHORITY_WARNING;
+        }
 
         if cfg.trace_path.is_some() {
             trace.push(TraceRow {
