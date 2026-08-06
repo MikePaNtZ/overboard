@@ -47,12 +47,29 @@ cargo build --release -p plant-mujoco --bin plant-replay
 # against the Python-hosted one.
 cargo build --release -p board-app-driverless --bin impulse-response-rust
 
+# ADR-0011's whole acceptance matrix. test_cmd_envelope_reserve.py,
+# test_braking_authority.py, test_incline_tolerance.py, test_crr_sweep.py and
+# test_disturbance_envelope.py all shell out to this.
+#
+# It was MISSING from this list until 2026-08-05, and the omission was not
+# harmless. Nothing here built it, so the first test in test_braking_authority.py
+# to shell `cargo run` built it lazily -- while
+# `test_the_sim_host_binary_is_actually_built`, which runs FIRST in that file
+# and only checks existence, had already failed against the cold cache. The
+# suite therefore reported a DIFFERENT FAILURE COUNT on a cold run than a warm
+# one: 40/321/5 cold against 39/322/5 warm, on identical code.
+#
+# That is worse than a slow test. A campaign comparing two configurations
+# cannot measure a delta against a baseline that moves with cache state, and
+# this cost real time diagnosing 39-vs-41-vs-44 drift that was never physics.
+cargo build --release -p sim-host --bin sim-host
+
 # Fail HERE, with a readable message, rather than 40 minutes later as an
 # obscure pytest error about a missing file. A renamed binary is the other way
 # this list goes stale, and `cargo build` succeeding says nothing about the
 # artifact landing under the name the tests look for.
 missing=()
-for bin in libcontrol_ffi plant-replay impulse-response-rust; do
+for bin in libcontrol_ffi plant-replay impulse-response-rust sim-host; do
   case "$bin" in
     libcontrol_ffi)
       # cdylib extension is platform-dependent; the tests resolve it the same
