@@ -40,6 +40,14 @@ pub const STATE_FLAG_ARMED: u16 = 1 << 0;
 pub const STATE_FLAG_VALID: u16 = 1 << 1;
 /// `StateOut::flags` bit 2.
 pub const STATE_FLAG_FALLEN: u16 = 1 << 2;
+/// `StateOut::flags` bit 3 -- ADR-0011 exit criterion (c): the loss-of-
+/// authority warning, ADR-0011's `authority_warning`, put on the wire so a
+/// renderer can surface the cliff before `STATE_FLAG_FALLEN` trips (issue
+/// #216). A new bit within the existing `flags` field, not a wider wire, so
+/// `STATE_SCHEMA_VERSION` is unchanged -- same precedent as
+/// `INPUT_FLAG_KICK` above: backward compatible with any peer not yet
+/// setting or reading it (reads as 0, no warning).
+pub const STATE_FLAG_AUTHORITY_WARNING: u16 = 1 << 3;
 
 /// `InputIn::flags` bit 0.
 pub const INPUT_FLAG_ARM: u16 = 1 << 0;

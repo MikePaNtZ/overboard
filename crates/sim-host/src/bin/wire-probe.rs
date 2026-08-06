@@ -23,7 +23,9 @@
 //! `sim-host`'s dead-reckoned game path, NOT raw MuJoCo x/y -- see
 //! `sim_host::wire::StateOut::pos`'s doc comment.
 
-use sim_host::wire::{StateOut, STATE_FLAG_FALLEN, STATE_MAGIC, STATE_SCHEMA_VERSION};
+use sim_host::wire::{
+    StateOut, STATE_FLAG_AUTHORITY_WARNING, STATE_FLAG_FALLEN, STATE_MAGIC, STATE_SCHEMA_VERSION,
+};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -96,6 +98,11 @@ struct CsvRow {
     /// actually trips means checking what actually went out over the wire,
     /// not re-deriving the same threshold this column is supposed to check.
     fallen: bool,
+    /// Raw `STATE_FLAG_AUTHORITY_WARNING`, decoded off the wire -- ADR-0011
+    /// exit criterion (c) / issue #216. Same "decode, don't re-derive"
+    /// discipline as `fallen` above: this is what a renderer would actually
+    /// see, not the host's own internal `authority_warning_active()` call.
+    authority_warning: bool,
 }
 
 fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
@@ -203,6 +210,7 @@ fn main() {
                             rider_fore_aft_m: rider_fore_aft,
                             rider_lateral_m: rider_lateral,
                             fallen: state.flags & STATE_FLAG_FALLEN != 0,
+                            authority_warning: state.flags & STATE_FLAG_AUTHORITY_WARNING != 0,
                         });
                     }
                 }
@@ -310,11 +318,11 @@ fn main() {
 
     if let Some(path) = &args.csv {
         let mut out = String::from(
-            "seq,sim_time_s,pos_x_m,pos_y_m,pitch_rad,yaw_rad,wheel_rate_rad_s,motor_current_a,rider_fore_aft_m,rider_lateral_m,fallen\n",
+            "seq,sim_time_s,pos_x_m,pos_y_m,pitch_rad,yaw_rad,wheel_rate_rad_s,motor_current_a,rider_fore_aft_m,rider_lateral_m,fallen,authority_warning\n",
         );
         for r in &csv_rows {
             out.push_str(&format!(
-                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}\n",
+                "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}\n",
                 r.seq,
                 r.sim_time_s,
                 r.pos_x_m,
@@ -325,7 +333,8 @@ fn main() {
                 r.motor_current_a,
                 r.rider_fore_aft_m,
                 r.rider_lateral_m,
-                r.fallen
+                r.fallen,
+                r.authority_warning
             ));
         }
         match std::fs::write(path, out) {
