@@ -118,10 +118,13 @@ if [ -z "$IMAGE" ]; then
   command -v gh >/dev/null || die "no --image given and `gh` is not installed"
   say "downloading the '$IMAGE_RELEASE' release"
   ( cd "$STAGING" && gh release download "$IMAGE_RELEASE" --repo MikePaNtZ/overboard \
-      --pattern '*.img.xz' --pattern '*.img.xz.sha256' ) \
+      --pattern '*.img.xz' --pattern '*.img.zst' --pattern '*.sha256' ) \
     || die "could not download release '$IMAGE_RELEASE'.
-       If the image pipeline has not landed yet (issue #182 I1), pass --image."
-  IMAGE="$(ls -1 "$STAGING"/*.img.xz)"
+       No release is published yet (#182). Until one is, flash the CI artefact:
+         gh run download <run-id> -n overboard-image-<sha> -D ./img
+         scripts/pi/flash_pi.sh --image ./img/overboard-stage0b.img.zst"
+  IMAGE="$(ls -1 "$STAGING"/*.img.xz "$STAGING"/*.img.zst 2>/dev/null | head -1 || true)"
+  [ -n "$IMAGE" ] || die "release '$IMAGE_RELEASE' held no .img.xz or .img.zst"
 fi
 [ -f "$IMAGE" ] || die "image not found: $IMAGE"
 
@@ -136,6 +139,33 @@ else
   echo "WARNING: no $(basename "$IMAGE").sha256 alongside the image."
   echo "         Flashing UNVERIFIED. AC-11's restore test assumes a checked artefact."
 fi
+
+# ---------------------------------------------------------------------------
+# Decompression: chosen by extension, and resolved BEFORE the card is touched.
+#
+# This used to hardcode `xz -dc`, which was wrong in a way that only shows up
+# on the machine that matters. rpi-image-gen deploys **.zst** today
+# (build_image.sh globs rather than names the extension for exactly this
+# reason), while design section 2 calls for **.img.xz** to be PUBLISHED. Both
+# formats are therefore in circulation, and will be until those two agree.
+#
+# Resolved here rather than at the write, so an unsupported format or a
+# missing decompressor fails while the card is still mounted and intact --
+# the same ordering rule the credential staging above follows. Discovering
+# `xz: unsupported file format` after `diskutil unmountDisk` means a
+# half-erased card and a repeat 273 MB download.
+# ---------------------------------------------------------------------------
+case "$IMAGE" in
+  *.img.xz)  DECOMP="xz -dc" ;;
+  *.img.zst) DECOMP="zstd -dc" ;;
+  *.img)     DECOMP="cat" ;;
+  *) die "unrecognized image format: $(basename "$IMAGE")
+       Expected .img, .img.xz or .img.zst." ;;
+esac
+command -v "${DECOMP%% *}" >/dev/null || die "${DECOMP%% *} is not installed, and
+       $(basename "$IMAGE") needs it.
+         macOS:  brew install ${DECOMP%% *}
+         Debian: sudo apt install ${DECOMP%% *}"
 
 # ---------------------------------------------------------------------------
 # Guard 2: type the identifier back.
@@ -163,7 +193,7 @@ if [ "$OS" = "Darwin" ]; then
     say "unmounting $DISK"
     diskutil unmountDisk "$DISK"
     say "writing (sudo; ctrl-T shows progress)"
-    xz -dc "$IMAGE" | sudo dd of="$RAW" bs=4m
+    $DECOMP "$IMAGE" | sudo dd of="$RAW" bs=4m
     sync
     say "waiting for the boot partition to mount"
     sleep 3
@@ -176,7 +206,7 @@ else
     say "unmounting any mounted partitions of $DISK"
     for part in "$DISK"?*; do umount "$part" 2>/dev/null || true; done
     say "writing (sudo)"
-    xz -dc "$IMAGE" | sudo dd of="$DISK" bs=4M conv=fsync status=progress
+    $DECOMP "$IMAGE" | sudo dd of="$DISK" bs=4M conv=fsync status=progress
     sync
   fi
   BOOT_MNT="$(mktemp -d)"
