@@ -5,7 +5,7 @@ covers:
   - scripts/pi/flash_pi.sh
   - scripts/pi/pins.env
   - crates/loop-profiler/src/lib.rs
-reconciled: 1618e9f
+reconciled: 3251993
 -->
 
 **Owned by: Senior Controls.** **Executed by: the CEO**, at a desk, with a monitor and a
@@ -222,6 +222,17 @@ resolver; the exercise validates the removable-media guard, the confirmation pro
 `mk_boot_config.py`'s output against a real secrets file. It is **not** a way to produce a
 usable card: the staged credentials assume `firstboot_install.sh`, which stock Raspberry Pi OS
 does not ship. Use Imager's own customisation (§1) for the card you actually boot.
+
+**Compression is detected, not assumed.** `flash_pi.sh` picks its decompressor from the
+extension — `.img.xz` → `xz`, `.img.zst` → `zstd`, bare `.img` → straight through — and resolves
+it **before** unmounting the card, so an unsupported format or a missing tool fails while the
+card is still intact rather than half-written.
+
+This matters because the two formats genuinely differ in the wild: **rpi-image-gen deploys
+`.img.zst`**, which is what the CI artefact contains, while design §2 specifies `.img.xz` for the
+*published* release because that is what Raspberry Pi Imager consumes. Until those two agree the
+script has to accept both. On macOS, `zstd` is not installed by default — `brew install zstd` if
+the script says so.
 
 ---
 
