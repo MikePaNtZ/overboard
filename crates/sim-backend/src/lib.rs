@@ -156,6 +156,16 @@ pub struct SimBackend {
     /// `plant_mujoco::Plant::joint_dofadr`.
     frame_free_qposadr: Option<usize>,
     frame_free_dofadr: Option<usize>,
+    /// `mjData::sensordata` address+dim for the three ADR-0012 handoff
+    /// sensors, if the open model declares them -- `None` on any model that
+    /// does not (the driverless onewheel model, every bench rig), which is
+    /// the same "honest zero, not an error" tolerance
+    /// [`SimBackend::truth_ballast_positions`] has. Resolved once in
+    /// `open()`.
+    frame_linvel_sensor: Option<(usize, usize)>,
+    frame_angvel_sensor: Option<(usize, usize)>,
+    nose_strike_sensor: Option<(usize, usize)>,
+    tail_strike_sensor: Option<(usize, usize)>,
     cycle: u64,
     open: bool,
     armed: bool,
@@ -396,6 +406,102 @@ impl SimBackend {
             .map(|adr| qpos[adr] as f32)
             .unwrap_or(0.0);
         (fore_aft, lateral)
+    }
+
+    /// Ground-truth WORLD-frame linear velocity of the `frame` body, m/s,
+    /// read from the model's `frame_linvel` sensor (ADR-0012).
+    ///
+    /// `[0.0; 3]` on a model that does not declare the sensor -- the same
+    /// tolerance [`SimBackend::truth_ballast_positions`] has, and for the
+    /// same reason: a caller on the driverless plant gets an honest "this
+    /// model has no such channel", not an error for something never claimed.
+    ///
+    /// # Why the sensor rather than `qvel`
+    ///
+    /// The free joint's `qvel` linear half IS already global (the fact
+    /// [`SimBackend::inject_kinematic_yaw`] relies on), so this one could
+    /// have been read there. Its angular partner below could not -- that half
+    /// is body-frame -- and reading one velocity from `qvel` and the other
+    /// from a sensor is exactly how a frame error gets introduced by a later
+    /// reader who assumes the pair match. Both come from sensors.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_frame_linvel(&self) -> [f64; 3] {
+        self.read_vec3(self.frame_linvel_sensor, "truth_frame_linvel")
+    }
+
+    /// Ground-truth WORLD-frame angular velocity of the `frame` body, rad/s,
+    /// right-hand rule, read from the model's `frame_angvel` sensor
+    /// (ADR-0012). `[0.0; 3]` on a model that does not declare it.
+    ///
+    /// **World frame, not body frame.** MuJoCo's `frameangvel` reports in
+    /// global coordinates, whereas the free joint's `qvel` angular half is
+    /// body-frame. The wire carries the world one because that is what a
+    /// receiving physics engine seeds with, and converting anywhere else
+    /// would put a rotation in a second place -- the class of error ADR-0010
+    /// named as silently poisoning everything downstream.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_frame_angvel(&self) -> [f64; 3] {
+        self.read_vec3(self.frame_angvel_sensor, "truth_frame_angvel")
+    }
+
+    /// Total normal contact force, newtons, inside the model's `nose_strike`
+    /// site -- the ADR-0012 terminating-event detector. `0.0` on a model that
+    /// does not declare the sensor.
+    ///
+    /// MuJoCo's `touch` sensor sums the normal force of every contact whose
+    /// point falls inside the site's volume, so this reads zero throughout
+    /// normal riding: the site sits 0.108 m above the ground when the board
+    /// is upright and excludes the wheel's contact patch on both the x and z
+    /// axes independently (see the site comment in `overboard_rider.xml`).
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_nose_strike_n(&self) -> f32 {
+        self.read_touch(self.nose_strike_sensor, "truth_nose_strike_n")
+    }
+
+    /// Total normal contact force, newtons, inside the model's `tail_strike`
+    /// site. The rear-bumper counterpart of
+    /// [`SimBackend::truth_nose_strike_n`], and not an afterthought: released
+    /// from upright this plant settles TAIL-down, so a nose-only detector
+    /// reads zero through half the falls it exists to catch.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_tail_strike_n(&self) -> f32 {
+        self.read_touch(self.tail_strike_sensor, "truth_tail_strike_n")
+    }
+
+    /// Shared body of the two `truth_*_strike_n` accessors.
+    fn read_touch(&self, sensor: Option<(usize, usize)>, who: &str) -> f32 {
+        let plant = self
+            .plant
+            .as_ref()
+            .unwrap_or_else(|| panic!("{who}: backend is not open"));
+        match sensor {
+            Some((adr, dim)) => plant.read_sensor(adr, dim).first().copied().unwrap_or(0.0) as f32,
+            None => 0.0,
+        }
+    }
+
+    /// Shared body of the two `truth_frame_*vel` accessors: read a 3-vector
+    /// sensor, or `[0.0; 3]` if this model does not declare it.
+    fn read_vec3(&self, sensor: Option<(usize, usize)>, who: &str) -> [f64; 3] {
+        let plant = self
+            .plant
+            .as_ref()
+            .unwrap_or_else(|| panic!("{who}: backend is not open"));
+        match sensor {
+            Some((adr, dim)) if dim >= 3 => {
+                let v = plant.read_sensor(adr, 3);
+                [v[0], v[1], v[2]]
+            }
+            _ => [0.0; 3],
+        }
     }
 
     /// Ground-truth BODY-frame pitch rate of the `frame` body, rad/s, nose-up
@@ -641,6 +747,15 @@ impl BoardObserve for SimBackend {
         // does not happen to declare the thing an optional feature needs.
         self.frame_free_qposadr = plant.joint_qposadr("frame_free");
         self.frame_free_dofadr = plant.joint_dofadr("frame_free");
+
+        // ADR-0012 handoff sensors. Resolved by NAME, so appending them to
+        // the model cannot disturb any existing sensor's address -- and
+        // absent on any model that does not declare them, which is not an
+        // error here (see the field comment).
+        self.frame_linvel_sensor = plant.sensor_adr_dim("frame_linvel");
+        self.frame_angvel_sensor = plant.sensor_adr_dim("frame_angvel");
+        self.nose_strike_sensor = plant.sensor_adr_dim("nose_strike");
+        self.tail_strike_sensor = plant.sensor_adr_dim("tail_strike");
 
         // Built once dt_s is known, same reasoning as steps_per_cycle above:
         // a fresh ImperfectionState per open() so repeat-run bit-identity
