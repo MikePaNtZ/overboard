@@ -197,15 +197,36 @@ pub struct KerbSpec {
 }
 
 /// Default kerb, measured from the real City Park geometry rather than
-/// invented: `overboard-game`'s `dump_triangles.py` dump of `OB_City` puts a
-/// continuous line of ~0.090 m risers at y = +8.85 m running along X, which is
-/// the left-hand kerb of the street the board spawns on. Placing MuJoCo's kerb
-/// on the same coordinate is what makes the strike land where the player can
-/// SEE a kerb -- the alternative is an invisible wall, since terrain is not on
-/// the wire and Unreal is drawing City Park, not this model.
+/// invented. A kerb BOTH SIDES, mirrored about the spawn point, because that
+/// is what the road actually has.
+///
+/// # The first value was wrong, and how it was wrong matters
+///
+/// This was y = 8.85 m, from a search for clusters of "risers" in
+/// `dump_triangles.py`'s dump of `OB_City`. Play-test verdict: it did not line
+/// up with the kerbs you can see. It was a **building wall** -- the vertical
+/// faces at y ~ 8.2-8.6 m span z from -1.6 to +2.9 m, and nothing in a riser
+/// filter distinguishes a 4.5 m wall from a 0.2 m kerb.
+///
+/// Two independent mistakes put it there. The search ranked candidates by
+/// TRIANGLE COUNT, and a kerb is a long low-poly extrusion -- the whole road
+/// mesh is 16,076 triangles against 8,465,926 for a single grass asset -- so
+/// the real kerbs were rejected for being too cheap to notice. And the dump is
+/// **94% foliage by triangle count**, so anything averaging "the surface" is
+/// really measuring grass and leaf litter.
+///
+/// Re-measured over LARGE triangles only (>0.02 m^2, which excludes grass
+/// blades by orders of magnitude) the picture is unambiguous and matches what
+/// a rider sees: near-vertical faces at **y = +-4.5 m**, symmetric about the
+/// spawn point, face top at z ~ +0.12 m, road between them at z ~ -0.09 m. A
+/// ~9 m road with the board in the middle and a ~0.21 m step either side.
+///
+/// `height_m` is measured from MuJoCo's flat ground plane (z = 0) up to the
+/// kerb top, i.e. what the wheel actually has to climb, not the kerb's full
+/// extent including the part buried below the road.
 pub const DEFAULT_KERB: KerbSpec = KerbSpec {
-    y_face_m: 8.85,
-    height_m: 0.090,
+    y_face_m: 4.5,
+    height_m: 0.12,
 };
 
 /// The spliced kerb spans the WHOLE drivable corridor in X, derived from
@@ -234,16 +255,22 @@ fn write_model_with_kerb(kerb: &KerbSpec) -> Result<PathBuf, HostError> {
         ))
     })?;
 
-    // Near face at `y_face_m`, body extending away from the board (+Y), top
-    // flush with the ground plane's surface at z = height_m.
-    let cy = kerb.y_face_m + KERB_HALF_DEPTH_M;
+    // A kerb on EACH side, mirrored: near faces at +-y_face_m, each body
+    // extending away from the board, tops flush at z = height_m. The board
+    // spawns between them, which is where City Park actually puts it.
     let hz = kerb.height_m / 2.0;
-    let geom = format!(
-        "\n    <!-- ADR-0012: spliced in by sim-host --kerb, NOT part of the shared model. -->\
-         \n    <geom name=\"kerb\" type=\"box\" pos=\"{KERB_CENTRE_X_M} {cy} {hz}\" \
-         size=\"{KERB_HALF_LENGTH_M} {KERB_HALF_DEPTH_M} {hz}\" \
-         rgba=\"0.62 0.60 0.57 1\" condim=\"3\" friction=\"0.8 0.005 0.0001\"/>\n  "
+    let mut geom = String::from(
+        "\n    <!-- ADR-0012: spliced in by sim-host --kerb, NOT part of the shared model. -->",
     );
+    for (tag, sign) in [("kerb_left", 1.0f64), ("kerb_right", -1.0f64)] {
+        let cy = sign * (kerb.y_face_m.abs() + KERB_HALF_DEPTH_M);
+        geom.push_str(&format!(
+            "\n    <geom name=\"{tag}\" type=\"box\" pos=\"{KERB_CENTRE_X_M} {cy} {hz}\" \
+             size=\"{KERB_HALF_LENGTH_M} {KERB_HALF_DEPTH_M} {hz}\" \
+             rgba=\"0.62 0.60 0.57 1\" condim=\"3\" friction=\"0.8 0.005 0.0001\"/>"
+        ));
+    }
+    geom.push_str("\n  ");
 
     // `terrain.py` splices at `</asset>`; the kerb is geometry, so it goes at
     // the single `</worldbody>`. Exactly one, or fail loudly -- a splice that
@@ -1521,10 +1548,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let model_path = generated_model.clone().unwrap_or_else(rider_model_path);
     if let Some(kerb) = &cfg.kerb {
         eprintln!(
-            "sim-host: ADR-0012 kerb armed -- face at y={:+.3} m, {:.0} mm tall, \
-             spanning x[{:.0},{:.0}] m; handoff will fire on >{STRIKE_FORCE_N:.0} N of \
-             bumper contact or >{:.0} deg of tilt",
-            kerb.y_face_m,
+            "sim-host: ADR-0012 kerb armed -- faces at y=+-{:.3} m (BOTH sides), \
+             {:.0} mm tall, spanning x[{:.0},{:.0}] m; handoff will fire on \
+             >{STRIKE_FORCE_N:.0} N of bumper contact or >{:.0} deg of tilt",
+            kerb.y_face_m.abs(),
             kerb.height_m * 1000.0,
             CORRIDOR_X_MIN_M,
             CORRIDOR_X_MAX_M,
