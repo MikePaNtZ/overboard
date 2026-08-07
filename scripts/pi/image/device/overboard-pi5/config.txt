@@ -35,17 +35,28 @@ BOOT_UART=1
 # OVERBOARD: kernel selection  (issue #182 I2, design Q12)
 # ===========================================================================
 # Pi 5 firmware defaults to loading kernel_2712.img. There is NO rpt-2712-rt
-# package, so the real-time kernel we install is the generic v8 one, which
-# ships as kernel8.img -- confirmed present in the spike's build output.
+# package, so the real-time kernel we install is the generic v8 one.
 # Without this line the firmware would load a kernel we did not install, or
 # fail to boot.
 #
-# ⚠️ UNVERIFIED ON HARDWARE. This is the design's own Q12, described there as
-# "operational, not architectural -- but it is the difference between a card
-# that boots and one that does not". It is a reasoned first attempt, not a
-# confirmed answer, and the restore test (AC-11) is what settles it. If the
-# board does not boot, THIS LINE IS THE FIRST THING TO CHANGE.
-kernel=kernel8.img
+# ✅ VERIFIED ON HARDWARE 2026-08-06. The previous note here said this line
+# was unverified and would be "THE FIRST THING TO CHANGE" if the board did not
+# boot. It was exactly that, and it was wrong:
+#
+# The RT kernel package installs as **kernel8_rt.img**, not kernel8.img. The
+# earlier value rested on "confirmed present in the spike's build output", but
+# the spike built rpi-image-gen's STOCK config, not our RT kernel, so that
+# confirmation never covered this package. The first real card carried
+# kernel8_rt.img and initramfs8_rt and no kernel8.img at all -- it would not
+# have booted. Caught by inspecting the boot partition minutes before the
+# first AC-11 attempt, rather than by a dark screen.
+#
+# The _rt suffix is the kernel package's own, and auto_initramfs=1 derives the
+# initramfs name from it: kernel8_rt.img pairs with initramfs8_rt, which is
+# precisely what shipped. build_image.sh now asserts that whatever this line
+# names actually exists in the built boot partition, so the config and the
+# package cannot drift apart again unnoticed.
+kernel=kernel8_rt.img
 
 # ===========================================================================
 # OVERBOARD: CAN  (issue #182 I3)

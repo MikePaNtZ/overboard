@@ -70,6 +70,36 @@ section "BUILD"
 cd "$WORK"
 ./rpi-image-gen build -S "$SRC" -c overboard.yaml
 
+section "kernel selection matches what was built"
+
+# config.txt names a kernel FILE, and firmware loads that exact name. If the
+# file is not in the boot partition the card is a brick -- and NOTHING else in
+# this build would notice. The image is well-formed, every pin resolves, the
+# manifest is accurate, the checksum matches. It fails only at 3am on a Pi
+# with a dark screen.
+#
+# This is not hypothetical. The line said kernel8.img while the RT package
+# installs kernel8_rt.img, on the strength of a spike that built a DIFFERENT
+# kernel. It reached a real card and was caught by hand minutes before the
+# first AC-11 attempt. The assertion below is what makes that a build failure
+# instead of a bench evening.
+KCFG="$SRC/device/overboard-pi5/config.txt"
+[ -f "$KCFG" ] || { echo "FATAL: $KCFG not found"; exit 1; }
+kname="$(awk -F= '/^kernel=/{print $2}' "$KCFG" | tail -1 | tr -d '[:space:]')"
+[ -n "$kname" ] || { echo "FATAL: $KCFG has no kernel= line to verify"; exit 1; }
+
+if [ -n "$(find "$WORK/work" -name "$kname" -print -quit 2>/dev/null)" ]; then
+  echo "OK: config.txt names kernel=$kname, and that file is in the build"
+else
+  echo "FATAL: config.txt names kernel=$kname, but no such file was built."
+  echo "       The card would not boot. Kernel images actually present:"
+  find "$WORK/work" -name 'kernel*.img' 2>/dev/null \
+    | sed 's|.*/|         |' | sort -u
+  echo "       Point kernel= at one of those, or work out why the expected"
+  echo "       kernel package did not install."
+  exit 1
+fi
+
 section "collect artefacts"
 mkdir -p "$OUT"
 rm -f "$OUT"/*
