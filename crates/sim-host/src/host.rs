@@ -157,6 +157,22 @@ fn rider_model_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sim/models/overboard_rider.xml")
 }
 
+/// The board state captured on the cycle a terminating event is declared,
+/// and repeated on every packet from then until the latch clears (ADR-0012).
+///
+/// This is what "MuJoCo has stopped propagating" means on the wire: the plant
+/// keeps stepping underneath -- freezing the integrator mid-run would strand
+/// the control loop and the pacer -- but nothing it computes after the strike
+/// reaches the client, so the client is the sole authority in fact and not
+/// merely by agreement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HandoffSnapshot {
+    pub pos: [f32; 3],
+    pub quat: [f32; 4],
+    pub lin_vel: [f32; 3],
+    pub ang_vel: [f32; 3],
+}
+
 /// A kerb to ride into (ADR-0012). Off by default, and when it is off the
 /// model this host opens is the shared `overboard_rider.xml`, byte for byte.
 ///
@@ -1587,7 +1603,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     };
 
     let mut handoff_latched = false;
-    let mut handoff_state: Option<([f32; 3], [f32; 4], [f32; 3], [f32; 3])> = None;
+    let mut handoff_state: Option<HandoffSnapshot> = None;
     let mut prev_kick_bit = false;
     // `Some(t)` while an on-demand fall kick (issue #161 follow-up, item 5)
     // is in its force-application window, `t` being the sim time it started
@@ -2125,32 +2141,35 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // a measured carve envelope instead of a guess.
         let tilt_rad = (xmat[8].clamp(-1.0, 1.0) as f32).acos();
         let strike_n = backend.truth_nose_strike_n() + backend.truth_tail_strike_n();
-        if std::env::var("OB_HANDOFF_DEBUG").is_ok() && ticks % 250 == 0 {
+        if std::env::var("OB_HANDOFF_DEBUG").is_ok() && ticks.is_multiple_of(250) {
             eprintln!(
                 "  [handoff-debug] t={t_known_s:.2} tilt={:.1}deg strike={strike_n:.1}N \
                  y={truth_pos_y_m:.2}",
                 tilt_rad.to_degrees()
             );
         }
-        if cfg.kerb.is_some() {
-            if !handoff_latched {
-                let by_strike = strike_n > STRIKE_FORCE_N;
-                let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
-                if by_strike || by_tilt {
-                    handoff_latched = true;
-                    // The state handed over is the state at the instant of
-                    // the strike, captured BEFORE the freeze below stops the
-                    // plant -- everything sent from here on is this snapshot.
-                    handoff_state = Some((pos, quat, lin_vel, ang_vel));
-                    eprintln!(
-                        "sim-host: ADR-0012 handoff at t={:.3}s -- {} \
-                         (bumper {strike_n:.0} N, tilt {:.1} deg); \
-                         MuJoCo has stopped propagating, Unreal owns the board",
-                        t_known_s,
-                        if by_strike { "bumper strike" } else { "tilt" },
-                        tilt_rad.to_degrees(),
-                    );
-                }
+        if cfg.kerb.is_some() && !handoff_latched {
+            let by_strike = strike_n > STRIKE_FORCE_N;
+            let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
+            if by_strike || by_tilt {
+                handoff_latched = true;
+                // The state handed over is the state at the instant of the
+                // strike, captured BEFORE the freeze below stops it reaching
+                // the wire -- everything sent from here on is this snapshot.
+                handoff_state = Some(HandoffSnapshot {
+                    pos,
+                    quat,
+                    lin_vel,
+                    ang_vel,
+                });
+                eprintln!(
+                    "sim-host: ADR-0012 handoff at t={:.3}s -- {} \
+                     (bumper {strike_n:.0} N, tilt {:.1} deg); \
+                     MuJoCo has stopped propagating, Unreal owns the board",
+                    t_known_s,
+                    if by_strike { "bumper strike" } else { "tilt" },
+                    tilt_rad.to_degrees(),
+                );
             }
         }
 
@@ -2189,7 +2208,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // `seq`, `sim_time_s` and the diagnostic channels keep moving so the
         // stream stays visibly alive rather than looking hung.
         let (pos, quat, lin_vel, ang_vel) = match handoff_state {
-            Some(frozen) => frozen,
+            Some(f) => (f.pos, f.quat, f.lin_vel, f.ang_vel),
             None => (pos, quat, lin_vel, ang_vel),
         };
 
