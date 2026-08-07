@@ -1807,16 +1807,34 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             // ADR-0012 gave this bit its first real job: it is the ONLY way
             // out of a handoff, and it is what returns authority to MuJoCo.
             // Outside a handoff it still does nothing, and still says so.
-            if handoff_latched {
-                eprintln!(
-                    "sim-host: input reset bit set -- clearing the ADR-0012 handoff, \
-                     MuJoCo resumes propagating the board"
-                );
-                handoff_latched = false;
-                handoff_state = None;
-            } else {
-                eprintln!("sim-host: input reset bit set -- not implemented yet, ignoring");
-            }
+            // A RESET IS NOT JUST "UN-LATCH". Clearing the handoff alone
+            // handed authority back to MuJoCo with the board still lying
+            // wherever it had tumbled to, tens of metres downrange -- so the
+            // player got control of a fallen board rather than a fresh run.
+            // Reported from the first play-test, and the reason this now
+            // resets the PLANT and every piece of loop state derived from it.
+            //
+            // Everything below is state that outlives a single cycle. Leaving
+            // any of it behind puts the fresh board under the influence of the
+            // crashed one: a stale `yaw_rad` respawns it pointing the wrong
+            // way, a stale estimator spends its settling time regulating a
+            // vertical from the old attitude, and a stale
+            // `utilisation_filtered` can annunciate a loss-of-authority
+            // warning about a board that no longer exists.
+            backend.reset();
+            handoff_latched = false;
+            handoff_state = None;
+            yaw_rad = 0.0;
+            estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
+            last_amps = 0.0;
+            last_forward_speed_m_s = 0.0;
+            utilisation_filtered = 0.0;
+            prev_outside_corridor = false;
+            fall_kick_window_start_s = None;
+            eprintln!(
+                "sim-host: input reset bit set -- board returned to the start, \
+                 plant and loop state cleared"
+            );
         }
         if input_armed_bit != prev_armed_bit {
             eprintln!(
@@ -2141,11 +2159,20 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // a measured carve envelope instead of a guess.
         let tilt_rad = (xmat[8].clamp(-1.0, 1.0) as f32).acos();
         let strike_n = backend.truth_nose_strike_n() + backend.truth_tail_strike_n();
-        if std::env::var("OB_HANDOFF_DEBUG").is_ok() && ticks.is_multiple_of(250) {
+        // OB_HANDOFF_DEBUG=1 prints every 250 ticks (2 Hz); OB_HANDOFF_DEBUG=<n>
+        // prints every n ticks, which is what makes a sub-second event like a
+        // post-reset transient actually observable.
+        let debug_every = std::env::var("OB_HANDOFF_DEBUG")
+            .ok()
+            .map(|v| v.parse::<u64>().unwrap_or(250).max(1));
+        if debug_every.is_some_and(|n| ticks.is_multiple_of(n)) {
             eprintln!(
                 "  [handoff-debug] t={t_known_s:.2} tilt={:.1}deg strike={strike_n:.1}N \
-                 y={truth_pos_y_m:.2}",
-                tilt_rad.to_degrees()
+                 y={truth_pos_y_m:.2} amps={last_amps:+.1} est_pitch={:.2}deg \
+                 truth_pitch={:.2}deg",
+                tilt_rad.to_degrees(),
+                attitude.pitch_rad.to_degrees(),
+                pitch_rad.to_degrees()
             );
         }
         if cfg.kerb.is_some() && !handoff_latched {

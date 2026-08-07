@@ -408,6 +408,68 @@ impl SimBackend {
         (fore_aft, lateral)
     }
 
+    /// Puts the plant back to the model's initial state -- `mj_resetData`,
+    /// then the same `mj_forward` prime `open()` does.
+    ///
+    /// This is what the input wire's `reset` bit needs in order to mean
+    /// anything: before it existed, `sim-host` accepted the bit, logged
+    /// "not implemented yet, ignoring", and left the board wherever it had
+    /// fallen. A player who crashed had no way back to the start short of
+    /// restarting the host.
+    ///
+    /// # Why `forward()` is not optional here
+    ///
+    /// `mj_resetData` zeroes `sensordata` along with everything else. The
+    /// control loop reads its attitude out of `sensordata` on the very next
+    /// cycle, so without re-priming it the estimator's first post-reset
+    /// sample is a vertical the board never had -- the identical reason
+    /// `open()` calls `forward()` before its first step (AC8 / issue #107).
+    ///
+    /// The incline is re-applied for the same reason: it lives in
+    /// `mjModel::opt.gravity`, which `mj_resetData` does NOT touch, but
+    /// re-asserting it keeps this path honestly identical to `open()`'s
+    /// rather than relying on that.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn reset(&mut self) {
+        let incline_deg = self.incline_deg;
+        let plant = self.plant.as_mut().expect("reset: backend is not open");
+        plant.reset();
+        if incline_deg != 0.0 {
+            let g = plant.gravity();
+            let mag = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+            let (s, c) = incline_deg.to_radians().sin_cos();
+            plant.set_gravity([mag * s, 0.0, -mag * c]);
+        }
+        plant.forward();
+
+        // Clear EXACTLY what `open()` clears. This list is the whole bug:
+        // `pending_current_a`/`commanded_current_a` are a BUFFERED command --
+        // this backend's own header says it "only buffers a pending command",
+        // which the next `wait_observe()` writes to `ctrl` before stepping.
+        //
+        // Leaving them set meant a reset stepped the freshly-uprighted board
+        // with the SATURATED command left over from the crash. Measured: a
+        // real forward acceleration of ~8.5 m/s^2 on the first post-reset
+        // observation, which `ComplementaryFilter::accel_pitch`
+        // (`atan2(accel[0] - a_ff, -accel[2])`) cannot distinguish from a
+        // 61 deg tilt -- and, being a fresh filter, it SNAPPED to that instead
+        // of filtering it out. The regulator answered with a full -40 A and
+        // nose-dived the board 0.28 s later.
+        //
+        // That is also why adding settle time here did not help: settling runs
+        // unpowered, and then `wait_observe()` re-applied the stale command
+        // anyway. The fix is to clear the command, not to wait longer.
+        self.cycle = 0;
+        self.pending_current_a = None;
+        self.commanded_current_a = 0.0;
+        self.applied_current_a = 0.0;
+        self.ballast_fa_target_m = 0.0;
+        self.ballast_lateral_target_m = 0.0;
+        self.last_wheel_rate_rad_s = 0.0;
+    }
+
     /// Ground-truth WORLD-frame linear velocity of the `frame` body, m/s,
     /// read from the model's `frame_linvel` sensor (ADR-0012).
     ///
@@ -1030,6 +1092,96 @@ impl BoardActuate for SimBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reset the input wire's `reset` bit needs: after the board has been
+    /// driven well away from its start, `reset()` must put it back, not merely
+    /// stop whatever was happening to it.
+    ///
+    /// Regression guard for the first play-test report -- "the reset button
+    /// doesn't return me to start". At the time, `sim-host` cleared its
+    /// ADR-0012 handoff latch and nothing else, so the player got authority
+    /// over a board still lying where it had crashed.
+    #[test]
+    fn reset_returns_the_plant_to_its_starting_state() {
+        let mut b = armed();
+        let start_qpos = b.truth_qpos();
+        let start_pos = b.truth_frame_xpos();
+
+        // Shove it hard AND hold a large motor command, so "unchanged" cannot
+        // pass by accident and -- the point of this test -- so there really is
+        // a buffered command in flight at the moment of the reset. An earlier
+        // version of this test drove with `apply_external_force` alone, never
+        // commanded a current, and therefore passed with the fix reverted:
+        // there was nothing buffered to leak. A regression test that does not
+        // fail on the bug is worse than none, because it reads as coverage.
+        for _ in 0..400 {
+            b.apply_external_force([120.0, 40.0, 0.0], [0.0, 0.0, 0.0]);
+            b.wait_observe().unwrap();
+            // observe-then-apply: the backend enforces that ordering.
+            b.apply(&Command::MotorCurrent { amps: 35.0 }).unwrap();
+        }
+        assert!(
+            b.applied_current_a().abs() > 1.0,
+            "the drive phase must leave a real command in flight, else this test cannot              detect one leaking through the reset"
+        );
+        let moved_pos = b.truth_frame_xpos();
+        let displacement =
+            ((moved_pos[0] - start_pos[0]).powi(2) + (moved_pos[1] - start_pos[1]).powi(2)).sqrt();
+        assert!(
+            displacement > 0.05,
+            "the test did not actually move the board ({displacement:.4} m) -- it would then              prove nothing about reset"
+        );
+
+        b.reset();
+
+        let after = b.truth_qpos();
+        assert_eq!(
+            after.len(),
+            start_qpos.len(),
+            "reset must not change the shape of the state vector"
+        );
+        for (i, (a, s0)) in after.iter().zip(start_qpos.iter()).enumerate() {
+            assert!(
+                (a - s0).abs() < 1e-9,
+                "qpos[{i}] is {a} after reset, expected the starting {s0}"
+            );
+        }
+
+        // THE ACTUAL BUG. A reset that restores qpos but leaves the buffered
+        // command behind steps the freshly-uprighted board with the saturated
+        // current left over from the crash. That is not visible in qpos -- it
+        // shows up one cycle later as a large forward acceleration on the
+        // accelerometer, which the estimator cannot tell from a steep tilt.
+        //
+        // Asserted on the observation rather than on the private field, so
+        // this fails if the command survives by ANY route, not just the one
+        // that was fixed.
+        let obs = b.wait_observe().unwrap();
+        assert_eq!(
+            b.applied_current_a(),
+            0.0,
+            "a reset must not leave a buffered command to be applied on the next cycle"
+        );
+        let accel = obs.newest_imu().expect("imu sample").accel_m_s2;
+        assert!(
+            accel[0].abs() < 1.0,
+            "forward specific force is {:.2} m/s^2 on the first post-reset observation -- the \
+             board is being driven by a stale command. ComplementaryFilter::accel_pitch cannot \
+             distinguish that from a tilt, and snaps its initial pitch to it.",
+            accel[0]
+        );
+
+        // And `sensordata` must be primed, not left zeroed by mj_resetData --
+        // the control loop reads its attitude from there on the very next
+        // cycle, and a zeroed quaternion is not a valid attitude.
+        let quat = b.truth_frame_xquat();
+        let norm =
+            (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-6,
+            "frame quaternion after reset is not normalised ({norm}) -- mj_forward did not run"
+        );
+    }
 
     fn opened() -> SimBackend {
         let mut b = SimBackend::with_params(Params {
