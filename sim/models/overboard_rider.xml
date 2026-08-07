@@ -130,6 +130,39 @@
 
       <site name="imu" pos="-0.06 0 -0.007" size="0.008" group="4"/>
 
+      <!--
+        ADR-0012 terminating-event detectors: the volumes a BUMPER STRIKE
+        happens in. The two `touch` sensors below sum the normal force of
+        every contact whose point falls inside their box, so each box has to
+        contain one bumper and nothing that is touched in normal riding.
+
+        BOTH ENDS, not just the nose. An uncontrolled board tips TAIL-down as
+        readily as nose-down -- released from upright in this model it settles
+        on `rear_bumper_geom` -- and a kerb strike can put it either way. A
+        nose-only detector would read zero through half of the crashes it
+        exists to catch, which is the failure mode that looks like "the
+        feature works" right up until the run it matters on.
+
+        Sized from the meshes, not by eye. `front_bumper.stl` occupies local
+        x[-0.4690,-0.3454] and `rear_bumper.stl` x[+0.3454,+0.4690], both
+        y[+-0.1159] z[-0.0254,+0.0497] m -- so centres at (-+0.4072, 0,
+        +0.0122) and half-extents (0.0618, 0.1159, 0.0376), padded to
+        (0.075, 0.125, 0.050) so a contact just off the mesh surface still
+        registers.
+
+        WHY NEITHER CAN FIRE ON NORMAL GROUND CONTACT, which is the failure
+        that would make every ride end in a false crash: the frame origin sits
+        at axle height (0.1454 m) when upright, so the wheel's ground contact
+        is at local z = -0.1454 and local x = 0. Both boxes span local
+        z[-0.0378,+0.0622] and are offset to |x| >= 0.3322 -- the ground patch
+        is outside them on BOTH axes independently, so either axis alone
+        excludes it. Upright, their lowest point is 0.108 m above the ground.
+      -->
+      <site name="nose_strike" pos="-0.4072 0 0.0122" size="0.075 0.125 0.050"
+            type="box" group="4"/>
+      <site name="tail_strike" pos="+0.4072 0 0.0122" size="0.075 0.125 0.050"
+            type="box" group="4"/>
+
       <geom name="front_enclosure_geom" class="visual" type="mesh" mesh="front_enclosure" material="shell_mat"/>
       <geom name="rear_enclosure_geom" class="visual" type="mesh" mesh="rear_enclosure" material="shell_mat"/>
       <geom name="front_footpad_geom" class="visual" type="mesh" mesh="front_footpad" euler="0 0 180" material="footpad_mat"/>
@@ -228,5 +261,26 @@
     <jointpos name="wheel_pos" joint="wheel_hinge"/>
     <jointvel name="wheel_vel" joint="wheel_hinge"/>
     <actuatorfrc name="motor_torque" actuator="wheel_motor"/>
+
+    <!--
+      ADR-0012 physics-authority handoff. All three are APPENDED, and appended
+      deliberately: `sim-host` resolves sensors by name through
+      `Plant::sensor_adr_dim`, so adding to the end cannot move an existing
+      sensor's address. None of them affect dynamics -- MuJoCo sensors are
+      pure readouts -- so the bit-identity replay gate this file's header
+      warns about is untouched. `qpos`/`qvel` are byte-for-byte what they were.
+
+      The two velocities are what the handoff HANDS OVER. `pos` and `quat`
+      already go out on the wire; without these, Unreal would seed the crash
+      from rest and the board would hit the kerb as though it were treacle.
+      Both are world-frame and go on the wire raw, exactly as `pos`/`quat` do
+      -- `CoordinateTransform` on the game side remains the only place the
+      MuJoCo->Unreal conversion ever happens (ADR-0010 rule, carried forward
+      by ADR-0012).
+    -->
+    <framelinvel name="frame_linvel" objtype="body" objname="frame"/>
+    <frameangvel name="frame_angvel" objtype="body" objname="frame"/>
+    <touch name="nose_strike" site="nose_strike"/>
+    <touch name="tail_strike" site="tail_strike"/>
   </sensor>
 </mujoco>

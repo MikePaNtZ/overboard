@@ -157,6 +157,121 @@ fn rider_model_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sim/models/overboard_rider.xml")
 }
 
+/// The board state captured on the cycle a terminating event is declared,
+/// and repeated on every packet from then until the latch clears (ADR-0012).
+///
+/// This is what "MuJoCo has stopped propagating" means on the wire: the plant
+/// keeps stepping underneath -- freezing the integrator mid-run would strand
+/// the control loop and the pacer -- but nothing it computes after the strike
+/// reaches the client, so the client is the sole authority in fact and not
+/// merely by agreement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HandoffSnapshot {
+    pub pos: [f32; 3],
+    pub quat: [f32; 4],
+    pub lin_vel: [f32; 3],
+    pub ang_vel: [f32; 3],
+}
+
+/// A kerb to ride into (ADR-0012). Off by default, and when it is off the
+/// model this host opens is the shared `overboard_rider.xml`, byte for byte.
+///
+/// # Why this is spliced in here and not declared in the model
+///
+/// `overboard_rider.xml` is shared by every scenario in the repo, several of
+/// which travel a long way -- the host coasts 10.8 m in 10 s (issue #169).
+/// A kerb committed into that file would start appearing in acceptance runs
+/// that never asked for one, and an ADR-0011 measurement that quietly hit
+/// scenery is worse than no measurement. Splicing keeps the geometry in the
+/// demo that wants it.
+///
+/// The splice itself is the pattern `sim/scenarios/terrain.py` already uses
+/// to add its `hfield` to a model at load time, rather than a new idea.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KerbSpec {
+    /// World Y of the kerb's near FACE, metres -- the side the board hits.
+    /// The kerb body extends away from the board from there.
+    pub y_face_m: f64,
+    /// Height of the kerb above the ground plane, metres.
+    pub height_m: f64,
+}
+
+/// Default kerb, measured from the real City Park geometry rather than
+/// invented: `overboard-game`'s `dump_triangles.py` dump of `OB_City` puts a
+/// continuous line of ~0.090 m risers at y = +8.85 m running along X, which is
+/// the left-hand kerb of the street the board spawns on. Placing MuJoCo's kerb
+/// on the same coordinate is what makes the strike land where the player can
+/// SEE a kerb -- the alternative is an invisible wall, since terrain is not on
+/// the wire and Unreal is drawing City Park, not this model.
+pub const DEFAULT_KERB: KerbSpec = KerbSpec {
+    y_face_m: 8.85,
+    height_m: 0.090,
+};
+
+/// The spliced kerb spans the WHOLE drivable corridor in X, derived from
+/// `CORRIDOR_X_MIN_M`/`CORRIDOR_X_MAX_M` rather than picked.
+///
+/// Measured why: at a 40 m half-length about the origin, an s-curve run
+/// drifted to the kerb's Y only once it was at x = -112 m -- long past the
+/// end of the kerb -- and sailed by with nothing to hit. A kerb the player
+/// can outrun is a kerb that is not there.
+const KERB_HALF_LENGTH_M: f64 = (CORRIDOR_X_MAX_M - CORRIDOR_X_MIN_M) / 2.0;
+/// Centre of the spliced kerb along X -- the midpoint of the same corridor.
+const KERB_CENTRE_X_M: f64 = (CORRIDOR_X_MAX_M + CORRIDOR_X_MIN_M) / 2.0;
+/// Half-depth of the spliced kerb along Y, metres. Only the near face is ever
+/// touched; the depth exists so the board cannot clip through the far side.
+const KERB_HALF_DEPTH_M: f64 = 0.6;
+
+/// Writes `overboard_rider.xml` with `kerb` spliced into its `<worldbody>` to
+/// a temporary file, and returns that path. The original file is never
+/// modified.
+fn write_model_with_kerb(kerb: &KerbSpec) -> Result<PathBuf, HostError> {
+    let src = rider_model_path();
+    let xml = std::fs::read_to_string(&src).map_err(|e| {
+        HostError::Io(std::io::Error::new(
+            e.kind(),
+            format!("sim-host: cannot read {}: {e}", src.display()),
+        ))
+    })?;
+
+    // Near face at `y_face_m`, body extending away from the board (+Y), top
+    // flush with the ground plane's surface at z = height_m.
+    let cy = kerb.y_face_m + KERB_HALF_DEPTH_M;
+    let hz = kerb.height_m / 2.0;
+    let geom = format!(
+        "\n    <!-- ADR-0012: spliced in by sim-host --kerb, NOT part of the shared model. -->\
+         \n    <geom name=\"kerb\" type=\"box\" pos=\"{KERB_CENTRE_X_M} {cy} {hz}\" \
+         size=\"{KERB_HALF_LENGTH_M} {KERB_HALF_DEPTH_M} {hz}\" \
+         rgba=\"0.62 0.60 0.57 1\" condim=\"3\" friction=\"0.8 0.005 0.0001\"/>\n  "
+    );
+
+    // `terrain.py` splices at `</asset>`; the kerb is geometry, so it goes at
+    // the single `</worldbody>`. Exactly one, or fail loudly -- a splice that
+    // silently no-ops would present as "the kerb does nothing", which is the
+    // hardest possible version of this bug to see.
+    if xml.matches("</worldbody>").count() != 1 {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: expected exactly one </worldbody> in {} to splice the kerb into",
+            src.display()
+        ))));
+    }
+    let spliced = xml.replace("</worldbody>", &format!("{geom}</worldbody>"));
+
+    // Alongside the real model, so MuJoCo's `meshdir` (a RELATIVE path) still
+    // resolves. A temp dir would break every mesh reference in the file.
+    let dst = src.with_file_name(format!(
+        "overboard_rider_kerb_{}.generated.xml",
+        std::process::id()
+    ));
+    std::fs::write(&dst, spliced).map_err(|e| {
+        HostError::Io(std::io::Error::new(
+            e.kind(),
+            format!("sim-host: cannot write {}: {e}", dst.display()),
+        ))
+    })?;
+    Ok(dst)
+}
+
 // --- Controller config, ridden variant (issue #161 W2) -- REUSED verbatim
 // from `sim/scenarios/shuttle_run.py`'s own `controller_factory`, the repo's
 // only existing tuned cascade config for a rider-scale plant. That scenario
@@ -798,6 +913,62 @@ const CORRIDOR_HALF_WIDTH_M: f64 = 8.6;
 /// (decelerate)" value (0.6); not bench-tuned.
 const CORRIDOR_BRAKE_LEAN: f32 = 0.6;
 
+/// ADR-0012 terminating event, part 1: total bumper contact force, newtons,
+/// above which the board is declared down and physics authority is handed to
+/// Unreal.
+///
+/// The two `touch` sensors in `overboard_rider.xml` read **exactly** 0.0000 N
+/// through upright riding -- measured over 6000 uncontrolled steps, the
+/// site geometry excludes the wheel's contact patch on two independent axes
+/// -- and 560 N with the board resting on a bumper. So this threshold is not
+/// separating signal from noise (there is no noise); it is set well clear of
+/// zero purely so a grazing touch during a recoverable wobble does not end a
+/// run, and well under the resting load so an actual strike cannot be missed.
+const STRIKE_FORCE_N: f32 = 50.0;
+
+/// ADR-0012 terminating event, part 2: tilt of the frame's up-axis away from
+/// world vertical, radians, above which the board is declared down.
+///
+/// # Why this exists when `FALLEN_PITCH_RAD` already does
+///
+/// `FALLEN` tests **pitch alone**, and a kerb is hit from the SIDE. The
+/// measured failure: released from upright this model settles at 18.6 deg of
+/// pitch -- the nose-into-ground limit its own header documents -- which
+/// never reaches the 20 deg `FALLEN` threshold at all. A board rolled onto
+/// its side by a kerb strike can therefore be flat on the ground with
+/// `FALLEN` reading 0 and, if it went over sideways rather than end-over,
+/// neither bumper touched.
+///
+/// Tilt-from-vertical is one dot product (`xmat[8]`, the frame up-axis's
+/// world Z component) and is direction-agnostic by construction, so it covers
+/// pitch, roll and any combination.
+///
+/// **`FALLEN` is deliberately left alone.** Its threshold and its measured
+/// lead times are quoted in ADR-0011 (warning asserts at 3.000 s, `FALLEN` at
+/// 5.868 s, lead 2.868 s); redefining it would silently invalidate published
+/// numbers. This is a separate, additional signal that only gates the
+/// handoff.
+///
+/// # Where 35 deg comes from -- measured, not chosen
+///
+/// The risk this number carries is the FALSE POSITIVE: a threshold a hard
+/// carve can reach would hand the board to Unreal mid-turn and ragdoll a
+/// player who was still riding. So the legitimate envelope was measured
+/// first, over all four scripted scenarios, 30 s each, with no kerb:
+///
+/// | scenario | peak tilt |
+/// |---|---|
+/// | `default` | 5.5 deg |
+/// | `s-curve` | 8.0 deg |
+/// | `full-stick` | 8.0 deg |
+/// | `stick-reversal` | **11.0 deg** |
+///
+/// 35 deg is 3.2x the worst of those. For contrast, on the run that actually
+/// went down the board crossed this threshold and was at 166 deg of pitch
+/// moments later -- once past ~35 deg it is not coming back, so the margin
+/// costs nothing in detection latency.
+const HANDOFF_TILT_RAD: f32 = 35.0 * std::f32::consts::PI / 180.0;
+
 /// A ONE-TIME startup disturbance, applied near the beginning of a run when
 /// [`HostConfig::startup_kick`] is set. Not a general disturbance API -- the
 /// input wire carries no such field (issue #161) -- and OFF BY DEFAULT
@@ -1001,6 +1172,11 @@ pub struct HostConfig {
     /// during the loop: a 500 Hz control thread does not do file I/O per
     /// tick, and the trace exists to measure the loop, not to perturb it.
     pub trace_path: Option<PathBuf>,
+
+    /// ADR-0012. `Some` splices a kerb into the model and arms the physics-
+    /// authority handoff; `None` (the default) opens the shared model
+    /// unchanged and never sets the handoff bit. See [`KerbSpec`].
+    pub kerb: Option<KerbSpec>,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1077,6 +1253,7 @@ impl Default for HostConfig {
             disturbance: None,
             incline_deg: 0.0,
             trace_path: None,
+            kerb: None,
         }
     }
 }
@@ -1335,7 +1512,26 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         ..Params::default()
     };
 
-    let mut backend = SimBackend::with_model_path(params, rider_model_path());
+    // ADR-0012: a kerb run opens a spliced copy; every other run opens the
+    // shared model itself, unchanged.
+    let generated_model = match &cfg.kerb {
+        Some(kerb) => Some(write_model_with_kerb(kerb)?),
+        None => None,
+    };
+    let model_path = generated_model.clone().unwrap_or_else(rider_model_path);
+    if let Some(kerb) = &cfg.kerb {
+        eprintln!(
+            "sim-host: ADR-0012 kerb armed -- face at y={:+.3} m, {:.0} mm tall, \
+             spanning x[{:.0},{:.0}] m; handoff will fire on >{STRIKE_FORCE_N:.0} N of \
+             bumper contact or >{:.0} deg of tilt",
+            kerb.y_face_m,
+            kerb.height_m * 1000.0,
+            CORRIDOR_X_MIN_M,
+            CORRIDOR_X_MAX_M,
+            HANDOFF_TILT_RAD.to_degrees(),
+        );
+    }
+    let mut backend = SimBackend::with_model_path(params, model_path);
     // Before `open()`, which is where the tilt is applied -- see
     // `HostConfig::incline_deg`.
     backend.set_incline_deg(cfg.incline_deg);
@@ -1384,6 +1580,30 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut scripted_label: &'static str = "";
     let mut prev_armed_bit = false;
     let mut prev_reset_bit = false;
+    // ADR-0012. `handoff_latched` is a LEVEL, not an edge: once set it stays
+    // set until the input `reset` bit clears it, so a client that loses the
+    // announcing packet to the UDP wire still takes over on the next one.
+    // `handoff_state` is the frozen snapshot every subsequent packet repeats.
+    // ADR-0012: the kerb has to be REACHABLE. The soft corridor brake fires
+    // at CORRIDOR_HALF_WIDTH_M = 8.6 m, and the measured City Park kerb face
+    // is at 8.85 m -- so on an unmodified corridor the host arrests the
+    // player's forward lean 0.25 m short of the thing they are aiming at, and
+    // the strike never happens. Measured: an s-curve run reached y = 8.6 m,
+    // got braked, and came back.
+    //
+    // When a kerb is armed the lateral limit moves outside it, so what stops
+    // the board is the kerb's own geometry rather than an invisible brake.
+    // That is also what ADR-0012 says the arrangement IS: the kerb is
+    // authored outside the drivable corridor, and striking it terminates the
+    // run. The X bounds are untouched -- they keep the board inside a finite
+    // Unreal level, which a kerb strike does nothing about.
+    let corridor_half_width_m = match &cfg.kerb {
+        Some(k) => CORRIDOR_HALF_WIDTH_M.max(k.y_face_m.abs() + 0.5),
+        None => CORRIDOR_HALF_WIDTH_M,
+    };
+
+    let mut handoff_latched = false;
+    let mut handoff_state: Option<HandoffSnapshot> = None;
     let mut prev_kick_bit = false;
     // `Some(t)` while an on-demand fall kick (issue #161 follow-up, item 5)
     // is in its force-application window, `t` being the sim time it started
@@ -1584,7 +1804,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let input_armed_bit = !stale && latest_input.armed_bit;
         let input_reset_bit = !stale && latest_input.reset_bit;
         if input_reset_bit && !prev_reset_bit {
-            eprintln!("sim-host: input reset bit set -- not implemented yet, ignoring");
+            // ADR-0012 gave this bit its first real job: it is the ONLY way
+            // out of a handoff, and it is what returns authority to MuJoCo.
+            // Outside a handoff it still does nothing, and still says so.
+            if handoff_latched {
+                eprintln!(
+                    "sim-host: input reset bit set -- clearing the ADR-0012 handoff, \
+                     MuJoCo resumes propagating the board"
+                );
+                handoff_latched = false;
+                handoff_state = None;
+            } else {
+                eprintln!("sim-host: input reset bit set -- not implemented yet, ignoring");
+            }
         }
         if input_armed_bit != prev_armed_bit {
             eprintln!(
@@ -1626,7 +1858,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // the dead-reckoned path, which no longer exists) -- the same
         // one-cycle lag the speed cap above uses, and for the same reason.
         let outside_corridor = !(CORRIDOR_X_MIN_M..=CORRIDOR_X_MAX_M).contains(&truth_pos_x_m)
-            || truth_pos_y_m.abs() > CORRIDOR_HALF_WIDTH_M;
+            || truth_pos_y_m.abs() > corridor_half_width_m;
         if outside_corridor && !prev_outside_corridor {
             eprintln!(
                 "sim-host: LEFT THE DRIVABLE CORRIDOR at ({truth_pos_x_m:.1}, \
@@ -1892,6 +2124,59 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             flags |= wire::STATE_FLAG_FALLEN;
         }
 
+        // --- ADR-0012 PHYSICS-AUTHORITY HANDOFF -------------------------
+        //
+        // Only ever armed on a run that asked for a kerb. A run without one
+        // is byte-for-byte the run it was before this existed: no strike can
+        // be declared, and `STATE_FLAG_HANDOFF` never leaves this host.
+        let lv = backend.truth_frame_linvel();
+        let av = backend.truth_frame_angvel();
+        let lin_vel = [lv[0] as f32, lv[1] as f32, lv[2] as f32];
+        let ang_vel = [av[0] as f32, av[1] as f32, av[2] as f32];
+        // `xmat[8]` is the frame up-axis's world Z, so acos of it is tilt from
+        // vertical in ANY direction -- see HANDOFF_TILT_RAD on why pitch alone
+        // is not enough. Computed on every run, kerb or not: it costs one
+        // acos, it is the honest "how far over is the board" number, and
+        // having it on non-kerb runs too is what let the threshold be set from
+        // a measured carve envelope instead of a guess.
+        let tilt_rad = (xmat[8].clamp(-1.0, 1.0) as f32).acos();
+        let strike_n = backend.truth_nose_strike_n() + backend.truth_tail_strike_n();
+        if std::env::var("OB_HANDOFF_DEBUG").is_ok() && ticks.is_multiple_of(250) {
+            eprintln!(
+                "  [handoff-debug] t={t_known_s:.2} tilt={:.1}deg strike={strike_n:.1}N \
+                 y={truth_pos_y_m:.2}",
+                tilt_rad.to_degrees()
+            );
+        }
+        if cfg.kerb.is_some() && !handoff_latched {
+            let by_strike = strike_n > STRIKE_FORCE_N;
+            let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
+            if by_strike || by_tilt {
+                handoff_latched = true;
+                // The state handed over is the state at the instant of the
+                // strike, captured BEFORE the freeze below stops it reaching
+                // the wire -- everything sent from here on is this snapshot.
+                handoff_state = Some(HandoffSnapshot {
+                    pos,
+                    quat,
+                    lin_vel,
+                    ang_vel,
+                });
+                eprintln!(
+                    "sim-host: ADR-0012 handoff at t={:.3}s -- {} \
+                     (bumper {strike_n:.0} N, tilt {:.1} deg); \
+                     MuJoCo has stopped propagating, Unreal owns the board",
+                    t_known_s,
+                    if by_strike { "bumper strike" } else { "tilt" },
+                    tilt_rad.to_degrees(),
+                );
+            }
+        }
+
+        if handoff_latched {
+            flags |= wire::STATE_FLAG_HANDOFF;
+        }
+
         if cfg.trace_path.is_some() {
             trace.push(TraceRow {
                 seq: ticks,
@@ -1914,6 +2199,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             });
         }
 
+        // ADR-0012 freeze. While latched, the board's pose and velocity are
+        // the snapshot taken on the strike cycle, repeated verbatim. MuJoCo
+        // keeps stepping underneath -- stopping the integrator mid-run would
+        // strand the control loop and the pacer -- but nothing it computes
+        // after the strike reaches the wire, which is what "stops
+        // propagating" has to mean for the client to be the sole authority.
+        // `seq`, `sim_time_s` and the diagnostic channels keep moving so the
+        // stream stays visibly alive rather than looking hung.
+        let (pos, quat, lin_vel, ang_vel) = match handoff_state {
+            Some(f) => (f.pos, f.quat, f.lin_vel, f.ang_vel),
+            None => (pos, quat, lin_vel, ang_vel),
+        };
+
         let state = StateOut {
             magic: wire::STATE_MAGIC,
             schema_version: wire::STATE_SCHEMA_VERSION,
@@ -1929,6 +2227,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             motor_current_a: obs.motor_current_a,
             rider_fore_aft_m,
             rider_lateral_m,
+            lin_vel,
+            ang_vel,
         };
         out_socket.send_to(&state.to_bytes(), cfg.state_out_addr)?;
 
@@ -2072,6 +2372,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     }
 
     let _ = backend.close();
+    // The spliced model is a per-process scratch file; leaving it behind
+    // would litter `sim/models/` with generated XML that looks committed.
+    if let Some(path) = &generated_model {
+        let _ = std::fs::remove_file(path);
+    }
 
     Ok(RunSummary {
         ticks,
