@@ -118,7 +118,14 @@ def test_the_heightfield_is_actually_terrain():
 
 def test_the_board_starts_standing_on_the_crest():
     """Not buried in the ground and not dropped from a height -- either would
-    make the first second of every run a contact transient."""
+    make the first second of every run a contact transient.
+
+    Height alone is not enough to catch that: the analytically-placed spawn
+    this replaced held this exact height assertion while sitting `ncon == 0`
+    -- level and airborne, a defect the diagnosis traced all the way to the
+    estimator reading free fall as 180 deg of tilt (see engage.py's module
+    docstring). This is that validity gap closed: height AND actual contact.
+    """
     import mujoco
 
     model, amp = build_terrain_model(TerrainParams())
@@ -127,6 +134,7 @@ def test_the_board_starts_standing_on_the_crest():
     frame = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
     axle_z = float(data.xpos[frame][2])
     assert axle_z == pytest.approx(amp + 0.1454, abs=1e-3)
+    assert data.ncon > 0, "spawned with no ground contact -- exactly the free-fall defect"
 
 
 def test_run_refuses_an_ideal_profile():
@@ -271,8 +279,14 @@ def test_the_ride_is_reported_in_one_readable_line():
 def test_cutback_does_not_bind_on_the_default_ride():
     """Stated so the presence of a cutback model is never mistaken for evidence
     that cutback was the mechanism. At 8% over 24 m the board never gets fast
-    enough to be derated; the estimator is the constraint, as everywhere else."""
+    enough to be derated; the estimator is the constraint, as everywhere else.
+
+    `survived` is asserted explicitly: `cutback_binding_cycles == 0` on a run
+    that crashed at t=0 (never fast enough to bind because it never got
+    anywhere) would pass this test for the wrong reason entirely.
+    """
     m = run(TerrainParams()).metrics
+    assert m.survived, f"struck the {m.struck_end} in the {m.struck_phase} at {m.t_strike_s}s"
     assert m.imperfection_profile_id == STAGE0_CUTBACK.profile_id
     assert m.cutback_binding_cycles == 0
 

@@ -60,6 +60,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from . import engage
 from .imperfections import (
     STAGE0_CUTBACK,
     ImperfectionProfile,
@@ -148,6 +149,12 @@ class TerrainMetrics:
     reached_next_crest: bool = False
     """Did it actually complete the ride? A board that stops in the dip has not
     done the manoeuvre, and a run that only asserts `survived` would pass."""
+
+    t_engaged_s: float | None = None
+    """When the engage state machine (see `engage.py`) first reached
+    `ENGAGED` -- `None` if it never did. Makes "never engaged" visibly
+    distinct from "engaged, then crashed": both would otherwise just look
+    like `survived=False` with no travel."""
 
     # --- the ride ---
     travel_m: float = 0.0
@@ -276,10 +283,27 @@ def build_terrain_model(params: TerrainParams):
     # Stand the board on the crest. The crest is flat, so the axle sits exactly
     # one rolling radius above it -- no cos(phi) correction needed here, unlike
     # the tilted-plane case.
+    #
+    # NOT LEVEL, AND NOT EXACTLY TANGENT EITHER -- both deliberate, and both
+    # explained in `_terrain_rest_pitch_deg`'s docstring below. The board
+    # spawns resting NOSE-DOWN on its front bumper (see `engage.py`'s module
+    # docstring for the real sequence this reproduces); a level spawn here is
+    # the exact defect this module replaces -- analytically level and
+    # airborne, `ncon == 0` at t=0, and the estimator reads free fall as 180
+    # deg of tilt. The axle also drops by `_TERRAIN_AXLE_CONTACT_MARGIN_M`,
+    # a deliberate few-tenths-of-a-mm overlap rather than a mathematically
+    # exact tangent, because "exact" on a heightfield is not exact -- see
+    # below. The euler/pitch itself is filled in once the model is fully
+    # compiled, once `_terrain_rest_pitch_deg` can test it against the REAL
+    # heightfield rather than an idealised plane.
     if xml.count(_FRAME_BODY) != 1:
         raise RuntimeError("could not find the frame body to stand on the crest")
     r = float(_FRAME_BODY.split('pos="0 0 ')[1].rstrip('">'))
-    xml = xml.replace(_FRAME_BODY, f'<body name="frame" pos="0 0 {r + amp:.6f}">', 1)
+    xml = xml.replace(
+        _FRAME_BODY,
+        f'<body name="frame" pos="0 0 {r + amp - _TERRAIN_AXLE_CONTACT_MARGIN_M:.9g}">',
+        1,
+    )
 
     if params.max_current_a is not None:
         lim = params.max_current_a * KT_NM_PER_A
@@ -359,7 +383,122 @@ def build_terrain_model(params: TerrainParams):
             f"heightfield is nearly flat (normalised span {span:.4f}); the "
             "profile did not take"
         )
+
+    # NOW pitch it nose-down onto the front bumper, against the REAL
+    # compiled heightfield -- see `_terrain_rest_pitch_deg`'s docstring for
+    # why the idealised flat-plane angle alone is not quite right here, and
+    # `test_the_board_starts_standing_on_the_crest` for the ncon > 0 guard
+    # this exists to satisfy. `model.qpos0` is what every fresh `MjData`
+    # spawns at, so this is the same lever `tilt_ground`/`_FRAME_BODY`
+    # placement uses everywhere else in this codebase -- just applied after
+    # compilation instead of in the XML, because it needs the compiled
+    # geometry to be right.
+    nose_deg = _terrain_rest_pitch_deg(model)
+    half = math.radians(nose_deg) / 2.0
+    model.qpos0[3:7] = (math.cos(half), 0.0, math.sin(half), 0.0)
+
     return model, amp
+
+
+#: Deliberate axle drop below the mathematically exact tangent height, m.
+#: NOT a defect -- a heightfield is a piecewise-bilinear approximation of the
+#: analytic cosine profile, and `HFIELD_COLS` samples of it miss the true
+#: crest height by a few MICRONS (measured; see this module's own
+#: development notes). MuJoCo registers zero contacts for a body placed at
+#: an exact tangent to within floating-point noise, which is a second,
+#: independent way to reproduce the very defect this module exists to fix.
+#: A deliberate few-tenths-of-a-mm overlap is the standard MuJoCo answer to
+#: "how far off can a spawn pose be and still reliably make contact", and it
+#: is an order of magnitude inside `test_the_board_starts_standing_on_the_
+#: crest`'s own 1 mm placement tolerance, so it does not move that test.
+_TERRAIN_AXLE_CONTACT_MARGIN_M = 0.0005
+
+#: Sweep resolution and safety pad for `_terrain_rest_pitch_deg`, degrees.
+#: The pad walks slightly PAST the first angle at which the real heightfield
+#: registers a bumper contact, for the same reason as the axle margin above:
+#: the exact crossing angle is again a hairline case, and a comfortable few
+#: tenths of a millimetre of penetration is more robust than a mathematical
+#: boundary.
+_TERRAIN_PITCH_SWEEP_STEP_DEG = 0.001
+_TERRAIN_PITCH_CONTACT_PAD_DEG = 0.05
+
+
+def _terrain_rest_pitch_deg(model) -> float:
+    """Nose-down rest pitch against the ACTUAL compiled heightfield.
+
+    `engage.resting_pitch_deg` (via `plant.strike_angles_deg`) derives this
+    angle analytically, sweeping the bumper hull against an idealised
+    ground PLANE. That is exact on the flat ground `hill.py` and
+    `shuttle_run.py` use, but not quite right here: the bumper's contact
+    point is ~90 mm inboard of the axle (see `strike_angles_deg`'s own
+    docstring), and the crest is CURVED, not flat, at any point away from
+    its exact peak. A convex crest's true height falls away from the
+    flat-plane assumption at any lateral offset -- second order in the
+    offset, `~amp * (k * dx)^2 / 2` -- which is small (sub-millimetre at
+    this scenario's amplitude and the bumper's offset) but larger than the
+    zero contact margin MuJoCo needs to register a touch, so the analytic
+    angle alone reproduces a milder version of the very "technically not
+    touching" defect this module exists to fix.
+
+    So: take the analytic angle as the derived STARTING POINT (this is the
+    "derive, don't pick" property the analytic sweep already has), then walk
+    further nose-down in fine steps, calling `mj_forward` on the real model
+    at each candidate and checking for a genuine bumper<->ground contact,
+    until the REAL geometry agrees. The wheel needs no equivalent
+    correction: it is rotationally symmetric about the same axis this pitch
+    rotates about, so its ground clearance never depends on pitch at all --
+    only `_TERRAIN_AXLE_CONTACT_MARGIN_M` (a height correction) fixes its
+    own, much smaller, heightfield-quantisation gap.
+
+    THE GUESS COMES FROM A SEPARATE, BARE PROBE MODEL, NOT `model` ITSELF.
+    `plant.strike_angles_deg` sweeps against an idealised ground plane
+    THROUGH THE WORLD ORIGIN (z=0) -- true of the flat models `hill.py`
+    builds directly, where the axle sits at exactly `r` above that plane.
+    This model's axle instead sits at `r + amp` (the crest height), so
+    feeding `model` itself to the same analytic sweep asks it "how far
+    nose-down until the bumper reaches z=0", not "until it reaches the
+    crest surface" -- off by the crest amplitude, and it was caught here by
+    a wildly wrong (tens of degrees) guess rather than a subtle one. A
+    throwaway bare model (no ballast, no terrain, axle at the plain `r` the
+    analytic sweep actually assumes) sidesteps this entirely; the strike
+    geometry it reports is a rigid-body fact of the bumper hull and the
+    wheel radius alone, unaffected by ballast mass or by whatever this
+    scenario does to the ground.
+    """
+    from .plant import build_model
+
+    ground = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
+    bumper = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "front_bumper_geom")
+    if ground < 0 or bumper < 0:
+        raise KeyError("model has no 'ground' and/or 'front_bumper_geom' geom")
+
+    guess_deg = engage.resting_pitch_deg(build_model(0.0, 0.0, None), 0.0)
+
+    data = mujoco.MjData(model)
+
+    def bumper_touches(deg: float) -> bool:
+        half = math.radians(deg) / 2.0
+        data.qpos[:] = model.qpos0
+        data.qpos[3:7] = (math.cos(half), 0.0, math.sin(half), 0.0)
+        mujoco.mj_forward(model, data)
+        for i in range(data.ncon):
+            c = data.contact[i]
+            if {c.geom1, c.geom2} == {ground, bumper}:
+                return True
+        return False
+
+    deg = guess_deg
+    for _ in range(int(20.0 / _TERRAIN_PITCH_SWEEP_STEP_DEG)):
+        if bumper_touches(deg):
+            return deg - _TERRAIN_PITCH_CONTACT_PAD_DEG
+        deg -= _TERRAIN_PITCH_SWEEP_STEP_DEG
+
+    raise RuntimeError(
+        f"swept 20 deg past the analytic guess ({guess_deg:.3f} deg) without "
+        "finding a bumper<->ground contact on the real heightfield -- the "
+        "terrain geometry or the bumper mesh changed enough that the "
+        "analytic starting point is no longer close"
+    )
 
 
 def run(
@@ -383,6 +522,19 @@ def run(
 
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
+
+    # THE CHECK WHOSE ABSENCE CAUSED THE DEFECT THIS MODULE FIXES. The board
+    # must be touching the ground before control is allowed to start at all --
+    # the original bug was exactly a board spawned airborne (`ncon == 0`),
+    # whose accelerometer then read free fall and whose estimator read that
+    # as 180 deg of tilt. This can no longer regress silently.
+    if data.ncon == 0:
+        raise RuntimeError(
+            "board spawned with zero ground contact (ncon == 0) -- refusing "
+            "to start control on an airborne board. See engage.py's module "
+            "docstring for the defect this guards against."
+        )
+
     frame = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "frame")
     ground = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
     bumper_ids = {
@@ -423,13 +575,101 @@ def run(
     flowing_a = 0.0
     m = TerrainMetrics()
 
+    # THE ENGAGE SEQUENCE (see engage.py's module docstring). The board
+    # spawns DISENGAGED, resting nose-down on its front bumper -- the state
+    # asserted above by the ncon > 0 guard. From `engage.MOUNT_DWELL_S` (feet
+    # placed, `rider_present` becomes True -- this scenario models it as a
+    # single boolean, no footpad sensor model) the board is kinematically
+    # RAMPED level over `engage.STAND_UP_S`, standing in for "rider stands
+    # up, rotating the board to level": this plant has no rider dynamics to
+    # derive that motion from (see plant.py's own module docstring).
+    #
+    # A RAMP, NOT A SNAP. An earlier version of this teleported straight to
+    # level in one step. That IS a rider standing up, physically, but the
+    # gyro at that same instant reported a rate of ~0 (it always does,
+    # correctly, right up to and right after the jump) despite the true
+    # pitch having just moved ~18.7 deg in one 2 ms step -- a rate the gyro
+    # never got to report because nothing asked it mid-jump. The estimator's
+    # gyro-integration channel had no way to have tracked a discontinuity it
+    # was never shown, so it engaged already wrong by nearly the full rest
+    # angle and immediately commanded full current to correct a tilt that no
+    # longer existed -- a milder, self-inflicted copy of the exact defect
+    # this module exists to fix. Ramping both `qpos` (position) AND
+    # `qvel[4]` (the pitch rate that produces it) every step during the
+    # stand-up gives the gyro a real, continuous, physically-consistent rate
+    # to integrate throughout, the same as a real accelerometer/gyro would
+    # see during an actual few-hundred-ms stand-up.
+    rest_pitch_rad = frame_pitch_rad(model, data)
+    stand_end_s = engage.MOUNT_DWELL_S + engage.STAND_UP_S
+    # A HOLD after the stand-up, before current is allowed to flow, sized to
+    # the controller's OWN estimator time constant rather than picked. The
+    # ease above zeros the RATE the gyro sees by the end of the stand-up, but
+    # a complementary filter that has spent the last `STAND_UP_S` tracking a
+    # fast-moving true pitch does not zero its ACCUMULATED lag just because
+    # the rate that caused it stops -- that lag only decays once the input
+    # is genuinely still, with the filter's own time constant. One tau
+    # decays it by ~63%, which measurably changed whether this scenario's
+    # marginal grades recovered or crashed on the estimate.
+    #
+    # Applied UNCONDITIONALLY, including `use_estimator=False`: measured
+    # empirically that truth pitch ALSO needs this hold at the harder grades
+    # (10% truth pitch struck the tail at 6.4 s without it, upstream of
+    # anything the attitude estimate could be responsible for) -- some other
+    # part of the cascade (plausibly `wheel_accel_tau_s`'s own low-pass, or
+    # the outer velocity loop's integrator) is warming up from the stand-up
+    # too, not only the pitch estimator. Reusing `estimator_tau_s` here even
+    # in the truth-pitch case is therefore a convenient existing timescale
+    # to hold for, not a claim about which internal filter needs it.
+    settle_end_s = stand_end_s + params.estimator_tau_s
+    ramp_settled = False
+    state = engage.EngageState.DISENGAGED
+
     with controller_factory() as ctl:
         for _ in range(n_steps):
             t = float(data.time)
+            rider_present = t >= engage.MOUNT_DWELL_S
+
+            if engage.MOUNT_DWELL_S <= t < stand_end_s:
+                # A COSINE EASE, not a constant-rate ramp: rate is zero at
+                # both ends of the stand-up and peaks in the middle -- both
+                # a more honest model of a person actually standing up
+                # (nobody starts or stops a lean at full speed) and, usefully,
+                # it hands the estimator's gyro-integration channel a rate
+                # that has already decayed back to ~0 by the time the hold
+                # below begins, rather than the worst-case CONSTANT lag a
+                # linear ramp leaves right at its endpoint.
+                frac = (t - engage.MOUNT_DWELL_S) / engage.STAND_UP_S
+                target_pitch_rad = rest_pitch_rad * 0.5 * (1.0 + math.cos(math.pi * frac))
+                rate_rad_s = (
+                    -rest_pitch_rad * 0.5 * math.pi / engage.STAND_UP_S
+                    * math.sin(math.pi * frac)
+                )
+                half = target_pitch_rad / 2.0
+                data.qpos[3:7] = (math.cos(half), 0.0, math.sin(half), 0.0)
+                data.qvel[:] = 0.0
+                data.qvel[4] = rate_rad_s
+                mujoco.mj_forward(model, data)
+            elif stand_end_s <= t < settle_end_s:
+                # Holding level, at rest, rider present -- exactly the engage
+                # gate's own conditions -- while the estimator's residual lag
+                # from tracking the stand-up decays on its own.
+                data.qpos[3:7] = (1.0, 0.0, 0.0, 0.0)
+                data.qvel[:] = 0.0
+                mujoco.mj_forward(model, data)
+            elif t >= settle_end_s and not ramp_settled:
+                ramp_settled = True
+
             pitch_rad = frame_pitch_rad(model, data)
             wheel_true = float(data.qvel[6])
             true_gyro, true_accel = imu_readings(model, data)
 
+            state = engage.transition(state, rider_present, pitch_rad, wheel_true * R_EFF_M)
+            if m.t_engaged_s is None and state is engage.EngageState.ENGAGED:
+                m.t_engaged_s = t
+
+            # The estimator runs every cycle regardless of engage state (its
+            # own convergence should not restart at the moment of engaging);
+            # only the CURRENT it asks for is gated below.
             proposed = float(ctl(
                 t, pitch_rad, imp.gyro(float(data.qvel[4])),
                 imp.wheel_rate(wheel_true, t),
@@ -437,6 +677,19 @@ def run(
                 accel_m_s2=imp.accel_vec(true_accel),
                 motor_current_a=flowing_a,
             ))
+            # `ramp_settled`, not just `state`: the engage GATE (rider
+            # present, near level, at rest) can go true a little before the
+            # scripted stand-up motion itself finishes (the level threshold
+            # is a band, not the ramp's exact endpoint), and driving the
+            # motor while that kinematic override is still active every step
+            # would fight it -- the override does not re-zero the wheel's
+            # own rotation each step, only its rate, so a real torque
+            # commanded during that window still ratchets the wheel forward
+            # a little each cycle even though it is discarded every other
+            # way. No current flows until the rider has actually finished
+            # standing up.
+            if state is not engage.EngageState.ENGAGED or not ramp_settled:
+                proposed = 0.0
 
             available = profile.available_current_a(wheel_true)
             if abs(proposed) > available + 1e-9:
@@ -462,15 +715,22 @@ def run(
             if capture_state:
                 states.append(data.qpos.copy())
 
-            m.peak_abs_pitch_deg = max(m.peak_abs_pitch_deg, abs(pitch_deg))
-            m.max_grade_seen_pct = max(m.max_grade_seen_pct, abs(grade))
+            # Gated on `ramp_settled`: before the rider stands up, the board
+            # is deliberately resting nose-down on its bumper (that IS the
+            # spawn pose the ncon > 0 guard checks for) and then kinematically
+            # ramping level -- neither the rest angle nor the ramp's own
+            # bumper contact is "peak pitch" or a "strike"; both describe the
+            # mount, not the ride.
+            if ramp_settled:
+                m.peak_abs_pitch_deg = max(m.peak_abs_pitch_deg, abs(pitch_deg))
+                m.max_grade_seen_pct = max(m.max_grade_seen_pct, abs(grade))
             if m.t_reached_dip_s is None and fwd >= length / 2.0:
                 m.t_reached_dip_s = float(data.time)
                 m.est_error_at_dip_deg = ests[-1] - pitch_deg
             if m.t_reached_crest_s is None and fwd >= length:
                 m.t_reached_crest_s = float(data.time)
 
-            if _bumper_ground_contact(model, data, ground, set(bumper_ids)) is not None:
+            if ramp_settled and _bumper_ground_contact(model, data, ground, set(bumper_ids)) is not None:
                 m.nose_strike = True
                 m.t_strike_s = float(data.time)
                 ends = set()
