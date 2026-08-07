@@ -66,6 +66,7 @@ extern "C" {
     fn plant_mujoco_joint_dofadr(model: *mut c_void, joint_id: c_int) -> c_int;
     fn plant_mujoco_set_qpos_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
+    fn plant_mujoco_ncon(data: *mut c_void) -> c_int;
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -588,6 +589,18 @@ impl Plant {
         // per-body stride expects.
         unsafe { plant_mujoco_set_xfrc_applied(self.data, body_id as c_int, frc6.as_ptr()) };
     }
+
+    /// `mjData::ncon` -- the number of active contacts this step (issue:
+    /// engage-button). Added for `sim-host`'s engage gate, mirroring
+    /// `sim/scenarios/engage.py`'s own `data.ncon > 0` ground-contact check
+    /// (see that module's docstring for the free-fall defect the check
+    /// catches: a board spawned or lifted clear of the ground reads `ncon ==
+    /// 0`, and nothing about a low pitch or a stopped wheel tells you that on
+    /// its own).
+    pub fn ncon(&self) -> i32 {
+        // SAFETY: `self.data` is non-null and owned for the life of `self`.
+        unsafe { plant_mujoco_ncon(self.data) }
+    }
 }
 
 impl Drop for Plant {
@@ -628,6 +641,33 @@ mod tests {
         assert!(
             plant.time() > t1,
             "stepping repeatedly keeps advancing time"
+        );
+    }
+
+    /// `mjData::ncon` is not populated until collision detection has run at
+    /// least once (`forward()` or `step()`) -- a freshly made `mjData` is
+    /// zeroed. Pinned so a caller reading `ncon()` before either has any
+    /// chance of noticing it means nothing yet, rather than silently reading
+    /// a stale zero and mistaking it for "not in contact".
+    #[test]
+    fn ncon_is_zero_before_the_first_forward_or_step() {
+        let plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        assert_eq!(plant.ncon(), 0);
+    }
+
+    /// The onewheel model spawns wheel-tangent to the ground plane (`frame`'s
+    /// own `pos` z is the wheel's effective radius -- see this model's own
+    /// header), so a single `forward()` -- no step needed -- must already
+    /// report at least one contact. This is the property `sim-host`'s engage
+    /// gate (issue: engage-button) leans on to tell an in-contact board apart
+    /// from one spawned or lifted clear of the ground.
+    #[test]
+    fn ncon_is_positive_once_the_resting_onewheel_is_forwarded() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        plant.forward();
+        assert!(
+            plant.ncon() > 0,
+            "the model's own resting pose should already be in ground contact"
         );
     }
 

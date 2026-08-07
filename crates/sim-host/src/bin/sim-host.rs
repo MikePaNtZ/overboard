@@ -327,14 +327,26 @@ fn main() -> ExitCode {
         }
     }
 
+    // Issue: engage-button -- a scripted run has no synthetic Unreal client
+    // to press the engage button, and every acceptance harness in this repo
+    // (`tests/test_*.py`) runs one; see `HostConfig::start_engaged`'s own
+    // doc comment for why this is the one flag that flips the default
+    // rather than needing its own `--start-engaged` switch. A deployed run
+    // (no `--scripted-scenario`) is unaffected: it starts DISENGAGED and
+    // waits for a real press, same as before this comment existed.
+    if cfg.scripted_scenario.is_some() {
+        cfg.start_engaged = true;
+    }
+
     eprintln!(
         "sim-host: starting -- state out to {}, input in on {}, duration={:?}, \
-         startup_kick={}, scripted={}, imu_noise_seed={:?}",
+         startup_kick={}, scripted={}, start_engaged={}, imu_noise_seed={:?}",
         cfg.state_out_addr,
         cfg.input_in_addr,
         cfg.duration,
         cfg.startup_kick,
         cfg.scripted_scenario.is_some(),
+        cfg.start_engaged,
         cfg.imu_noise_seed
     );
 

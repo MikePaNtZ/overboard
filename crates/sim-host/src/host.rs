@@ -1040,6 +1040,144 @@ pub const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
 /// clearly down", not precise enough to gate a published claim.
 const FALLEN_PITCH_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
 
+// --- ENGAGE STATE MACHINE (issue: engage-button) --------------------------
+//
+// Extends `sim/scenarios/engage.py`'s `DISENGAGED -> ARMED -> ENGAGED`
+// machine into the game-facing host: today `flags` sets `STATE_FLAG_ARMED`
+// UNCONDITIONALLY every tick and `INPUT_FLAG_ARM` is received and logged but
+// gates nothing (see `LatestInput::armed_bit`). This section makes the arm
+// bit a real button: a rising edge attempts an engage, gated by the same
+// preconditions that module derives `ENGAGED` from, and torque is commanded
+// only while actually engaged.
+//
+// **Two states here, not that module's three.** `engage.py`'s `ARMED` is a
+// waiting room for the gap between "rider detected" and "conditions for
+// engagement are actually met", evaluated fresh on every simulation step of
+// a SCRIPTED mount sequence. There is no equivalent gap on this wire: a
+// button press is a single discrete event, evaluated once against whatever
+// the preconditions read at that instant, so there is nothing for an
+// intermediate state to hold open between ticks.
+//
+// **Three preconditions here, not that module's four.** `rider_present` has
+// no counterpart on this wire because it has no counterpart in this plant:
+// `sim-host` steps the RIDDEN model (`overboard_rider.xml`), where the rider
+// ballast is baked into the physics unconditionally from t=0 (see this
+// file's own header, "W2: the ridden plant") -- unlike the driverless model
+// `engage.py`/`terrain.py` gate, there is no mount/dismount sequence and so
+// no sensor bit for a rider-presence check to read. `contact`, `near_level`
+// and `at_rest` carry over unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngageState {
+    /// Motor commands zero current. Yaw-aim (see the bottom of [`run`]'s loop
+    /// body) is live in this state and ONLY this state.
+    Disengaged,
+    /// The regulator drives the motor and the riding-turn yaw law applies.
+    Engaged,
+}
+
+/// Near-level threshold for an engage press, radians -- mirrors
+/// `sim/scenarios/engage.py::LEVEL_THRESHOLD_RAD` exactly (5 deg), including
+/// that module's own caveat: **NEEDS A HARDWARE-GATE NUMBER**, no measured
+/// figure for "level enough to engage" exists yet. Duplicated rather than
+/// imported because this crate has no Python dependency to share the
+/// constant with -- the same duplication convention `CYCLE_NS`/`KT_NM_PER_A`
+/// already use against their own Python/model counterparts.
+const ENGAGE_LEVEL_THRESHOLD_RAD: f32 = 0.087; // 5 degrees
+
+/// At-rest speed for an engage press, m/s -- mirrors
+/// `sim/scenarios/engage.py::AT_REST_SPEED_M_S`'s own derivation: one
+/// wheel-rate sensor quantum (`RAD_S_PER_ERPM`) times the model's effective
+/// rolling radius (`DEFAULT_R_EFF_M`), i.e. the tightest bound that means
+/// anything physically -- below it the real sensor cannot distinguish
+/// "moving" from "stationary" at all.
+const ENGAGE_AT_REST_SPEED_M_S: f32 = RAD_S_PER_ERPM * DEFAULT_R_EFF_M;
+
+/// Whether an engage BUTTON PRESS succeeds, extracted as a pure function
+/// so the property under test is "these three conditions AND together",
+/// not a re-typed copy of whatever `run` happens to compute them from.
+///
+/// `rider_present` is deliberately absent -- see the module-level comment
+/// above this whole section for why this host has no bit for it.
+fn engage_preconditions_met(contact: bool, near_level: bool, at_rest: bool) -> bool {
+    contact && near_level && at_rest
+}
+
+/// Ground speed at/below which the board counts as "stopped" for the
+/// auto-disengage-on-stop gate, m/s -- CEO decision (issue: engage-button),
+/// game-facing and NOT how a real Onewheel behaves.
+///
+/// **A real Onewheel stays ENGAGED at a standstill** -- that is how a rider
+/// balances stationary -- and disengages on heel-lift, never on speed alone.
+/// Auto-disengage-on-stop is a deliberate departure the CEO asked for
+/// because it reads better for exploring the game world: press start, ride
+/// somewhere, coast to a stop, the board settles nose-down and the rider is
+/// free to look around without holding a balance input. Recorded here so a
+/// future reader does not "fix" this back toward the real board's behaviour
+/// without knowing it was a choice, not an oversight.
+///
+/// Deliberately ABOVE [`ENGAGE_AT_REST_SPEED_M_S`] (which is a sensor-
+/// quantum floor, ~0.001 m/s, too tight to ever hold for a full dwell on a
+/// board that is merely coasting to a very slow crawl) -- a documented pacing
+/// choice, not a measured one, in the same spirit as `engage.py`'s own
+/// `MOUNT_DWELL_S`/`STAND_UP_S`.
+const AUTO_DISENGAGE_SPEED_M_S: f32 = 0.1;
+
+/// How long [`AUTO_DISENGAGE_SPEED_M_S`] (plus near-level, plus no active
+/// stick) must hold continuously before the board actually disengages,
+/// seconds.
+///
+/// **This dwell is the whole point, not a rounding detail.** A bare
+/// instantaneous speed threshold fires at the top of a hill climb (the board
+/// nearly stalls at the crest under full forward stick, then continues),
+/// at the apex of a carve (momentary near-zero forward speed while turning),
+/// and transiently on rough terrain (a bump can zero the wheel-rate reading
+/// for a tick or two) -- disengaging in any of those tips the board
+/// nose-down out from under a rider who never stopped riding. Requiring the
+/// condition to hold for a full second rejects all three: none of them holds
+/// stopped, level and stick-free for that long, only an actual stop does.
+///
+/// A documented pacing choice, not bench-measured.
+const AUTO_DISENGAGE_DWELL_S: f32 = 1.0;
+
+/// Fraction of full stick, on ANY of `weight_shift_fore_aft`/
+/// `weight_shift_lateral`/`steer`, above which the rider counts as actively
+/// commanding something and the auto-disengage-on-stop dwell above resets --
+/// the "top of a hill climb" case from [`AUTO_DISENGAGE_DWELL_S`]'s own doc
+/// comment: full forward stick held against a stall is not a stop, whatever
+/// the wheel-rate sensor reads. A small deadband rather than an exact-zero
+/// check, so residual stick noise/drift cannot hold the dwell open forever.
+const AUTO_DISENGAGE_STICK_DEADBAND: f32 = 0.05;
+
+/// Whether the auto-disengage-on-stop condition holds THIS tick -- pure
+/// function, same reasoning as [`engage_preconditions_met`]. The DWELL
+/// itself (accumulating this being true for [`AUTO_DISENGAGE_DWELL_S`]) is
+/// state, and lives in `run`'s own loop, not here.
+fn auto_disengage_condition_met(
+    forward_speed_m_s: f32,
+    pitch_rad: f32,
+    stick_active: bool,
+) -> bool {
+    forward_speed_m_s.abs() <= AUTO_DISENGAGE_SPEED_M_S
+        && pitch_rad.abs() <= ENGAGE_LEVEL_THRESHOLD_RAD
+        && !stick_active
+}
+
+/// Yaw-aim rate while [`EngageState::Disengaged`], rad/s per unit steer --
+/// rotates the board+rider on the spot so the rider can aim before pressing
+/// start (issue: engage-button). Permitted ONLY while disengaged: once
+/// engaged, `steer` reverts to the riding-turn law ([`yaw_rate_rad_s`]
+/// below), which is already exactly zero at zero ground speed (`
+/// full_steer_at_a_standstill_injects_nothing`) -- this constant is what
+/// fills that gap for a stationary, unpowered board, which that law was
+/// never meant to move at all.
+///
+/// A FEEL number on a declared non-physical channel, same status as
+/// [`YAW_CURVATURE_PER_STEER_RAD_PER_M`] -- not derived, chosen modest: a
+/// full 2*pi spin at full steer takes ~6.3 s, comfortably slower than the
+/// riding-turn law's own top rate, so aiming reads as a deliberate pivot
+/// rather than a flick.
+const AIM_YAW_RATE_RAD_S_PER_STEER: f32 = 1.0;
+
 /// Soft, host-side drivable-corridor bounds, checked against **MuJoCo's own
 /// truth position** -- issue #161 follow-up, item 4: the CEO wants the board
 /// to stop passing through walls, curbs and map boundaries.
@@ -1358,6 +1496,24 @@ pub struct HostConfig {
     /// during the loop: a 500 Hz control thread does not do file I/O per
     /// tick, and the trace exists to measure the loop, not to perturb it.
     pub trace_path: Option<PathBuf>,
+
+    /// **Verification only.** Starts the run already [`EngageState::
+    /// Engaged`], skipping the button-press gate entirely (issue:
+    /// engage-button).
+    ///
+    /// `false` -- DISENGAGED at start, requiring an explicit
+    /// `INPUT_FLAG_ARM` press before the motor commands anything -- is the
+    /// deployed default and the only value the real `sim-host` binary sets
+    /// on its own. Every acceptance harness this crate ships
+    /// (`--scripted-scenario`, `send-input`, `wire-probe`) measures the
+    /// CONTROL LAW, not the button, and none of them runs a synthetic Unreal
+    /// client that would ever send that press -- exactly the same reasoning
+    /// `run`'s own `backend.arm()` call already applies to the hal-level arm
+    /// bit ("there is no synthetic Unreal client during a verification
+    /// run"). `sim-host.rs`'s CLI sets this to `true` automatically whenever
+    /// `--scripted-scenario` is given, so every existing acceptance sweep
+    /// stays bit-identical without a new flag to remember.
+    pub start_engaged: bool,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1436,6 +1592,7 @@ impl Default for HostConfig {
             crr_scale: 1.0,
             imu_noise_seed: None,
             trace_path: None,
+            start_engaged: false,
         }
     }
 }
@@ -1711,12 +1868,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         });
     }
     backend.open().map_err(HostError::Backend)?;
-    // Armed unconditionally at startup, the same way every other Rust-hosted
+    // `backend.arm()` is the HAL/safety-envelope layer -- "the actuator path
+    // is plausible and may carry a command" -- and stays armed
+    // unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
-    // tests): there is no synthetic Unreal client during a verification run,
-    // and this host does not gate balancing on the input socket's `arm` bit
-    // -- see `LatestInput::armed_bit`, tracked and logged but not wired to
-    // anything.
+    // tests): there is no synthetic Unreal client during a verification run
+    // to withhold it. This is a DIFFERENT layer from the engage state
+    // machine below (issue: engage-button), which now DOES gate on the input
+    // socket's `arm` bit (`LatestInput::armed_bit`) -- an armed-but-
+    // disengaged backend still commands zero current, exactly as
+    // `sim/scenarios/engage.py`'s own module docstring specifies for its
+    // Python callers.
     let _disarm = backend.arm().map_err(HostError::Backend)?;
 
     // CYCLE_NS is a duplicated constant, not derived -- checked against
@@ -1756,6 +1918,23 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut prev_armed_bit = false;
     let mut prev_reset_bit = false;
     let mut prev_kick_bit = false;
+    // The engage state machine (issue: engage-button) -- see its own
+    // module-level comment above [`EngageState`]. `cfg.start_engaged` is the
+    // verification-only escape hatch every scripted/CLI harness needs (no
+    // synthetic Unreal client ever presses the button); the real binary
+    // leaves it `false`.
+    let mut engage_state = if cfg.start_engaged {
+        EngageState::Engaged
+    } else {
+        EngageState::Disengaged
+    };
+    // `Some(t)` from the moment the auto-disengage-on-stop condition
+    // (`auto_disengage_condition_met`) first held continuously, `t` being
+    // the sim time it started -- `None` whenever it does not hold this tick,
+    // so any interruption (speed climbs back up, the board tips off level,
+    // the rider touches a stick) restarts the dwell from zero rather than
+    // accumulating across gaps.
+    let mut stopped_since_s: Option<f64> = None;
     // `Some(t)` while an on-demand fall kick (issue #161 follow-up, item 5)
     // is in its force-application window, `t` being the sim time it started
     // -- mirrors `STARTUP_KICK_T0_S`'s fixed window but anchored to whenever
@@ -1947,21 +2126,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             last_forward_speed_m_s,
         );
 
-        // `arm`/`reset` bits: accepted and tracked, logged on change rather
-        // than every tick. Neither gates anything yet -- the host self-arms
-        // unconditionally (see the comment on `backend.arm()` above), and
-        // there is no reset implementation to wire `reset` into. `stale`
-        // zeroes both the same way it zeroes weight_shift/steer.
+        // `arm`/`reset` bits: accepted and tracked here; `reset` still gates
+        // nothing (no reset implementation exists to wire it into). `arm`'s
+        // RISING EDGE is now the engage-button press (issue: engage-button)
+        // -- captured here, but evaluated further down, once this tick's
+        // fresh pitch/speed/contact truth is available (see the "ENGAGE
+        // STATE MACHINE" block below, after `wait_observe`). `stale` zeroes
+        // both the same way it zeroes weight_shift/steer.
         let input_armed_bit = !stale && latest_input.armed_bit;
         let input_reset_bit = !stale && latest_input.reset_bit;
+        let arm_pressed_this_tick = input_armed_bit && !prev_armed_bit;
         if input_reset_bit && !prev_reset_bit {
             eprintln!("sim-host: input reset bit set -- not implemented yet, ignoring");
-        }
-        if input_armed_bit != prev_armed_bit {
-            eprintln!(
-                "sim-host: input arm bit is now {input_armed_bit} \
-                 (host self-arms regardless of this bit)"
-            );
         }
         prev_armed_bit = input_armed_bit;
         prev_reset_bit = input_reset_bit;
@@ -2137,6 +2313,85 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let (pitch_rad, roll_rad) = body_pitch_roll_rad(&xmat, yaw_rad);
         let truth_pitch_rate_rad_s = backend.truth_body_pitch_rate_rad_s();
 
+        // --- ENGAGE STATE MACHINE (issue: engage-button) -----------------
+        //
+        // Evaluated HERE, against THIS tick's fresh truth (pitch/roll just
+        // computed above, `forward_speed_m_s` from this tick's own
+        // `wait_observe`, contact read fresh below) -- deliberately NOT on
+        // the one-cycle-lagged values the speed cap/corridor check above use.
+        // A button press and the auto-disengage-on-stop check are each a
+        // discrete, edge-triggered decision, not a per-cycle scaling of a
+        // continuous command, so there is no actuation buffering to respect
+        // here and no reason to accept an extra cycle of staleness on either.
+        let contact = backend.truth_ncon() > 0;
+        let near_level = pitch_rad.abs() <= ENGAGE_LEVEL_THRESHOLD_RAD;
+        let at_rest = forward_speed_m_s.abs() <= ENGAGE_AT_REST_SPEED_M_S;
+
+        if arm_pressed_this_tick {
+            match engage_state {
+                EngageState::Disengaged => {
+                    if engage_preconditions_met(contact, near_level, at_rest) {
+                        engage_state = EngageState::Engaged;
+                        stopped_since_s = None;
+                        eprintln!(
+                            "sim-host: ENGAGED at sim_t={t_known_s:.3}s (pitch \
+                             {:+.1} deg, speed {forward_speed_m_s:+.3} m/s)",
+                            pitch_rad.to_degrees(),
+                        );
+                    } else {
+                        // A press with preconditions unmet must do nothing
+                        // AND be observable (issue: engage-button) -- on the
+                        // wire that is `STATE_FLAG_ARMED` simply never going
+                        // high despite the player's own `INPUT_FLAG_ARM`
+                        // press, which needs no new field to see (ADR-0010).
+                        // This log is the same diagnosis from the host's own
+                        // side, in the same "log on the edge" style as the
+                        // corridor/authority-warning events below.
+                        eprintln!(
+                            "sim-host: engage press REJECTED at sim_t={t_known_s:.3}s -- \
+                             contact={contact} near_level={near_level} (pitch {:+.1} deg, \
+                             limit {:.1} deg) at_rest={at_rest} (speed \
+                             {forward_speed_m_s:+.3} m/s, limit {:.3} m/s)",
+                            pitch_rad.to_degrees(),
+                            ENGAGE_LEVEL_THRESHOLD_RAD.to_degrees(),
+                            ENGAGE_AT_REST_SPEED_M_S,
+                        );
+                    }
+                }
+                EngageState::Engaged => {
+                    eprintln!("sim-host: engage press ignored -- already engaged");
+                }
+            }
+        }
+
+        // Auto-disengage-on-stop -- a CEO decision, game-facing and NOT how
+        // a real Onewheel behaves; see AUTO_DISENGAGE_SPEED_M_S's own doc
+        // comment. `stick_active` reads the RAW player intent (before the
+        // command-envelope reserve/speed cap/corridor brake reshape it),
+        // because the dwell needs to know whether the RIDER is asking for
+        // something, not whether the shaped command happens to be small.
+        if engage_state == EngageState::Engaged {
+            let stick_active = stick_fore_aft.abs() > AUTO_DISENGAGE_STICK_DEADBAND
+                || weight_shift_lateral.abs() > AUTO_DISENGAGE_STICK_DEADBAND
+                || steer.abs() > AUTO_DISENGAGE_STICK_DEADBAND;
+            if auto_disengage_condition_met(forward_speed_m_s, pitch_rad, stick_active) {
+                let since = *stopped_since_s.get_or_insert(t_known_s);
+                if t_known_s - since >= AUTO_DISENGAGE_DWELL_S as f64 {
+                    engage_state = EngageState::Disengaged;
+                    stopped_since_s = None;
+                    eprintln!(
+                        "sim-host: AUTO-DISENGAGED at sim_t={t_known_s:.3}s -- stopped for \
+                         {AUTO_DISENGAGE_DWELL_S:.1}s (pitch {:+.1} deg)",
+                        pitch_rad.to_degrees(),
+                    );
+                }
+            } else {
+                stopped_since_s = None;
+            }
+        } else {
+            stopped_since_s = None;
+        }
+
         // --- ADR-0011 criterion (f): the estimator bias, removed ---------
         //
         // On a deployed run this is the `Estimator` arm and the regulator
@@ -2152,8 +2407,20 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Zero on any deployed run, so this whole line is a no-op there --
         // see HostConfig::pitch_bias_deg.
         let regulated_pitch_rad = source_pitch_rad + pitch_bias_rad;
-        let proposed_torque_nm =
-            regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, 0.0);
+        // DISENGAGED (or not yet pressed) commands ZERO current -- the same
+        // rule `sim/scenarios/engage.py`'s own module docstring states for
+        // its Python callers ("the caller must command zero current...this
+        // function only says what state the board is in, never drives the
+        // motor itself"). `PitchRegulator::update` is a pure function of its
+        // arguments (no persistent filter/integrator state -- see its own
+        // definition), so simply not using its output here carries no risk
+        // of a stale term reappearing on the next engage.
+        let proposed_torque_nm = match engage_state {
+            EngageState::Engaged => {
+                regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, 0.0)
+            }
+            EngageState::Disengaged => 0.0,
+        };
         // The single kt division -- the actuation boundary (issue #137).
         let proposed_amps = proposed_torque_nm / KT_NM_PER_A;
         // --- ADR-0011 criterion (c): the saturation bit STOPS being thrown
@@ -2257,7 +2524,15 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // own declared non-physical channel, not this crate's to fake.
         let (rider_fore_aft_m, rider_lateral_m) = backend.truth_ballast_positions();
 
-        let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
+        // `STATE_FLAG_ARMED` now tracks the engage state machine (issue:
+        // engage-button) rather than being set unconditionally -- without
+        // this, a game showing a disengaged banner would have nothing on
+        // the wire to disagree with it against a real host, whatever the
+        // game itself does.
+        let mut flags = wire::STATE_FLAG_VALID;
+        if engage_state == EngageState::Engaged {
+            flags |= wire::STATE_FLAG_ARMED;
+        }
         let fallen = pitch_rad.abs() > FALLEN_PITCH_RAD;
         if fallen {
             flags |= wire::STATE_FLAG_FALLEN;
@@ -2375,8 +2650,23 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // `forward_speed_m_s`, so turn radius stops depending on speed (as a
         // real vehicle's does). At a standstill this is exactly zero, and the
         // gate below then makes the whole injection a literal no-op.
-        let yaw_rate_rad_s = yaw_rate_rad_s(steer, forward_speed_m_s, roll_authority);
-        let dyaw_rad = -yaw_rate_rad_s * DT_S as f32;
+        //
+        // **Issue: engage-button -- `steer` now means two different things,
+        // and `engage_state` is what picks which one.** While ENGAGED it is
+        // this riding-turn law, unchanged. While DISENGAGED it is yaw-AIM
+        // instead (`AIM_YAW_RATE_RAD_S_PER_STEER`'s own doc comment): a flat
+        // rotation-on-the-spot rate, so the rider can aim a stationary board
+        // before pressing start. This is what the game's steer multiplexing
+        // relies on ("the game does NOT gate `steer` on engage state...the
+        // differentiation is the host's") -- the riding-turn law is already
+        // exactly zero at zero ground speed, which is why a disengaged,
+        // stationary board would otherwise never turn at all without this.
+        let dyaw_rad = match engage_state {
+            EngageState::Engaged => {
+                -yaw_rate_rad_s(steer, forward_speed_m_s, roll_authority) * DT_S as f32
+            }
+            EngageState::Disengaged => -AIM_YAW_RATE_RAD_S_PER_STEER * steer * DT_S as f32,
+        };
         // GATED ON EXACT ZERO, deliberately. With no steer (or no ground
         // speed) the plant must evolve bit-identically to the pre-#163 code:
         // this loop injects nothing, writes nothing, and the only remaining
@@ -2986,5 +3276,71 @@ mod tests {
             previous = rate;
         }
         assert_eq!(yaw_rate_rad_s(1.0, 0.0, 1.0), 0.0);
+    }
+
+    // --- Engage state machine (issue: engage-button) ---------------------
+
+    /// All three preconditions must hold AT ONCE. Each one missing alone
+    /// must still reject the press, or this degenerates into an OR.
+    #[test]
+    fn engage_press_needs_all_three_preconditions_together() {
+        assert!(engage_preconditions_met(true, true, true));
+        assert!(!engage_preconditions_met(false, true, true), "no contact");
+        assert!(!engage_preconditions_met(true, false, true), "not level");
+        assert!(!engage_preconditions_met(true, true, false), "not at rest");
+        assert!(!engage_preconditions_met(false, false, false));
+    }
+
+    /// The auto-disengage condition is the same "all three together" shape,
+    /// with the stick check inverted (active stick BLOCKS it, per the "top
+    /// of a hill climb" case AUTO_DISENGAGE_DWELL_S's own doc comment names).
+    #[test]
+    fn auto_disengage_condition_needs_stopped_level_and_no_active_stick() {
+        assert!(auto_disengage_condition_met(0.0, 0.0, false));
+        assert!(
+            !auto_disengage_condition_met(AUTO_DISENGAGE_SPEED_M_S * 2.0, 0.0, false),
+            "too fast to count as stopped"
+        );
+        assert!(
+            !auto_disengage_condition_met(0.0, ENGAGE_LEVEL_THRESHOLD_RAD * 2.0, false),
+            "not level"
+        );
+        assert!(
+            !auto_disengage_condition_met(0.0, 0.0, true),
+            "the top-of-a-hill-climb case: a stick held against a stall must not disengage"
+        );
+    }
+
+    /// At the boundary itself the condition holds (`<=`, matching
+    /// `engage_preconditions_met`'s own `at_rest`/`near_level` gates, which
+    /// use the same convention) -- pinned so a future edit cannot silently
+    /// flip either bound to a strict `<` and shrink the window by one ULP.
+    #[test]
+    fn auto_disengage_condition_is_inclusive_at_its_own_thresholds() {
+        assert!(auto_disengage_condition_met(
+            AUTO_DISENGAGE_SPEED_M_S,
+            ENGAGE_LEVEL_THRESHOLD_RAD,
+            false
+        ));
+    }
+
+    /// The whole reason yaw-aim exists: a full-steer command on a
+    /// DISENGAGED, stationary board must actually turn it -- unlike the
+    /// riding-turn law, which `full_steer_at_a_standstill_injects_nothing`
+    /// already pins as a literal no-op at zero speed.
+    #[test]
+    fn yaw_aim_turns_a_stationary_disengaged_board() {
+        let dyaw = -AIM_YAW_RATE_RAD_S_PER_STEER * 1.0 * DT_S as f32;
+        assert_ne!(
+            dyaw, 0.0,
+            "full steer while disengaged must inject a nonzero heading change"
+        );
+    }
+
+    /// Zero steer must still inject nothing while aiming -- aim is a steer-
+    /// proportional rate, not a constant drift.
+    #[test]
+    fn yaw_aim_is_a_no_op_with_no_steer() {
+        assert_eq!(-AIM_YAW_RATE_RAD_S_PER_STEER * 0.0 * DT_S as f32, 0.0);
     }
 }

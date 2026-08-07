@@ -429,6 +429,23 @@ impl SimBackend {
         plant.body_xquat(self.frame_body)
     }
 
+    /// Ground-truth number of active contacts this step (`mjData::ncon`).
+    /// Same non-`hal`, harness-only status as every other `truth_*` accessor
+    /// here -- added for `sim-host`'s engage gate (issue: engage-button),
+    /// mirroring `sim/scenarios/engage.py`'s own `data.ncon > 0` ground-
+    /// contact check: a board spawned or knocked clear of the ground reads
+    /// `ncon == 0`, which neither pitch nor speed alone can tell you.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_ncon(&self) -> i32 {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("truth_ncon: backend is not open");
+        plant.ncon()
+    }
+
     /// Ground-truth ballast joint positions, metres, signed -- the ACTUAL
     /// `ballast_fa`/`ballast_lat` `qpos`, not the commanded target
     /// (issue #161 wire v2: "send the real joint position ... the ballast

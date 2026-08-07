@@ -242,6 +242,15 @@ int plant_mujoco_joint_dofadr(void* model, int joint_id) {
   return ((mjModel*)model)->jnt_dofadr[joint_id];
 }
 
+// `mjData::ncon` -- the number of active contacts this step, issue:
+// engage-button. `sim/scenarios/engage.py`'s own DISENGAGED->ENGAGED gate
+// checks `data.ncon > 0` on the Python side (see that module's docstring for
+// the free-fall defect it exists to catch); this is the same read for
+// `sim-host`'s Rust-hosted engage gate.
+int plant_mujoco_ncon(void* data) {
+  return ((mjData*)data)->ncon;
+}
+
 // The only WRITE path into qpos/qvel this crate exposes, and deliberately a
 // RANGE write rather than a whole-array one (issue #163's kinematic yaw
 // injection): the caller names exactly which slots it means, so a bug can
