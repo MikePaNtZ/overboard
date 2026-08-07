@@ -24,12 +24,20 @@ NET_SRC="$BOOT/overboard-net.d"
 NM_DIR="/etc/NetworkManager/system-connections"
 USERCONF="$BOOT/overboard-userconf"
 AUTHKEYS="$BOOT/overboard-authorized_keys"
+# Written only once this script reaches its end without error. The unit's
+# ConditionPathExists gates on this file's ABSENCE, not on USERCONF/AUTHKEYS
+# still being there -- those get shredded as the last step below, so gating
+# on them made a script that died partway (or was interrupted by a hung
+# boot) look identical to one that finished: the next boot would see the
+# trigger file already gone and skip retrying with no config ever installed.
+DONE="$BOOT/overboard-firstboot.done"
 
 log() { echo "overboard-firstboot: $*"; }
 
 # Nothing staged is the normal state on every boot after the first.
 if [ ! -d "$NET_SRC" ] && [ ! -f "$USERCONF" ]; then
   log "no staged configuration - nothing to do"
+  touch "$DONE" 2>/dev/null || true
   exit 0
 fi
 
@@ -94,7 +102,13 @@ if [ "${ssh_password_auth:-false}" = "false" ]; then
     > /etc/ssh/sshd_config.d/10-overboard.conf
   log "SSH password authentication disabled (key-only)"
 fi
-systemctl enable --now ssh >/dev/null 2>&1 || log "WARNING: could not enable ssh"
+# NOT `--now`: this script runs from inside the boot transaction as
+# overboard-firstboot.service, which is ordered `Before=NetworkManager.service`
+# and (transitively, via multi-user.target) before ssh.service too. `--now`
+# would try to start ssh synchronously from within that same transaction --
+# a circular wait that hangs the boot forever. `enable` alone drops the
+# symlink; multi-user.target starts the unit once this transaction finishes.
+systemctl enable ssh >/dev/null 2>&1 || log "WARNING: could not enable ssh"
 
 # ---------------------------------------------------------------------------
 # Wi-Fi
@@ -110,7 +124,11 @@ if [ -d "$NET_SRC" ]; then
     count=$((count + 1))
   done
   log "installed $count wifi profile(s)"
-  nmcli connection reload 2>/dev/null || systemctl reload NetworkManager 2>/dev/null || true
+  # No reload call: this unit is ordered Before=NetworkManager.service, so NM
+  # has not started yet and will read this directory itself when it does.
+  # `nmcli connection reload` here would try to D-Bus-activate a service that
+  # is ordered to start *after* this one -- the same kind of ordering bug
+  # `--now` above was.
 fi
 
 # ---------------------------------------------------------------------------
@@ -129,4 +147,5 @@ fi
 [ -f "$AUTHKEYS" ] && { shred -u "$AUTHKEYS" 2>/dev/null || rm -f "$AUTHKEYS"; }
 [ -f "$USERCONF" ] && { shred -u "$USERCONF" 2>/dev/null || rm -f "$USERCONF"; }
 
+touch "$DONE" 2>/dev/null || log "WARNING: could not write completion marker $DONE -- next boot will retry"
 log "complete - staged credentials removed from $BOOT"

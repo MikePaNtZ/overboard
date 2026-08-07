@@ -18,14 +18,23 @@ RequiresMountsFor=/boot/firmware
 # but must not be RUNNING first -- the installer reloads it afterwards.
 Before=NetworkManager.service
 Wants=NetworkManager.service
-# Idempotent, but the unit still guards on the marker so a normal boot does
-# not pay for a script that will immediately no-op.
-ConditionPathExists=/boot/firmware/overboard-userconf
+# Idempotent, but the unit still guards on a marker so a normal boot does not
+# pay for a script that will immediately no-op. Gated on the ABSENCE of a
+# completion marker the script writes on success -- not on the presence of
+# the staged credential files, which the script itself deletes as its last
+# step. Gating on those made a script that died partway indistinguishable
+# from one that finished: the next boot saw the trigger file already gone
+# and never retried.
+ConditionPathExists=!/boot/firmware/overboard-firstboot.done
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/overboard-firstboot
+# A first-boot credential installer must fail the boot loudly, never wedge
+# it silently. Type=oneshot disables TimeoutStartSec by default, so without
+# this a hang here blocks the boot transaction forever.
+TimeoutStartSec=120
 # Deliberately NOT `StandardOutput=null`: on a headless board with no user yet
 # configured, the journal is the only record of why the network did not come
 # up, and that is the failure this unit exists around.

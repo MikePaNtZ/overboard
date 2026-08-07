@@ -38,6 +38,16 @@ mmdebstrap:
     - network-manager
     # Key-only SSH is how the board is reached; there is no console user.
     - openssh-server
+    # overboard-firstboot falls back to `iw reg set` when raspi-config isn't
+    # present (it isn't -- that's a Raspberry Pi OS tool, and this is a slim
+    # image), so the fallback itself needs to be shipped. rfkill lets the
+    # radio be inspected at all when regulatory-domain setup fails.
+    - iw
+    - rfkill
+    # The board has no console and no static IP story; docs and flash_pi.sh
+    # both tell the operator to reach it at overboard.local, which is a dead
+    # instruction without an mDNS responder actually running.
+    - avahi-daemon
     # Required by the STOCK image-rpios layer, not by us: its
     # `customize05-pkgs` hook shells out to apt inside the target, and a slim
     # base does not install apt there. Build round 4 died on
