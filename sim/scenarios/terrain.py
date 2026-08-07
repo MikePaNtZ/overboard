@@ -190,6 +190,11 @@ class TerrainMetrics:
     peak_abs_current_a: float = 0.0
     saturated_cycles: int = 0
 
+    peak_abs_pitch_ref_deg: float = 0.0
+    """Largest |pitch reference| the outer loop asked the inner loop to hold
+    (clamp-sweep campaign instrumentation). See `hill.HillMetrics`'s copy of
+    this field for the same note."""
+
     # --- provenance ---
     duration_s: float = 0.0
     model_sha256: str = ""
@@ -486,6 +491,7 @@ def run(
                 break
 
         m.saturated_cycles = int(ctl.saturated_cycles)
+        m.peak_abs_pitch_ref_deg = math.degrees(float(ctl.peak_abs_pitch_ref_rad))
 
     t_arr = np.asarray(ts)
     trav = np.asarray(travels)

@@ -174,6 +174,19 @@ pub struct ObParamsV2 {
     /// the "optional field quietly left at its default" failure this codebase
     /// has already been bitten by once.
     pub accel_ff_current_source: u32,
+
+    // --- asymmetric outer-loop clamp (clamp-sweep campaign, verification
+    // only) -----------------------------------------------------------------
+    /// Overrides `max_pitch_ref_rad` for the ACCELERATING direction only
+    /// (`control_core::VelocityLoop::update`'s `braking` test). Zero or
+    /// negative falls back to `max_pitch_ref_rad`, the same convention
+    /// `kt_nm_per_a` and `r_eff_m` already use -- a caller that never sets
+    /// this is bit-identical to one built before the field existed.
+    pub max_pitch_ref_accel_rad: f32,
+    /// Same fallback convention, for the BRAKING direction. Set both fields
+    /// away from `max_pitch_ref_rad` to give braking more (or less) lean
+    /// authority than accelerating; see `VelocityLoop::new_asymmetric`.
+    pub max_pitch_ref_brake_rad: f32,
 }
 
 /// One cycle of plant state.
@@ -287,10 +300,21 @@ pub unsafe extern "C" fn ob_controller_new(params: *const ObParamsV2) -> *mut Ob
     }
 
     let outer = if p.kp_v_rad_per_m_s != 0.0 || p.ki_v_rad_per_m != 0.0 {
-        Some(VelocityLoop::new(
+        let accel_limit = if p.max_pitch_ref_accel_rad > 0.0 {
+            p.max_pitch_ref_accel_rad
+        } else {
+            p.max_pitch_ref_rad
+        };
+        let brake_limit = if p.max_pitch_ref_brake_rad > 0.0 {
+            p.max_pitch_ref_brake_rad
+        } else {
+            p.max_pitch_ref_rad
+        };
+        Some(VelocityLoop::new_asymmetric(
             p.kp_v_rad_per_m_s,
             p.ki_v_rad_per_m,
-            p.max_pitch_ref_rad,
+            accel_limit,
+            brake_limit,
             if p.com_above_axle != 0 {
                 PlantCoupling::ComAboveAxle
             } else {
@@ -546,6 +570,8 @@ mod tests {
             accel_ff_gain_m_s2_per_a: 0.0,
             accel_trust_band_m_s2: 0.0,
             accel_ff_current_source: 0,
+            max_pitch_ref_accel_rad: 0.0,
+            max_pitch_ref_brake_rad: 0.0,
         }
     }
 

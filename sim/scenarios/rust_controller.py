@@ -108,6 +108,16 @@ class ObParamsV2(ctypes.Structure):
         ("accel_ff_gain_m_s2_per_a", ctypes.c_float),
         ("accel_trust_band_m_s2", ctypes.c_float),
         ("accel_ff_current_source", ctypes.c_uint32),
+        # Clamp-sweep campaign (verification only): split the outer loop's
+        # single `max_pitch_ref_rad` into an accelerating and a braking
+        # limit. Zero or negative falls back to `max_pitch_ref_rad`, same
+        # convention as `kt_nm_per_a`/`r_eff_m` -- a caller that never sets
+        # these two is bit-identical to one built before they existed. See
+        # `control_ffi::ObParamsV2`'s own doc comment for the fallback rule
+        # and `control_core::VelocityLoop::new_asymmetric` for the braking
+        # test.
+        ("max_pitch_ref_accel_rad", ctypes.c_float),
+        ("max_pitch_ref_brake_rad", ctypes.c_float),
     ]
 
 
@@ -187,6 +197,8 @@ class RustController:
         kp_v_rad_per_m_s: float = 0.0,
         ki_v_rad_per_m: float = 0.0,
         max_pitch_ref_rad: float = DEFAULT_MAX_PITCH_REF_RAD,
+        max_pitch_ref_accel_rad: float = 0.0,
+        max_pitch_ref_brake_rad: float = 0.0,
         v_ref_m_s: float = 0.0,
         v_ref_fn=None,
         r_eff_m: float = DEFAULT_R_EFF_M,
@@ -239,6 +251,8 @@ class RustController:
             kp_v_rad_per_m_s=kp_v_rad_per_m_s,
             ki_v_rad_per_m=ki_v_rad_per_m,
             max_pitch_ref_rad=max_pitch_ref_rad,
+            max_pitch_ref_accel_rad=max_pitch_ref_accel_rad,
+            max_pitch_ref_brake_rad=max_pitch_ref_brake_rad,
             r_eff_m=r_eff_m,
             com_above_axle=1 if com_above_axle else 0,
             # 0 off / 1 active / 2 shadow. `True` means active; pass 2 for

@@ -221,6 +221,13 @@ class HillMetrics:
     peak_abs_current_a: float = 0.0
     saturated_cycles: int = 0
 
+    peak_abs_pitch_ref_deg: float = 0.0
+    """Largest |pitch reference| the outer loop asked the inner loop to hold
+    (clamp-sweep campaign instrumentation). Mirrors
+    `shuttle_run.ShuttleMetrics.peak_abs_pitch_ref_deg`. Reads at (or very
+    near) `max_pitch_ref_rad` iff the outer loop spent the whole run pegged
+    against its clamp."""
+
     # --- provenance ---
     travel_m: float = 0.0
     duration_s: float = 0.0
@@ -395,6 +402,7 @@ def run(
                 break
 
         m.saturated_cycles = int(ctl.saturated_cycles)
+        m.peak_abs_pitch_ref_deg = math.degrees(float(ctl.peak_abs_pitch_ref_rad))
 
     t_arr = np.asarray(ts)
     v_arr = np.asarray(vs)

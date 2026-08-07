@@ -455,7 +455,12 @@ impl PlantCoupling {
 pub struct VelocityLoop {
     kp_rad_per_m_s: f32,
     ki_rad_per_m: f32,
-    max_pitch_ref_rad: f32,
+    /// Clamp applied while the reference is asking to ACCELERATE (see
+    /// [`VelocityLoop::update`]'s `braking` test). Equal to
+    /// `max_pitch_ref_brake_rad` for every caller of [`VelocityLoop::new`] --
+    /// only [`VelocityLoop::new_asymmetric`] can split the two.
+    max_pitch_ref_accel_rad: f32,
+    max_pitch_ref_brake_rad: f32,
     coupling: PlantCoupling,
     integral: f32,
 }
@@ -467,10 +472,37 @@ impl VelocityLoop {
         max_pitch_ref_rad: f32,
         coupling: PlantCoupling,
     ) -> Self {
-        VelocityLoop {
+        Self::new_asymmetric(
             kp_rad_per_m_s,
             ki_rad_per_m,
             max_pitch_ref_rad,
+            max_pitch_ref_rad,
+            coupling,
+        )
+    }
+
+    /// **Verification-only, characterisation build (clamp-sweep campaign).**
+    /// Splits the single [`VelocityLoop::new`] clamp into an accelerating
+    /// limit and a braking limit, so a braking event can be given more lean
+    /// authority than an accelerating one without moving the accelerating
+    /// ceiling at all. `new(..)` is `new_asymmetric(.., limit, limit, ..)`,
+    /// so every existing caller is bit-identical to before this constructor
+    /// existed. Not wired to any production default; nothing calls this with
+    /// unequal limits outside this campaign's own scenarios yet -- see
+    /// `control-ffi`'s `max_pitch_ref_accel_rad`/`max_pitch_ref_brake_rad`
+    /// fields for how a caller opts in.
+    pub const fn new_asymmetric(
+        kp_rad_per_m_s: f32,
+        ki_rad_per_m: f32,
+        max_pitch_ref_accel_rad: f32,
+        max_pitch_ref_brake_rad: f32,
+        coupling: PlantCoupling,
+    ) -> Self {
+        VelocityLoop {
+            kp_rad_per_m_s,
+            ki_rad_per_m,
+            max_pitch_ref_accel_rad,
+            max_pitch_ref_brake_rad,
             coupling,
             integral: 0.0,
         }
@@ -485,7 +517,10 @@ impl VelocityLoop {
     }
 
     /// Pitch reference in radians, nose-up-positive, clamped to
-    /// `max_pitch_ref_rad`.
+    /// `max_pitch_ref_accel_rad` or `max_pitch_ref_brake_rad`, whichever
+    /// `braking` selects below. The two are equal for every caller of
+    /// [`VelocityLoop::new`], so this is a no-op split until
+    /// [`VelocityLoop::new_asymmetric`] is used with unequal limits.
     ///
     /// `inner_saturated` is the inner loop's current clamp, forwarded from
     /// `Applied.saturated` (ICD §7.6). When the inner loop is already at its
@@ -494,7 +529,25 @@ impl VelocityLoop {
     /// turns into an unbounded reference.
     pub fn update(&mut self, v_m_s: f32, v_ref_m_s: f32, dt_s: f32, inner_saturated: bool) -> f32 {
         let err = v_m_s - v_ref_m_s;
-        let limit = self.max_pitch_ref_rad.abs();
+        // Braking: the board is moving faster, IN THE DIRECTION IT IS ALREADY
+        // MOVING, than the setpoint asks -- `v_m_s` and `err` share a sign.
+        // This is coupling-independent (unlike the sign of `proportional`
+        // alone): a `ComAboveAxle` board commands nose-up to shed speed while
+        // a `ComBelowAxle` one commands nose-down for the identical physical
+        // event, so branching on `proportional`'s raw sign would need a
+        // per-coupling flip here too. At `v_m_s == 0` (a standing start)
+        // `v_m_s * err` is exactly zero, which reads as accelerating, not
+        // braking -- the same standing-start exclusion
+        // `CMD_ENVELOPE_RESERVE_BRAKING` (`sim-host::host.rs`) makes for the
+        // inner-loop command shaping, for the same reason: a stationary board
+        // has no motion to oppose yet.
+        let braking = v_m_s * err > 0.0;
+        let limit = if braking {
+            self.max_pitch_ref_brake_rad
+        } else {
+            self.max_pitch_ref_accel_rad
+        }
+        .abs();
         let sign = self.coupling.sign();
 
         let proportional = sign * self.kp_rad_per_m_s * err;
@@ -930,6 +983,48 @@ mod tests {
             let out = v.update(20.0, 0.0, 0.002, false);
             assert!(out.abs() <= LIM + 1e-6, "{out} exceeded the clamp");
         }
+    }
+
+    // ---- VelocityLoop::new_asymmetric (clamp-sweep campaign) -------------
+
+    #[test]
+    fn new_asymmetric_with_equal_limits_is_bit_identical_to_new() {
+        let mut a = VelocityLoop::new(0.05, 0.02, LIM, PlantCoupling::ComAboveAxle);
+        let mut b = VelocityLoop::new_asymmetric(0.05, 0.02, LIM, LIM, PlantCoupling::ComAboveAxle);
+        for v in [20.0_f32, -20.0, 0.0, 1.0, -1.0] {
+            assert_eq!(a.update(v, 0.0, 0.002, false), b.update(v, 0.0, 0.002, false));
+        }
+    }
+
+    #[test]
+    fn braking_uses_the_brake_limit_and_accelerating_uses_the_accel_limit() {
+        // 12 deg to accelerate, 15 deg to brake -- the pair the clamp-sweep
+        // campaign was asked to measure.
+        let accel_limit = 12.0_f32.to_radians();
+        let brake_limit = 15.0_f32.to_radians();
+        let mut v = VelocityLoop::new_asymmetric(
+            50.0,
+            0.0,
+            accel_limit,
+            brake_limit,
+            PlantCoupling::ComAboveAxle,
+        );
+        // Moving forward at 20 m/s, commanded to stop: err = v_m_s - v_ref
+        // shares v_m_s's sign, so this is the braking regime.
+        let braking_out = v.update(20.0, 0.0, 0.002, false);
+        assert!(
+            (braking_out.abs() - brake_limit).abs() < 1e-6,
+            "expected the brake limit ({brake_limit}), got {braking_out}"
+        );
+
+        // At rest, commanded to accelerate to 20 m/s: v_m_s * err == 0, which
+        // reads as accelerating (the standing-start convention).
+        v.reset();
+        let accel_out = v.update(0.0, 20.0, 0.002, false);
+        assert!(
+            (accel_out.abs() - accel_limit).abs() < 1e-6,
+            "expected the accel limit ({accel_limit}), got {accel_out}"
+        );
     }
 
     #[test]
