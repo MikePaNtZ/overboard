@@ -233,7 +233,9 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         };
                         if !(0.01..=1.0).contains(&h) {
-                            eprintln!("sim-host: --kerb HEIGHT must be within [0.01, 1.0] m, got {h}");
+                            eprintln!(
+                                "sim-host: --kerb HEIGHT must be within [0.01, 1.0] m, got {h}"
+                            );
                             return ExitCode::FAILURE;
                         }
                         spec.height_m = h;

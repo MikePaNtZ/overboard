@@ -520,7 +520,11 @@ mod tests {
             STATE_FLAG_FALLEN,
             STATE_FLAG_AUTHORITY_WARNING,
         ] {
-            assert_eq!(STATE_FLAG_HANDOFF & other, 0, "handoff bit overlaps {other:#06x}");
+            assert_eq!(
+                STATE_FLAG_HANDOFF & other,
+                0,
+                "handoff bit overlaps {other:#06x}"
+            );
         }
         assert_eq!(STATE_FLAG_HANDOFF, 0b1_0000);
     }
