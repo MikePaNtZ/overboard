@@ -1456,12 +1456,9 @@ def main() -> int:
     terrain.add_argument("--terrain-grade", type=float, default=8.0,
                          help="peak grade of the filmed ride, percent (default 8, the "
                               "steepest profile the board completes on the estimate)")
-    terrain.add_argument("--terrain-compare-grade", type=float, default=11.0,
+    terrain.add_argument("--terrain-compare-grade", type=float, default=10.0,
                          help="peak grade for the truth-vs-estimate comparison "
-                              "(default 11 -- was 10 until issue #250's estimator fix "
-                              "closed that grade's gap; re-derived to the middle of the "
-                              "newly measured 10.6-11.4%% divergence window, see "
-                              "tests/test_terrain.py::test_the_estimator_costs_terrain_envelope)")
+                              "(default 10, where the two outcomes diverge)")
     terrain.add_argument("--terrain-speed", type=float, default=2.0, help="v_ref, m/s")
     terrain.add_argument("--terrain-distance", type=float, default=9.0,
                          help="camera distance, m. Closer than this and the board "
