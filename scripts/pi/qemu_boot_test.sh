@@ -291,6 +291,14 @@ LOOP=""
 # `-nic none`, qemu-system-aarch64 fails the romfile lookup and exits
 # before the kernel ever loads, for a machine that was never asked to have
 # a network device in the first place. First real CI run caught this.
+#
+# `virtio-blk-pci`, not `virtio-blk-device` (the MMIO transport). The `virt`
+# machine's default NIC being a PCI device (the finding directly above)
+# already proves PCI/GPEX is live here, and this kernel evidently carries
+# virtio_blk as a PCI-attached module -- the MMIO form left the initramfs
+# waiting on a /dev/vda2 that never appeared and never would, no matter how
+# long the timeout, because nothing was probing that bus at all. Second
+# real CI run caught this, one layer past the first fix.
 # ---------------------------------------------------------------------------
 boot_phase() {
   local label="$1" log="$2"
@@ -304,7 +312,7 @@ boot_phase() {
     -initrd "$INITRD" \
     -append "root=/dev/vda2 rw rootwait console=ttyAMA0 systemd.log_target=console systemd.log_level=info systemd.journald.forward_to_console=1" \
     -drive file="$RAW",format=raw,if=none,id=hd0 \
-    -device virtio-blk-device,drive=hd0 \
+    -device virtio-blk-pci,drive=hd0 \
     -nic none \
     -nographic -no-reboot \
     -serial "file:$log" \
