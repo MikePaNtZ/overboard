@@ -5,7 +5,7 @@ covers:
   - scripts/pi/flash_pi.sh
   - scripts/pi/pins.env
   - crates/loop-profiler/src/lib.rs
-reconciled: ec67a9e
+reconciled: 60d5e3c
 -->
 
 **Owned by: Senior Controls.** **Executed by: the CEO**, at a desk, with a monitor and a
@@ -288,11 +288,16 @@ scripts/pi/flash_pi.sh --disk /dev/diskN --image ~/Downloads/<stock-raspios>.img
 
 `--dry-run` runs every guard and generates the boot payload, skipping only the write.
 
-**Finding the disk on macOS: use `diskutil list`, not `diskutil list external`.** A MacBook's
-built-in SDXC slot reports `Device Location: Internal` — it hangs off an internal bus — while the
-card in it is `Removable Media: Removable`. So the card does **not** appear under `external`, and
-the obvious command silently shows you everything except the disk you want. On Linux,
-`lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT`.
+**`--disk` is optional.** With no `--disk`, `flash_pi.sh` proposes the single removable disk in
+the machine; zero or several is an error rather than a guess. It filters on `Removable Media` —
+the same field the safety guard checks, so detection and validation cannot disagree — and
+deliberately *not* on `diskutil list external`, which omits a MacBook's built-in SDXC reader.
+
+**Finding the disk by hand on macOS: use `diskutil list`, not `diskutil list external`.** A
+MacBook's built-in SDXC slot reports `Device Location: Internal` — it hangs off an internal bus —
+while the card in it is `Removable Media: Removable`. So the card does **not** appear under
+`external`, and the obvious command silently shows you everything except the disk you want. On
+Linux, `lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT`.
 
 **Match the size.** `flash_pi.sh` refuses the system disk and refuses non-removable media, but it
 cannot tell one removable device from another — a USB stick is as valid a target as your card.
