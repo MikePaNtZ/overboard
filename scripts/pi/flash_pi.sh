@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Flash an Overboard image to an SD card and stage credentials onto it.
 #
-#     scripts/pi/flash_pi.sh --disk /dev/disk4                 # newest release
-#     scripts/pi/flash_pi.sh --disk /dev/disk4 --image ./x.img.xz
-#     scripts/pi/flash_pi.sh --disk /dev/disk4 --dry-run       # rehearse
+#     scripts/pi/flash_pi.sh                                   # newest release
+#     scripts/pi/flash_pi.sh --disk /dev/disk4                 # explicit target
+#     scripts/pi/flash_pi.sh --image ./x.img.zst               # local image
+#     scripts/pi/flash_pi.sh --dry-run                         # rehearse
+#
+# With no --disk, the one removable disk in the machine is proposed. Zero or
+# more than one is an error, never a guess. Detection removes the LOOKUP step
+# only -- the confirmation prompt below still has to be answered by hand.
 #
 # THIS WRITES TO A RAW BLOCK DEVICE. The classic way to lose a laptop's
 # internal disk is a mistyped device path in exactly this kind of script, so
@@ -36,7 +41,11 @@ die() { echo "error: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
 usage() {
-  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Print the header block, whatever length it is: line 2 up to the first line
+  # of real code. The previous hard-coded '2,30p' silently truncated the moment
+  # the header grew, which is how --help starts lying about a script whose whole
+  # job is not to surprise you.
+  sed -n '2,/^set -/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -52,16 +61,66 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$DISK" ] || die "--disk is required. There is no default: a default target
-       for a raw write is a loaded gun. Find yours with:
-         macOS:  diskutil list external
-         Linux:  lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT"
-
 OS="$(uname -s)"
 case "$OS" in
   Darwin|Linux) ;;
   *) die "unsupported platform: $OS" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# Target selection.
+#
+# --disk still wins outright. With no --disk we PROPOSE the single removable
+# disk -- but only when there is exactly one. Zero or several is an error,
+# never a guess: "pick the first one" is how a script like this breaks its
+# promise.
+#
+# NOTE the predicate. An earlier version of this enumerated with
+# `diskutil list external`, which does NOT list a MacBook's built-in SDXC
+# slot -- that reader reports Device Location: Internal while holding
+# Removable media, so the convenience feature would silently have failed to
+# find the CEO's only card reader. Same mistake guard 1 made. We therefore
+# filter on `Removable Media`, the exact field guard 1 checks, so detection
+# and validation cannot disagree about what counts.
+#
+# Detection removes the lookup step, not a safety step: guard 1 re-checks
+# whatever lands in $DISK, and guard 2 still makes a human type it back. A
+# target the script chose deserves the SAME scrutiny as one that was typed.
+# ---------------------------------------------------------------------------
+removable_disks() {
+  if [ "$OS" = "Darwin" ]; then
+    local d rm
+    for d in $(diskutil list physical 2>/dev/null | awk '/^\/dev\/disk/{print $1}'); do
+      rm="$(diskutil info "$d" 2>/dev/null | awk -F': *' '/Removable Media/{print $2}' | xargs)"
+      case "$rm" in Removable|Yes) echo "$d" ;; esac
+    done
+  else
+    # RM=1 is the kernel's own removable flag -- the same bit guard 1 reads.
+    lsblk -dno NAME,RM 2>/dev/null | awk '$2 == 1 { print "/dev/" $1 }'
+  fi
+}
+
+if [ -z "$DISK" ]; then
+  FOUND="$(removable_disks || true)"
+  COUNT="$(printf '%s\n' "$FOUND" | grep -c '^/dev/' || true)"
+  case "$COUNT" in
+    1)
+      DISK="$(printf '%s\n' "$FOUND" | grep '^/dev/')"
+      say "no --disk given; exactly one removable disk present: $DISK"
+      ;;
+    0)
+      die "no --disk given, and no removable disk was found.
+       Insert the card, or name the target explicitly:
+         macOS:  diskutil list          (NOT 'list external' -- the built-in
+                                         SDXC reader reports as internal)
+         Linux:  lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT" ;;
+    *)
+      die "no --disk given, and $COUNT removable disks are present:
+$(printf '%s\n' "$FOUND" | grep '^/dev/' | sed 's/^/         /')
+       Refusing to choose between them -- pick one with --disk.
+       Match the SIZE: these guards cannot tell a card from a USB stick." ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Guard 1: the target must be removable. Refused, not warned about.
