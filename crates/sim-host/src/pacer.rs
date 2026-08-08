@@ -9,7 +9,53 @@
 //! cycle is paced against where the clock SHOULD be, not against how long
 //! the previous cycle happened to take.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+/// How many recent per-tick lateness samples [`Pacer`] keeps for
+/// [`Pacer::jitter_percentiles`]. A bounded ring, not the whole run: `Pacer`
+/// can run for as long as the process does (`HostConfig::duration: None`),
+/// so an unbounded `Vec` here would be a slow memory leak in exactly the
+/// long-running, real-time-adjacent loop this crate cannot afford to
+/// perturb. 2,000 samples is a 4 s window at 500 Hz -- long enough to be a
+/// meaningful jitter picture, small enough that sorting it every
+/// [`write_stats`]-interval (issue #168: currently ~100 ms) costs
+/// microseconds, not milliseconds.
+///
+/// [`write_stats`]: crate::host
+const JITTER_WINDOW: usize = 2_000;
+
+/// Nearest-rank percentiles over a recent window of per-tick lateness, in
+/// nanoseconds. Same nearest-rank convention as
+/// `crates/loop-profiler/src/stats.rs::Percentiles` (a real observed sample,
+/// never an interpolated value that no tick actually took) -- duplicated
+/// here rather than pulled in as a dependency: this crate has no other
+/// reason to depend on `loop-profiler`, and the algorithm is ~10 lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitterPercentiles {
+    pub count: usize,
+    pub p50_ns: u64,
+    pub p99_ns: u64,
+    pub max_ns: u64,
+}
+
+impl JitterPercentiles {
+    pub const EMPTY: JitterPercentiles = JitterPercentiles {
+        count: 0,
+        p50_ns: 0,
+        p99_ns: 0,
+        max_ns: 0,
+    };
+}
+
+fn nearest_rank(sorted: &[u64], q: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (q * sorted.len() as f64).ceil() as usize;
+    let idx = rank.clamp(1, sorted.len()) - 1;
+    sorted[idx]
+}
 
 /// Paces a loop at a fixed period. Call [`Pacer::wait_for_next`] once per
 /// iteration, after that iteration's work is done; sleep for the returned
@@ -24,6 +70,13 @@ pub struct Pacer {
     period: Duration,
     next_deadline: Instant,
     missed_deadlines: u64,
+    /// Per-call lateness (0 when on time), most recent
+    /// [`JITTER_WINDOW`] calls only. See issue #168: a raw
+    /// `missed_deadlines` count alone conflates "every tick was 1 ns late"
+    /// with "one tick stalled 15 ms" -- the same count, very different
+    /// severity. This is what lets a caller report the shape of the lag,
+    /// not just how many times it happened.
+    lateness_ns: VecDeque<u64>,
 }
 
 impl Pacer {
@@ -34,12 +87,31 @@ impl Pacer {
             period,
             next_deadline: now + period,
             missed_deadlines: 0,
+            lateness_ns: VecDeque::with_capacity(JITTER_WINDOW),
         }
     }
 
     /// Total missed deadlines observed so far.
     pub fn missed_deadlines(&self) -> u64 {
         self.missed_deadlines
+    }
+
+    /// Percentiles of per-tick lateness over the most recent
+    /// [`JITTER_WINDOW`] calls to [`Self::wait_for_next`] (0 for a tick that
+    /// was on time or early). Cheap enough to call every stats-file write:
+    /// sorts a bounded, small buffer, never the whole run.
+    pub fn jitter_percentiles(&self) -> JitterPercentiles {
+        if self.lateness_ns.is_empty() {
+            return JitterPercentiles::EMPTY;
+        }
+        let mut sorted: Vec<u64> = self.lateness_ns.iter().copied().collect();
+        sorted.sort_unstable();
+        JitterPercentiles {
+            count: sorted.len(),
+            p50_ns: nearest_rank(&sorted, 0.50),
+            p99_ns: nearest_rank(&sorted, 0.99),
+            max_ns: *sorted.last().unwrap(),
+        }
     }
 
     /// How far past `period` this call is deliberately allowed to lag
@@ -54,6 +126,11 @@ impl Pacer {
             self.missed_deadlines += 1;
             Duration::ZERO
         };
+        let late_ns = now.saturating_duration_since(self.next_deadline).as_nanos() as u64;
+        if self.lateness_ns.len() == JITTER_WINDOW {
+            self.lateness_ns.pop_front();
+        }
+        self.lateness_ns.push_back(late_ns);
         // Advances by exactly one period regardless of the overrun, so the
         // loop never skips a physics step or accelerates sim-time to "catch
         // up" -- one call to wait_for_next() is always exactly one hal
@@ -175,5 +252,72 @@ mod tests {
             assert!(sleep_for.is_zero());
         }
         assert_eq!(p.missed_deadlines(), 4);
+    }
+
+    #[test]
+    fn jitter_percentiles_are_empty_before_any_call() {
+        let p = Pacer::new(Duration::from_millis(10), base());
+        assert_eq!(p.jitter_percentiles(), JitterPercentiles::EMPTY);
+    }
+
+    #[test]
+    fn on_time_ticks_report_zero_jitter() {
+        let t0 = base();
+        let period = Duration::from_millis(20);
+        let mut p = Pacer::new(period, t0);
+        let mut now = t0;
+        for _ in 0..5 {
+            now += Duration::from_micros(1);
+            let sleep_for = p.wait_for_next(now);
+            now += sleep_for;
+        }
+        let j = p.jitter_percentiles();
+        assert_eq!(j.count, 5);
+        assert_eq!(j.p50_ns, 0);
+        assert_eq!(j.p99_ns, 0);
+        assert_eq!(j.max_ns, 0);
+    }
+
+    #[test]
+    fn one_late_tick_among_on_time_ones_shows_up_in_max_but_not_p50() {
+        // Same shape as issue #168's own report: mostly on-time, one stall.
+        // A p50 of 0 next to a non-zero max is exactly the "same fact, two
+        // readings" distinction #168 asked to be able to tell apart.
+        let t0 = base();
+        let period = Duration::from_millis(2);
+        let mut p = Pacer::new(period, t0);
+        for i in 0..20u32 {
+            let mut now = t0 + period * (i + 1);
+            if i == 10 {
+                now += Duration::from_millis(15);
+            }
+            p.wait_for_next(now);
+        }
+        let j = p.jitter_percentiles();
+        assert_eq!(j.count, 20);
+        assert_eq!(j.p50_ns, 0, "the other 19 ticks were on time");
+        assert_eq!(j.max_ns, Duration::from_millis(15).as_nanos() as u64);
+    }
+
+    #[test]
+    fn the_jitter_window_forgets_samples_older_than_its_capacity() {
+        let t0 = base();
+        let period = Duration::from_millis(1);
+        let mut p = Pacer::new(period, t0);
+        // One large stall, then enough clean ticks to push it out of the
+        // bounded window -- the whole point of JITTER_WINDOW being bounded
+        // rather than "the whole run" is that this DOES eventually happen.
+        let mut now = t0 + period + Duration::from_millis(50);
+        p.wait_for_next(now);
+        for i in 0..JITTER_WINDOW {
+            now = t0 + period * (i as u32 + 2);
+            p.wait_for_next(now);
+        }
+        let j = p.jitter_percentiles();
+        assert_eq!(j.count, JITTER_WINDOW);
+        assert_eq!(
+            j.max_ns, 0,
+            "the 50 ms stall should have scrolled out of the window"
+        );
     }
 }
