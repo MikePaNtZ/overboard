@@ -155,7 +155,11 @@ fi
 # The success marker the unit conditions on. Written LAST, so anything that
 # aborts before this point is retried on the next boot rather than being
 # skipped forever.
-install -d -m 0755 /var/lib/overboard
-date -u +%Y-%m-%dT%H:%M:%SZ | tee /var/lib/overboard/firstboot-done >/dev/null
+#
+# On the BOOT partition deliberately: it is the only filesystem a laptop can
+# mount, so deleting this file with the card in a reader forces a clean first
+# boot even on a board that will not come up. A marker on the rootfs would be
+# unreachable in exactly the situation it needs to be reachable.
+date -u +%Y-%m-%dT%H:%M:%SZ | tee "$BOOT/overboard-firstboot.done" >/dev/null
 
 log "complete - staged credentials removed from $BOOT"

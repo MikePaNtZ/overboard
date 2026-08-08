@@ -29,7 +29,13 @@ Wants=NetworkManager.service
 #
 # Conditioning on completion instead means an interrupted run is retried on
 # the next boot, which is the behaviour a first-boot installer needs.
-ConditionPathExists=!/var/lib/overboard/firstboot-done
+#
+# The marker lives on the FAT BOOT PARTITION, not the rootfs. Credit to the
+# parallel #251 branch for this: the failure this marker exists to survive is
+# "the board will not boot", so a reset lever reachable only by booting the
+# board is on the wrong side of the partition. On FAT it can be deleted from a
+# laptop with the card in a reader, forcing a clean first boot with no console.
+ConditionPathExists=!/boot/firmware/overboard-firstboot.done
 
 [Service]
 Type=oneshot
