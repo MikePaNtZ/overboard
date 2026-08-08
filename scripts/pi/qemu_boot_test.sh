@@ -129,6 +129,29 @@ KERNEL="$WORK/kernel.img"
 cp "$BOOT_MNT/$KNAME" "$KERNEL"
 echo "kernel: $KNAME ($(du -h "$KERNEL" | cut -f1))"
 
+# `auto_initramfs=1` (config.txt) means the FIRMWARE resolves and loads the
+# matching initramfs unassisted -- design Q12's own answer, and exactly the
+# mechanism this script bypasses by booting the kernel directly. QEMU gets
+# no firmware, so the pairing has to be reproduced by hand: config.txt's own
+# comment records the transform (kernel8_rt.img -> initramfs8_rt, "kernel"
+# swapped for "initramfs", .img dropped) -- apply the same transform rather
+# than hardcoding the RT suffix, so this does not silently stop covering the
+# initramfs the moment the kernel package name changes.
+#
+# First CI run against just -kernel got no further than "Waiting for root
+# device /dev/vda2..." -- this project's kernels ship virtio_blk as a
+# module, not built in, and modules only load from the initramfs. Recorded
+# here rather than only in the commit message: the failure mode is a silent
+# hang, not an error, and worth the next reader not rediscovering it.
+INITRD_NAME="$(echo "$KNAME" | sed -E 's/^kernel/initramfs/; s/\.img$//')"
+[ -f "$BOOT_MNT/$INITRD_NAME" ] || {
+  echo "FATAL: expected initramfs '$INITRD_NAME' (derived from kernel=$KNAME) is not on the boot partition" >&2
+  exit 1
+}
+INITRD="$WORK/initrd.img"
+cp "$BOOT_MNT/$INITRD_NAME" "$INITRD"
+echo "initramfs: $INITRD_NAME ($(du -h "$INITRD" | cut -f1))"
+
 section "stage synthetic boot-partition credentials"
 # Deliberately not mk_boot_config.py's output format verbatim -- hand-written
 # so it is obviously synthetic on inspection, and so this script carries no
@@ -278,6 +301,7 @@ boot_phase() {
     -smp 2 \
     -m "$QEMU_MEM" \
     -kernel "$KERNEL" \
+    -initrd "$INITRD" \
     -append "root=/dev/vda2 rw rootwait console=ttyAMA0 systemd.log_target=console systemd.log_level=info systemd.journald.forward_to_console=1" \
     -drive file="$RAW",format=raw,if=none,id=hd0 \
     -device virtio-blk-device,drive=hd0 \
