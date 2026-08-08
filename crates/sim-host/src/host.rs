@@ -126,7 +126,7 @@
 //! than in a test fixture, because an acceptance number nobody else can
 //! re-take is not a measurement.
 
-use crate::pacer::Pacer;
+use crate::pacer::{JitterPercentiles, Pacer};
 use crate::wire::{self, InputIn, StateOut};
 use board_types::{
     Command, Faults, ImuSample, Params, Saturation, DEFAULT_R_EFF_M, RAD_S_PER_ERPM,
@@ -2651,6 +2651,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                     path,
                     ticks,
                     pacer.missed_deadlines(),
+                    pacer.jitter_percentiles(),
                     truth_pos_x_m,
                     truth_pos_y_m,
                 );
@@ -2681,6 +2682,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             path,
             ticks,
             pacer.missed_deadlines(),
+            pacer.jitter_percentiles(),
             truth_pos_x_m,
             truth_pos_y_m,
         );
@@ -2764,16 +2766,24 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
 /// here for continuity with the tooling that already reads them -- as of
 /// issue #163 they are the SAME values the wire's `pos` now carries, since
 /// the dead-reckoned path is gone and MuJoCo's own position is authoritative.
+///
+/// `jitter` (issue #168) is `pacer::JitterPercentiles` over the pacer's
+/// recent window, not the whole run -- `missed_deadlines` stays the
+/// whole-run count it always was. Reporting both is the point: "70% missed"
+/// and "p99 = 15 ms with a correct mean" are the same underlying fact, and
+/// only the second is actionable on its own.
 fn write_stats(
     path: &std::path::Path,
     ticks: u64,
     missed_deadlines: u64,
+    jitter: JitterPercentiles,
     truth_pos_x_m: f64,
     truth_pos_y_m: f64,
 ) {
     let tmp = path.with_extension("tmp");
     let contents = format!(
-        "ticks={ticks}\nmissed_deadlines={missed_deadlines}\ntruth_pos_x_m={truth_pos_x_m}\ntruth_pos_y_m={truth_pos_y_m}\n"
+        "ticks={ticks}\nmissed_deadlines={missed_deadlines}\njitter_p50_ns={}\njitter_p99_ns={}\njitter_max_ns={}\ntruth_pos_x_m={truth_pos_x_m}\ntruth_pos_y_m={truth_pos_y_m}\n",
+        jitter.p50_ns, jitter.p99_ns, jitter.max_ns,
     );
     let _ = std::fs::write(&tmp, contents).and_then(|_| std::fs::rename(&tmp, path));
 }
