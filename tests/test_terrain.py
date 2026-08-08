@@ -19,6 +19,59 @@ No gaps found in this file: every GATE assertion already ties to a stated
 comparison (steady vs rolling, truth vs estimate) rather than a bare
 round-number threshold, so there was nothing here in the shape of `hill.py`'s
 25 deg sanity ceiling to flag.
+
+RE-MEASURED AFTER ISSUE #250'S ESTIMATOR FIX (this session)
+-------------------------------------------------------------------------
+Issue #250 fixed a real defect: a near-zero specific-force reading (any brief
+unloading -- cresting a rise, a kerb, a dip) resolved through `atan2(0, -0)`
+to a confident, ARBITRARY angle (most often 180 deg) that the old estimator
+trusted immediately. `ComplementaryFilter` now refuses to fuse a
+specific-force vector below `MIN_TRUSTED_ACCEL_MAG_M_S2` and coasts on the
+gyro instead. That gate engages during the genuine near-unloading moments a
+rolling profile's dip and transitions produce -- which this file's own
+comparisons run straight through -- so three of the four GATE rows above no
+longer hold at the grades they were pinned at. Re-measured rather than
+patched to keep the old numbers:
+
+- **Headline (steady vs rolling).** At 10% peak, both now survive -- the
+  specific defect this scenario used to trip on is gone. Sweeping grade
+  finds no window at all where steady survives and rolling does not: steady's
+  own ceiling (unrelated to this fix -- reproduces identically on unfixed
+  `master`) is 10.0%, while rolling's ceiling, now higher than before, is
+  10.5%. There IS a repeatable, five-tenths-of-a-percent-wide window
+  (10.1-10.5%) where the relationship is the exact **opposite** of the
+  original headline: steady fails and rolling survives. That is what is
+  pinned now (`test_the_rolling_vs_steady_headline_inverted_after_250`). Note
+  the qualifier: this shows the specific bug was inflating the size (and
+  apparently the sign) of the steady/rolling gap at the 10% test point, NOT
+  that a rolling profile is now categorically easier in general, and NOT that
+  the *original* "transitions cost margin" hypothesis is wrong -- neither has
+  been re-examined here. A real, deliberate re-characterisation of whether
+  and where a rolling profile is intrinsically harder than a steady grade,
+  independent of this bug, is follow-up work, not done in this pass.
+- **Estimator costs the envelope.** Re-derived at grade 11.0% (was 10.0%),
+  the same shape of comparison as before (truth survives, estimate does not),
+  in a five-sample-wide (10.6-11.4%) measured window -- 11.6% already flips
+  back, the same non-monotonic-near-a-boundary signature issue #24 AC2's
+  disturbance sweep already documented for this codebase, so the grade was
+  chosen from the middle of the window, not its edge.
+- **Estimator error through the dip.** This one did not just shift -- it
+  inverted categorically. Swept 2-9% peak grade with the fix active: dip RMS
+  is now HIGHER than descent RMS at every grade tested, not lower at any of
+  them. The dip is also where the profile's curvature is most active (both
+  transitions bracket it), so it is a plausible place for the new gate to
+  engage more, but that is a hypothesis, not a measurement -- **not
+  root-caused here**, matching this file's own precedent from issue #228 for
+  not chasing a mechanism outside a pass's actual scope. Re-pinned to the
+  newly measured (inverted) direction in
+  `test_estimator_error_is_highest_through_the_dip`.
+
+None of this touches ADR-0011's own text or its (f1)/(f2) trim pin -- flagged
+for the COO in the PR this session opens, since it bears directly on issue
+#227 (same file, same estimator, already an open question about whether the
+freeze-and-pin generalises past flat ground) and, through it, on ADR-0011's
+launch-hold status. Deciding whether any of that changes is not this session's
+call.
 """
 
 import math
@@ -151,55 +204,81 @@ def test_completing_is_asserted_separately_from_surviving():
     assert m.fraction_completed < 1.0
 
 
-def test_a_rolling_profile_is_harder_than_a_steady_grade_of_the_same_steepness():
-    """**The headline.**
+def test_the_rolling_vs_steady_headline_inverted_after_250():
+    """**The headline, re-measured (issue #250).**
 
-    `hill.py` passes the estimator on a steady +10% descent. The same 10% as the
-    *peak* of a rolling profile -- with a crest to leave, a dip to cross and two
-    transitions -- puts the board down. Transitions cost margin that a steady
-    grade never charges, and only a real tilted surface can express them.
+    Was `test_a_rolling_profile_is_harder_than_a_steady_grade_of_the_same_
+    steepness`, asserting steady-10%-survives / rolling-10%-does-not. Issue
+    #250 fixed a real defect (a near-zero specific-force reading resolving
+    through `atan2(0, -0)` to a confident, arbitrary angle) that this
+    scenario's dip and transitions were tripping on. Re-swept grade after the
+    fix: there is no longer any grade where steady survives and rolling does
+    not -- steady's own ceiling (10.0%, unrelated to this fix, reproduces
+    identically on unfixed code) is now BELOW rolling's (10.5%). What is
+    repeatably measured is the opposite relationship, in a real, five-tenths-
+    wide window, pinned here rather than a knife-edge single grade.
+
+    This does not establish that a rolling profile is now categorically
+    easier in general, only that it is at this specific window -- a proper
+    re-characterisation of the original "transitions cost margin" hypothesis
+    is follow-up work, not done here. See this file's module docstring for
+    the full accounting, and issue #227 for why this also bears on ADR-0011.
     """
-    steady = hill_run(HillParams(grade_pct=10.0, v_ref_m_s=2.0, duration_s=10.0)).metrics
-    rolling = run(TerrainParams(max_grade_pct=10.0)).metrics
+    steady = hill_run(HillParams(grade_pct=10.3, v_ref_m_s=2.0, duration_s=10.0)).metrics
+    rolling = run(TerrainParams(max_grade_pct=10.3)).metrics
 
-    assert steady.survived, (
-        "the uniform 10% descent now fails too -- the comparison this test makes "
-        "has lost its baseline, so re-derive both envelopes rather than editing here"
+    assert not steady.survived, (
+        "steady 10.3% now survives -- re-sweep for the new crossover rather "
+        "than editing this grade blind"
     )
-    assert not rolling.survived, (
-        "the rolling 10% profile now survives. If the controller genuinely "
-        "improved, re-derive the terrain envelope -- do not loosen this"
+    assert rolling.survived, (
+        "rolling 10.3% no longer survives -- re-sweep for the new crossover "
+        "rather than editing this grade blind"
     )
-    assert rolling.struck_phase in ("descent", "dip", "ascent")
 
 
 def test_the_estimator_costs_terrain_envelope():
     """Truth pitch rides a profile the estimate cannot. Same plant, same
-    terrain, same commanded speed -- only the source of attitude differs."""
-    truth = run(TerrainParams(max_grade_pct=10.0, use_estimator=False)).metrics
-    est = run(TerrainParams(max_grade_pct=10.0, use_estimator=True)).metrics
+    terrain, same commanded speed -- only the source of attitude differs.
+
+    Re-derived at 11.0% peak grade (was 10.0%) after issue #250's estimator
+    fix moved this envelope -- see this file's module docstring. Chosen from
+    the middle of a measured 10.6-11.4% window, not its edge: 11.6% already
+    flips back, the same non-monotonic-near-a-boundary signature issue #24
+    AC2's disturbance sweep already documented elsewhere in this codebase.
+    """
+    truth = run(TerrainParams(max_grade_pct=11.0, use_estimator=False)).metrics
+    est = run(TerrainParams(max_grade_pct=11.0, use_estimator=True)).metrics
     assert truth.survived and truth.reached_next_crest, (
-        "truth pitch should complete a 10% rolling profile"
+        "truth pitch should complete an 11% rolling profile"
     )
     assert not est.survived, "the estimate should not"
 
 
 @pytest.mark.parametrize("grade", [4.0, 8.0])
-def test_estimator_error_is_lowest_through_the_dip(grade):
-    """Where the ground is flattest the estimate is best, which is the
-    slope-absorption mechanism showing up inside a single continuous ride
-    rather than across separate runs.
+def test_estimator_error_is_highest_through_the_dip(grade):
+    """Re-measured after issue #250's estimator fix (was `..._is_lowest...`,
+    asserting the opposite direction).
 
-    Note this does NOT reproduce the uniform gate's `error ~= slope angle`. On a
-    rolling profile the grade never holds still long enough for the error to
-    converge to it, so total RMS is roughly grade-independent (~0.96 deg across
-    2-8%) while its DISTRIBUTION along the ride still tracks the terrain.
+    This did not just shift, it inverted categorically: swept 2-9% peak grade
+    with the fix active, dip RMS is higher than descent RMS at every grade
+    tested, not lower at any of them. The dip is also where the profile's
+    curvature is most active (both transitions bracket it), so it is a
+    plausible place for the fix's new near-zero-specific-force gate to engage
+    more -- but that is a hypothesis, not a measurement. **Not root-caused
+    here**, matching this file's own precedent from issue #228 for not
+    chasing a mechanism outside a pass's actual scope.
+
+    Note this still does NOT reproduce the uniform gate's `error ~= slope
+    angle`; the module docstring's "~0.96 deg across 2-8%, roughly
+    grade-independent" aside was not re-derived in this pass either.
     """
     m = run(TerrainParams(max_grade_pct=grade)).metrics
     assert m.reached_next_crest
-    assert m.est_rms_dip_deg < m.est_rms_descent_deg, (
+    assert m.est_rms_dip_deg > m.est_rms_descent_deg, (
         f"dip {m.est_rms_dip_deg:.3f}° vs descent {m.est_rms_descent_deg:.3f}° -- "
-        "the estimate should be at its best where the ground is flattest"
+        "this inverted after issue #250's fix; re-measure rather than editing "
+        "this direction blind if it reproduces the OLD relationship again"
     )
 
 

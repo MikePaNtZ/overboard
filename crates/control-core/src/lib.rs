@@ -83,6 +83,38 @@ pub trait Estimator {
 /// This is the standard trick and it is cheap, but it is not free: while
 /// coasting there is no attitude reference at all, so the band must be wide
 /// enough that ordinary riding does not trip it. Zero disables the gate.
+///
+/// # A near-zero specific force has no direction at all (issue #250)
+///
+/// The band above is opt-in and centred on deviation *from g* — a caller can
+/// legitimately leave it at zero. This next check is neither: it is
+/// unconditional, and it is not about deviation from g, it is about the raw
+/// magnitude approaching zero.
+///
+/// `atan2` never refuses. Fed a vector of (near) zero length it still returns
+/// a confident angle — `atan2(0, -0) = 180°` exactly, "upside down" — but
+/// that angle carries no information, because a vanishing vector has no
+/// defined direction. Trusting it is not a tuning problem, it is a category
+/// error: there is nothing to fuse in. A real board reads this on any brief
+/// unloading — cresting a rise, a kerb, a drop, a jump — all ordinary events
+/// on the terrain this board is meant for, not exotic edge cases.
+///
+/// [`MIN_TRUSTED_ACCEL_MAG_M_S2`] is derived, not picked, from the same
+/// envelope [`ComplementaryFilter::with_trust_band`]'s doc reasons about:
+/// swept over the outer loop's own ±0.86 m/s² commanded-acceleration limit
+/// and every pitch up to the ±20° fallen threshold, specific-force magnitude
+/// never moves more than ~0.33 m/s² away from g in either direction — and
+/// every disturbance this repo has characterised (the 400 N·s nominal kick,
+/// the 260–320 N·s envelope sweep) is a horizontal shove, which by
+/// `‖(g·sinθ+a, g·cosθ)‖ ≥ g` for any horizontal `a` can only ever raise the
+/// magnitude, never lower it. So nothing this codebase has measured, and
+/// nothing the controller itself can command, drives magnitude down at all —
+/// only genuine unloading does that, running the magnitude toward zero as
+/// support vanishes. Half of g leaves wide separation from both sides: far
+/// above zero (so it never mistakes a real low-g moment for noise) and far
+/// below the ~9.5 m/s² floor of grounded, in-envelope operation.
+pub const MIN_TRUSTED_ACCEL_MAG_M_S2: f32 = 9.81 / 2.0;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ComplementaryFilter {
     tau_s: f32,
@@ -122,11 +154,18 @@ impl ComplementaryFilter {
     /// Is this sample's specific force consistent with gravity plus the
     /// acceleration we already know about?
     fn accel_trusted(&self, accel: [f32; 3], forward_accel_m_s2: f32) -> bool {
+        let (x, y, z) = (accel[0] - forward_accel_m_s2, accel[1], accel[2]);
+        let mag = libm::sqrtf(x * x + y * y + z * z);
+
+        // Unconditional (issue #250): a vector this small has no direction to
+        // trust, regardless of whether the caller configured a trust band.
+        if mag < MIN_TRUSTED_ACCEL_MAG_M_S2 {
+            return false;
+        }
+
         if self.accel_trust_band_m_s2 <= 0.0 {
             return true;
         }
-        let (x, y, z) = (accel[0] - forward_accel_m_s2, accel[1], accel[2]);
-        let mag = libm::sqrtf(x * x + y * y + z * z);
         libm::fabsf(mag - 9.81) <= self.accel_trust_band_m_s2
     }
 
@@ -159,7 +198,22 @@ impl Estimator for ComplementaryFilter {
             // zero. Starting at zero and filtering in would take ~τ to become
             // correct, and the controller would be acting on a known-wrong
             // attitude for the whole of it.
+            //
+            // Issue #250: this is exactly where the un-aided-by-time atan2(0,
+            // -0) degeneracy bit hardest -- a board spawning (or resuming)
+            // out of ground contact snaps straight to a confident 180° on its
+            // very first cycle, before anything else has a chance to
+            // disagree. If THIS sample's accelerometer isn't trusted, hold
+            // level (the struct's own zeroed default) and stay
+            // uninitialised rather than commit to a degenerate angle -- the
+            // gyro rate is still tracked below, so nothing is lost by
+            // waiting for a trustworthy sample to actually initialise on.
             if !self.initialised {
+                if !self.accel_trusted(s.accel_m_s2, forward_accel_m_s2) {
+                    self.pitch_rate_rad_s = s.gyro_rad_s[1];
+                    self.rejected = self.rejected.saturating_add(1);
+                    continue;
+                }
                 self.pitch_rad = theta_accel;
                 self.initialised = true;
                 self.last_t_ns = Some(s.t_sample_ns);
@@ -871,6 +925,66 @@ mod tests {
         f.reset();
         let a = f.update(&[sample(0, 0.0, 0.0)], 0.0);
         assert!(a.pitch_rad.abs() < 1e-5);
+    }
+
+    fn freefall_sample(t_ns: u64) -> ImuSample {
+        // True specific force in free-fall is (near) zero -- no accelerometer
+        // channel carries a "down" to resolve.
+        ImuSample {
+            gyro_rad_s: [0.0, 0.0, 0.0],
+            accel_m_s2: [0.0, 0.0, 0.0],
+            t_sample_ns: t_ns,
+        }
+    }
+
+    #[test]
+    fn a_first_sample_of_near_zero_specific_force_does_not_snap_to_a_degenerate_angle() {
+        // Regression for issue #250: a board that spawns (or resumes) out of
+        // ground contact must not initialise on atan2(0, -0) = 180 deg.
+        let mut f = ComplementaryFilter::new(1.0);
+        let a = f.update(&[freefall_sample(0)], 0.0);
+        assert!(
+            a.pitch_rad.abs() < 1e-3,
+            "snapped to a degenerate {} deg on an untrusted first sample",
+            a.pitch_rad.to_degrees()
+        );
+        assert_eq!(f.rejected_samples(), 1);
+
+        // A real (trusted) reading right after should initialise cleanly --
+        // waiting one sample must not have broken the mechanism.
+        let b = f.update(&[sample(2_000_000, 0.3, 0.0)], 0.0);
+        assert!(
+            (b.pitch_rad - 0.3).abs() < 1e-3,
+            "did not initialise cleanly on the first trusted sample, got {}",
+            b.pitch_rad
+        );
+    }
+
+    #[test]
+    fn sustained_near_zero_specific_force_is_rejected_and_never_inverts() {
+        // Regression for issue #250: sustained free-fall must not let the
+        // estimate converge on the atan2(0, -0) degeneracy, even though the
+        // trust band above (an opt-in, deviation-from-g gate) is left off
+        // here (`ComplementaryFilter::new` defaults `accel_trust_band_m_s2`
+        // to 0.0) -- the near-zero-magnitude floor is unconditional.
+        let mut f = ComplementaryFilter::new(1.0);
+        // Initialise on a real, level reading first.
+        f.update(&[sample(0, 0.0, 0.0)], 0.0);
+
+        let dt_ns = 2_000_000u64; // 500 Hz
+        let mut last = Attitude::default();
+        for k in 1..=2_500u64 {
+            // 5 s -- several times tau, long enough that an ungated filter
+            // would have converged onto theta_accel.
+            last = f.update(&[freefall_sample(k * dt_ns)], 0.0);
+        }
+
+        assert!(
+            last.pitch_rad.abs() < 0.05,
+            "estimate drifted to {} deg under sustained free-fall",
+            last.pitch_rad.to_degrees()
+        );
+        assert_eq!(f.rejected_samples(), 2_500);
     }
 
     // ---- VelocityLoop ---------------------------------------------------
