@@ -15,6 +15,7 @@
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--kerb [Y[,HEIGHT]]]
+//!          [--terrain HFIELD.bin]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -214,6 +215,18 @@ fn main() -> ExitCode {
             // City Park default; `--kerb Y[,HEIGHT]` overrides where it is
             // and how tall, so the kerb can be moved during a play-test
             // without a rebuild.
+            // ADR-0012: ride the REAL City Park surface instead of a flat
+            // plane. Takes the hfield binary written by overboard-game's
+            // tools/terrain_probe/rasterize_hfield.py; metadata.json must sit
+            // beside it.
+            "--terrain" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --terrain needs a path to a MuJoCo hfield .bin");
+                    return ExitCode::FAILURE;
+                };
+                cfg.terrain = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
             "--kerb" => {
                 let mut spec = sim_host::host::DEFAULT_KERB;
                 if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
