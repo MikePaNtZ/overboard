@@ -258,6 +258,16 @@ LOOP=""
 #    `systemctl reboot` at the end of phase 1 exits QEMU (thanks to
 #    -no-reboot) rather than resetting it, so the phase transition is a
 #    fresh process, not an in-VM ACPI reset this script has to detect.
+#
+# `-nic none` is load-bearing, not tidiness. Give QEMU no -nic/-net at all
+# and it still adds a default user-mode NIC, and on this machine that
+# default is a PCI device whose "romfile" property points at
+# efi-virtio.rom -- a file `apt-get install --no-install-recommends
+# qemu-system-arm` does not pull in (it ships in the ipxe-qemu recommend,
+# which is skipped on purpose to keep the runner install fast). Without
+# `-nic none`, qemu-system-aarch64 fails the romfile lookup and exits
+# before the kernel ever loads, for a machine that was never asked to have
+# a network device in the first place. First real CI run caught this.
 # ---------------------------------------------------------------------------
 boot_phase() {
   local label="$1" log="$2"
@@ -271,6 +281,7 @@ boot_phase() {
     -append "root=/dev/vda2 rw rootwait console=ttyAMA0 systemd.log_target=console systemd.log_level=info systemd.journald.forward_to_console=1" \
     -drive file="$RAW",format=raw,if=none,id=hd0 \
     -device virtio-blk-device,drive=hd0 \
+    -nic none \
     -nographic -no-reboot \
     -serial "file:$log" \
     || true  # qemu's exit status on a guest-initiated shutdown is not load-bearing here; the log is
