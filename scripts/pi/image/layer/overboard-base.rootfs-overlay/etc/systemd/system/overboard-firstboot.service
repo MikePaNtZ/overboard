@@ -18,14 +18,38 @@ RequiresMountsFor=/boot/firmware
 # but must not be RUNNING first -- the installer reloads it afterwards.
 Before=NetworkManager.service
 Wants=NetworkManager.service
-# Idempotent, but the unit still guards on the marker so a normal boot does
-# not pay for a script that will immediately no-op.
-ConditionPathExists=/boot/firmware/overboard-userconf
+# Guarded on a SUCCESS marker the script writes when it finishes, not on the
+# staged input file.
+#
+# The old condition was ConditionPathExists=/boot/firmware/overboard-userconf
+# -- the trigger file. That made a failed first boot TERMINAL: the CEO's board
+# deadlocked twice, the userconf went missing, and the third boot logged
+# "skipped, unmet condition check ConditionPathExists" and came up with no
+# WiFi profiles and no way to retry short of re-flashing (2026-08-06).
+#
+# Conditioning on completion instead means an interrupted run is retried on
+# the next boot, which is the behaviour a first-boot installer needs.
+ConditionPathExists=!/var/lib/overboard/firstboot-done
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/overboard-firstboot
+
+# NOT the default. Type=oneshot disables TimeoutStartSec entirely, so a unit
+# that blocks does not fail -- it wedges the boot forever, with the console
+# stuck on "Job overboard-firstboot.service/start running" and no timeout to
+# rescue it. That is exactly what happened, and it is the difference between
+# a board that reports a broken first boot and one that is simply dead.
+#
+# A credential installer must fail LOUDLY, never silently hold the system
+# hostage. 120s is generous for what is a few file copies.
+TimeoutStartSec=120
+
+# A failed credential install must not take the boot down with it: ssh may
+# still come up, and a reachable board with no WiFi is far more debuggable
+# than an unreachable one.
+SuccessExitStatus=0
 # Deliberately NOT `StandardOutput=null`: on a headless board with no user yet
 # configured, the journal is the only record of why the network did not come
 # up, and that is the failure this unit exists around.

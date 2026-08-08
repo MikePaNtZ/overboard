@@ -250,13 +250,14 @@ else
   echo
   echo "    Works immediately -- these ship in the image:"
   echo "      cyclictest -m -Sp95 -i 2000 -D 30m       # kernel wakeup jitter (AC-5)"
-  echo "      ip -details link show can0               # CAN up at 500 kbit/s"
+  echo "      ip -details link show can0               # only with the CAN HAT fitted"
   echo "      cangen vcan0 & candump vcan0             # CAN stack, no hardware needed"
   echo
   echo "    NOT on the card yet -- no Overboard code ships in the image (issue"
   echo "    #182 I5). To run the controller or the loop profiler you must put"
   echo "    them there yourself for now:"
-  echo "      ssh <user>@overboard.local"
+  echo "      ssh <user>@overboard.local     # mDNS; if it does not resolve,"
+  echo "                                     # get the IP from your router"
   echo "      sudo apt install -y git build-essential curl"
   echo "      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   echo "      git clone https://github.com/MikePaNtZ/overboard && cd overboard"
