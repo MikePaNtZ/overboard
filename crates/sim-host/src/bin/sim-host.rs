@@ -16,6 +16,7 @@
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--crr-scale FACTOR]
 //!          [--imu-noise-seed SEED]
+//!          [--kerb [Y[,HEIGHT]]] [--terrain HFIELD.bin]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -211,6 +212,53 @@ fn main() -> ExitCode {
             // second ratification needs the tolerated incline as a MEASURED
             // number before the authored world can carry a checkable asset
             // rule; see HostConfig::incline_deg.
+            // ADR-0012: ride into a kerb. Bare `--kerb` uses the measured
+            // City Park default; `--kerb Y[,HEIGHT]` overrides where it is
+            // and how tall, so the kerb can be moved during a play-test
+            // without a rebuild.
+            // ADR-0012: ride the REAL City Park surface instead of a flat
+            // plane. Takes the hfield binary written by overboard-game's
+            // tools/terrain_probe/rasterize_hfield.py; metadata.json must sit
+            // beside it.
+            "--terrain" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --terrain needs a path to a MuJoCo hfield .bin");
+                    return ExitCode::FAILURE;
+                };
+                cfg.terrain = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
+            "--kerb" => {
+                let mut spec = sim_host::host::DEFAULT_KERB;
+                if let Some(v) = args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    let parts: Vec<&str> = v.split(',').collect();
+                    if parts.is_empty() || parts.len() > 2 {
+                        eprintln!("sim-host: --kerb takes Y or Y,HEIGHT (metres), got '{v}'");
+                        return ExitCode::FAILURE;
+                    }
+                    let Ok(y) = parts[0].parse::<f64>() else {
+                        eprintln!("sim-host: --kerb Y value '{}' is not a number", parts[0]);
+                        return ExitCode::FAILURE;
+                    };
+                    spec.y_face_m = y;
+                    if let Some(h) = parts.get(1) {
+                        let Ok(h) = h.parse::<f64>() else {
+                            eprintln!("sim-host: --kerb HEIGHT value '{h}' is not a number");
+                            return ExitCode::FAILURE;
+                        };
+                        if !(0.01..=1.0).contains(&h) {
+                            eprintln!(
+                                "sim-host: --kerb HEIGHT must be within [0.01, 1.0] m, got {h}"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        spec.height_m = h;
+                    }
+                    i += 1;
+                }
+                cfg.kerb = Some(spec);
+                i += 1;
+            }
             "--incline-deg" => {
                 let Some(v) = args.get(i + 1) else {
                     eprintln!("sim-host: --incline-deg needs a value");

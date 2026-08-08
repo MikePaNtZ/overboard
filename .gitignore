@@ -26,3 +26,9 @@ pi-secrets.env
 *.nmconnection
 overboard-authorized_keys
 overboard-userconf
+
+# sim-host --kerb splices its kerb into a per-process copy of the rider model
+# (ADR-0012) and deletes it on a clean exit. A run killed with SIGKILL never
+# gets there, so these accumulate -- five of them were nearly committed. They
+# are scratch by construction and must never be tracked.
+sim/models/*.generated.xml

@@ -21,10 +21,14 @@ mmdebstrap:
   architectures:
     - arm64
   packages:
-    # AC-5's instrument. cyclictest measures the KERNEL; overboard-loop-profile
-    # measures OUR loop on that kernel. Both ship, because them disagreeing is
-    # informative -- cyclictest clean and the profiler dirty means the problem
-    # is ours.
+    # AC-5's instrument, and the one that actually took the passing measurement
+    # (p99.9 72us, max 113us, 2026-08-07).
+    #
+    # This comment used to claim overboard-loop-profile ships alongside it.
+    # It does not -- no Overboard binary is in this image at all (#182 I5), so
+    # cyclictest is the ONLY jitter instrument on the card. Corrected rather
+    # than deleted, because a package list that describes tools it does not
+    # install is how an operator plans a bench session around a missing binary.
     - rt-tests
     # candump/cansend/cangen, plus `ip link` to bring can0 up.
     - can-utils
@@ -38,6 +42,17 @@ mmdebstrap:
     - network-manager
     # Key-only SSH is how the board is reached; there is no console user.
     - openssh-server
+    # mDNS. Without it `overboard.local` cannot resolve -- and the runbook,
+    # flash_pi.sh's closing message and every instruction we give the operator
+    # all say to use exactly that name. It resolved on the CEO's stock
+    # Raspberry Pi OS card and not on ours, which made a working board look
+    # dead (2026-08-06).
+    - avahi-daemon
+    # The WiFi path shelled out to `iw` and `rfkill` that were never installed,
+    # so the regulatory domain silently went unset and the radio could not even
+    # be inspected. Ship the tools the scripts actually call.
+    - iw
+    - rfkill
     # Required by the STOCK image-rpios layer, not by us: its
     # `customize05-pkgs` hook shells out to apt inside the target, and a slim
     # base does not install apt there. Build round 4 died on

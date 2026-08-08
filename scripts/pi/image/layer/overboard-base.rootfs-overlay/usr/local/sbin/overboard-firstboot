@@ -59,8 +59,12 @@ if [ -f "$USERCONF" ]; then
 
   if [ -n "$username" ] && ! id -u "$username" >/dev/null 2>&1; then
     log "creating user $username"
-    useradd -m -s /bin/bash -G sudo,dialout,gpio,i2c,spi,netdev "$username" \
-      || useradd -m -s /bin/bash -G sudo,dialout "$username"
+    # `video` is not cosmetic: vcgencmd needs it, and vcgencmd is how the
+    # runbook checks whether an AC-5 run was thermally valid. Without it the
+    # operator gets "Can't open device file /dev/vcio" on the one command
+    # that decides whether a 30-minute measurement counts.
+    useradd -m -s /bin/bash -G sudo,dialout,gpio,i2c,spi,netdev,video "$username" \
+      || useradd -m -s /bin/bash -G sudo,dialout,video "$username"
     if [ -n "${password_hash:-}" ]; then
       usermod -p "$password_hash" "$username"
     else
@@ -72,9 +76,17 @@ if [ -f "$USERCONF" ]; then
 
   if [ -n "${wifi_country:-}" ]; then
     log "regulatory domain -> $wifi_country"
-    raspi-config nonint do_wifi_country "$wifi_country" 2>/dev/null \
-      || iw reg set "$wifi_country" 2>/dev/null \
-      || log "WARNING: could not set regulatory domain; 5 GHz may be unavailable"
+    # Write cfg80211's own config file FIRST, because it needs no tooling.
+    # raspi-config is a Raspberry Pi OS tool a slim image does not carry, and
+    # `iw` was not installed either, so the old chain fell all the way through
+    # to a warning and left the radio with no regulatory domain -- one reason
+    # wlan0 never associated on the CEO's first boot.
+    install -d -m 0755 /etc/modprobe.d
+    printf 'options cfg80211 ieee80211_regdom=%s\n' "$wifi_country" \
+      | tee /etc/modprobe.d/overboard-regdom.conf >/dev/null
+    iw reg set "$wifi_country" 2>/dev/null \
+      || raspi-config nonint do_wifi_country "$wifi_country" 2>/dev/null \
+      || log "note: regdom not set live; the modprobe.d file applies next boot"
   fi
 fi
 
@@ -94,7 +106,13 @@ if [ "${ssh_password_auth:-false}" = "false" ]; then
     > /etc/ssh/sshd_config.d/10-overboard.conf
   log "SSH password authentication disabled (key-only)"
 fi
-systemctl enable --now ssh >/dev/null 2>&1 || log "WARNING: could not enable ssh"
+# `enable`, NOT `enable --now`. `--now` starts ssh.service from inside the
+# boot transaction that is currently blocked on THIS unit, which deadlocks --
+# and because Type=oneshot disables TimeoutStartSec by default, it hangs
+# forever rather than failing. That wedged the CEO's first boot completely
+# (2026-08-06). The symlink is enough: multi-user.target starts ssh in the
+# same boot, a fraction of a second later.
+systemctl enable ssh >/dev/null 2>&1 || log "WARNING: could not enable ssh"
 
 # ---------------------------------------------------------------------------
 # Wi-Fi
@@ -110,7 +128,12 @@ if [ -d "$NET_SRC" ]; then
     count=$((count + 1))
   done
   log "installed $count wifi profile(s)"
-  nmcli connection reload 2>/dev/null || systemctl reload NetworkManager 2>/dev/null || true
+  # Deliberately NOT `nmcli connection reload`. This unit is ordered
+  # Before=NetworkManager.service, so nmcli would try to D-Bus-activate a
+  # service that cannot start until we finish: the same deadlock as the ssh
+  # line above, one line apart. NetworkManager reads system-connections/ when
+  # it starts, and it starts after us, so dropping the files in is sufficient.
+  log "profiles staged; NetworkManager will read them when it starts"
 fi
 
 # ---------------------------------------------------------------------------
@@ -128,5 +151,15 @@ if [ -d "$NET_SRC" ]; then
 fi
 [ -f "$AUTHKEYS" ] && { shred -u "$AUTHKEYS" 2>/dev/null || rm -f "$AUTHKEYS"; }
 [ -f "$USERCONF" ] && { shred -u "$USERCONF" 2>/dev/null || rm -f "$USERCONF"; }
+
+# The success marker the unit conditions on. Written LAST, so anything that
+# aborts before this point is retried on the next boot rather than being
+# skipped forever.
+#
+# On the BOOT partition deliberately: it is the only filesystem a laptop can
+# mount, so deleting this file with the card in a reader forces a clean first
+# boot even on a board that will not come up. A marker on the rootfs would be
+# unreachable in exactly the situation it needs to be reachable.
+date -u +%Y-%m-%dT%H:%M:%SZ | tee "$BOOT/overboard-firstboot.done" >/dev/null
 
 log "complete - staged credentials removed from $BOOT"

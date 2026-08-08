@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Flash an Overboard image to an SD card and stage credentials onto it.
 #
-#     scripts/pi/flash_pi.sh --disk /dev/disk4                 # newest release
-#     scripts/pi/flash_pi.sh --disk /dev/disk4 --image ./x.img.xz
-#     scripts/pi/flash_pi.sh --disk /dev/disk4 --dry-run       # rehearse
+#     scripts/pi/flash_pi.sh                                   # newest release
+#     scripts/pi/flash_pi.sh --disk /dev/disk4                 # explicit target
+#     scripts/pi/flash_pi.sh --image ./x.img.zst               # local image
+#     scripts/pi/flash_pi.sh --dry-run                         # rehearse
+#
+# With no --disk, the one removable disk in the machine is proposed. Zero or
+# more than one is an error, never a guess. Detection removes the LOOKUP step
+# only -- the confirmation prompt below still has to be answered by hand.
 #
 # THIS WRITES TO A RAW BLOCK DEVICE. The classic way to lose a laptop's
 # internal disk is a mistyped device path in exactly this kind of script, so
@@ -36,7 +41,11 @@ die() { echo "error: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
 usage() {
-  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Print the header block, whatever length it is: line 2 up to the first line
+  # of real code. The previous hard-coded '2,30p' silently truncated the moment
+  # the header grew, which is how --help starts lying about a script whose whole
+  # job is not to surprise you.
+  sed -n '2,/^set -/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -52,16 +61,66 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$DISK" ] || die "--disk is required. There is no default: a default target
-       for a raw write is a loaded gun. Find yours with:
-         macOS:  diskutil list external
-         Linux:  lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT"
-
 OS="$(uname -s)"
 case "$OS" in
   Darwin|Linux) ;;
   *) die "unsupported platform: $OS" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# Target selection.
+#
+# --disk still wins outright. With no --disk we PROPOSE the single removable
+# disk -- but only when there is exactly one. Zero or several is an error,
+# never a guess: "pick the first one" is how a script like this breaks its
+# promise.
+#
+# NOTE the predicate. An earlier version of this enumerated with
+# `diskutil list external`, which does NOT list a MacBook's built-in SDXC
+# slot -- that reader reports Device Location: Internal while holding
+# Removable media, so the convenience feature would silently have failed to
+# find the CEO's only card reader. Same mistake guard 1 made. We therefore
+# filter on `Removable Media`, the exact field guard 1 checks, so detection
+# and validation cannot disagree about what counts.
+#
+# Detection removes the lookup step, not a safety step: guard 1 re-checks
+# whatever lands in $DISK, and guard 2 still makes a human type it back. A
+# target the script chose deserves the SAME scrutiny as one that was typed.
+# ---------------------------------------------------------------------------
+removable_disks() {
+  if [ "$OS" = "Darwin" ]; then
+    local d rm
+    for d in $(diskutil list physical 2>/dev/null | awk '/^\/dev\/disk/{print $1}'); do
+      rm="$(diskutil info "$d" 2>/dev/null | awk -F': *' '/Removable Media/{print $2}' | xargs)"
+      case "$rm" in Removable|Yes) echo "$d" ;; esac
+    done
+  else
+    # RM=1 is the kernel's own removable flag -- the same bit guard 1 reads.
+    lsblk -dno NAME,RM 2>/dev/null | awk '$2 == 1 { print "/dev/" $1 }'
+  fi
+}
+
+if [ -z "$DISK" ]; then
+  FOUND="$(removable_disks || true)"
+  COUNT="$(printf '%s\n' "$FOUND" | grep -c '^/dev/' || true)"
+  case "$COUNT" in
+    1)
+      DISK="$(printf '%s\n' "$FOUND" | grep '^/dev/')"
+      say "no --disk given; exactly one removable disk present: $DISK"
+      ;;
+    0)
+      die "no --disk given, and no removable disk was found.
+       Insert the card, or name the target explicitly:
+         macOS:  diskutil list          (NOT 'list external' -- the built-in
+                                         SDXC reader reports as internal)
+         Linux:  lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT" ;;
+    *)
+      die "no --disk given, and $COUNT removable disks are present:
+$(printf '%s\n' "$FOUND" | grep '^/dev/' | sed 's/^/         /')
+       Refusing to choose between them -- pick one with --disk.
+       Match the SIZE: these guards cannot tell a card from a USB stick." ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Guard 1: the target must be removable. Refused, not warned about.
@@ -71,19 +130,40 @@ assert_removable() {
   [ -e "$disk" ] || die "$disk does not exist"
 
   if [ "$OS" = "Darwin" ]; then
-    local info removable internal
+    local info removable virtual this_whole root_whole
     info="$(diskutil info "$disk" 2>/dev/null)" || die "diskutil could not read $disk"
-    removable="$(echo "$info" | awk -F': *' '/Removable Media/{print $2}' | xargs)"
-    internal="$(echo "$info" | awk -F': *' '/Device Location/{print $2}' | xargs)"
+    removable="$(echo "$info"  | awk -F': *' '/Removable Media/{print $2}' | xargs)"
+    virtual="$(echo "$info"    | awk -F': *' '/^ *Virtual:/{print $2}' | xargs)"
+    this_whole="$(echo "$info" | awk -F': *' '/Part of Whole/{print $2}' | xargs)"
     echo "$info" | grep -E 'Device / Media Name|Disk Size|Device Location|Removable Media|Volume Name' \
       | sed 's/^ */    /'
-    if [ "$internal" = "Internal" ]; then
-      die "$disk is an INTERNAL disk. Refusing.
-       This is almost certainly your system drive. Re-read `diskutil list external`."
+
+    # Refuse the system disk BY IDENTITY, not by which bus it hangs off.
+    #
+    # This replaces a `Device Location: Internal` test that was simply wrong
+    # about the world. A MacBook's built-in SDXC slot reports **Internal**
+    # while holding **Removable** media, so the old check refused the CEO's
+    # only card reader on 2026-08-06 -- the worst failure mode a safety guard
+    # has. Not a missed catch: a false refusal on the correct target, which
+    # teaches the operator to route around the guard. One that cries wolf gets
+    # disabled, and then it is not there on the day it matters.
+    root_whole="$(diskutil info / 2>/dev/null | awk -F': *' '/Part of Whole/{print $2}' | xargs)"
+    if [ -n "$root_whole" ] && [ -n "$this_whole" ] && [ "$root_whole" = "$this_whole" ]; then
+      die "$disk holds the volume this Mac is booted from. Refusing.
+       There is no --force. The only reason to want one here is a mistake."
     fi
+
+    # Removability is now the load-bearing test, so it must be exact. An
+    # internal NVMe reports 'Fixed' or 'Not removable' and is refused here.
     case "$removable" in
-      Removable|"Yes") ;;
+      Removable|Yes) ;;
       *) die "$disk does not report as removable media (got: '${removable:-unknown}'). Refusing." ;;
+    esac
+
+    # Synthesized APFS containers are Virtual: Yes and are not raw targets.
+    case "$virtual" in
+      No|"") ;;
+      *) die "$disk is a virtual/synthesized device (Virtual: $virtual), not physical media. Refusing." ;;
     esac
   else
     local base rm_flag
@@ -118,10 +198,13 @@ if [ -z "$IMAGE" ]; then
   command -v gh >/dev/null || die "no --image given and `gh` is not installed"
   say "downloading the '$IMAGE_RELEASE' release"
   ( cd "$STAGING" && gh release download "$IMAGE_RELEASE" --repo MikePaNtZ/overboard \
-      --pattern '*.img.xz' --pattern '*.img.xz.sha256' ) \
+      --pattern '*.img.xz' --pattern '*.img.zst' --pattern '*.sha256' ) \
     || die "could not download release '$IMAGE_RELEASE'.
-       If the image pipeline has not landed yet (issue #182 I1), pass --image."
-  IMAGE="$(ls -1 "$STAGING"/*.img.xz)"
+       No release is published yet (#182). Until one is, flash the CI artefact:
+         gh run download <run-id> -n overboard-image-<sha> -D ./img
+         scripts/pi/flash_pi.sh --image ./img/overboard-stage0b.img.zst"
+  IMAGE="$(ls -1 "$STAGING"/*.img.xz "$STAGING"/*.img.zst 2>/dev/null | head -1 || true)"
+  [ -n "$IMAGE" ] || die "release '$IMAGE_RELEASE' held no .img.xz or .img.zst"
 fi
 [ -f "$IMAGE" ] || die "image not found: $IMAGE"
 
@@ -136,6 +219,33 @@ else
   echo "WARNING: no $(basename "$IMAGE").sha256 alongside the image."
   echo "         Flashing UNVERIFIED. AC-11's restore test assumes a checked artefact."
 fi
+
+# ---------------------------------------------------------------------------
+# Decompression: chosen by extension, and resolved BEFORE the card is touched.
+#
+# This used to hardcode `xz -dc`, which was wrong in a way that only shows up
+# on the machine that matters. rpi-image-gen deploys **.zst** today
+# (build_image.sh globs rather than names the extension for exactly this
+# reason), while design section 2 calls for **.img.xz** to be PUBLISHED. Both
+# formats are therefore in circulation, and will be until those two agree.
+#
+# Resolved here rather than at the write, so an unsupported format or a
+# missing decompressor fails while the card is still mounted and intact --
+# the same ordering rule the credential staging above follows. Discovering
+# `xz: unsupported file format` after `diskutil unmountDisk` means a
+# half-erased card and a repeat 273 MB download.
+# ---------------------------------------------------------------------------
+case "$IMAGE" in
+  *.img.xz)  DECOMP="xz -dc" ;;
+  *.img.zst) DECOMP="zstd -dc" ;;
+  *.img)     DECOMP="cat" ;;
+  *) die "unrecognized image format: $(basename "$IMAGE")
+       Expected .img, .img.xz or .img.zst." ;;
+esac
+command -v "${DECOMP%% *}" >/dev/null || die "${DECOMP%% *} is not installed, and
+       $(basename "$IMAGE") needs it.
+         macOS:  brew install ${DECOMP%% *}
+         Debian: sudo apt install ${DECOMP%% *}"
 
 # ---------------------------------------------------------------------------
 # Guard 2: type the identifier back.
@@ -163,7 +273,7 @@ if [ "$OS" = "Darwin" ]; then
     say "unmounting $DISK"
     diskutil unmountDisk "$DISK"
     say "writing (sudo; ctrl-T shows progress)"
-    xz -dc "$IMAGE" | sudo dd of="$RAW" bs=4m
+    $DECOMP "$IMAGE" | sudo dd of="$RAW" bs=4m
     sync
     say "waiting for the boot partition to mount"
     sleep 3
@@ -176,7 +286,7 @@ else
     say "unmounting any mounted partitions of $DISK"
     for part in "$DISK"?*; do umount "$part" 2>/dev/null || true; done
     say "writing (sudo)"
-    xz -dc "$IMAGE" | sudo dd of="$DISK" bs=4M conv=fsync status=progress
+    $DECOMP "$IMAGE" | sudo dd of="$DISK" bs=4M conv=fsync status=progress
     sync
   fi
   BOOT_MNT="$(mktemp -d)"
@@ -220,13 +330,14 @@ else
   echo
   echo "    Works immediately -- these ship in the image:"
   echo "      cyclictest -m -Sp95 -i 2000 -D 30m       # kernel wakeup jitter (AC-5)"
-  echo "      ip -details link show can0               # CAN up at 500 kbit/s"
+  echo "      ip -details link show can0               # only with the CAN HAT fitted"
   echo "      cangen vcan0 & candump vcan0             # CAN stack, no hardware needed"
   echo
   echo "    NOT on the card yet -- no Overboard code ships in the image (issue"
   echo "    #182 I5). To run the controller or the loop profiler you must put"
   echo "    them there yourself for now:"
-  echo "      ssh <user>@overboard.local"
+  echo "      ssh <user>@overboard.local     # mDNS; if it does not resolve,"
+  echo "                                     # get the IP from your router"
   echo "      sudo apt install -y git build-essential curl"
   echo "      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   echo "      git clone https://github.com/MikePaNtZ/overboard && cd overboard"

@@ -168,6 +168,16 @@ pub struct SimBackend {
     /// `plant_mujoco::Plant::joint_dofadr`.
     frame_free_qposadr: Option<usize>,
     frame_free_dofadr: Option<usize>,
+    /// `mjData::sensordata` address+dim for the three ADR-0012 handoff
+    /// sensors, if the open model declares them -- `None` on any model that
+    /// does not (the driverless onewheel model, every bench rig), which is
+    /// the same "honest zero, not an error" tolerance
+    /// [`SimBackend::truth_ballast_positions`] has. Resolved once in
+    /// `open()`.
+    frame_linvel_sensor: Option<(usize, usize)>,
+    frame_angvel_sensor: Option<(usize, usize)>,
+    nose_strike_sensor: Option<(usize, usize)>,
+    tail_strike_sensor: Option<(usize, usize)>,
     cycle: u64,
     open: bool,
     armed: bool,
@@ -475,6 +485,164 @@ impl SimBackend {
         (fore_aft, lateral)
     }
 
+    /// Puts the plant back to the model's initial state -- `mj_resetData`,
+    /// then the same `mj_forward` prime `open()` does.
+    ///
+    /// This is what the input wire's `reset` bit needs in order to mean
+    /// anything: before it existed, `sim-host` accepted the bit, logged
+    /// "not implemented yet, ignoring", and left the board wherever it had
+    /// fallen. A player who crashed had no way back to the start short of
+    /// restarting the host.
+    ///
+    /// # Why `forward()` is not optional here
+    ///
+    /// `mj_resetData` zeroes `sensordata` along with everything else. The
+    /// control loop reads its attitude out of `sensordata` on the very next
+    /// cycle, so without re-priming it the estimator's first post-reset
+    /// sample is a vertical the board never had -- the identical reason
+    /// `open()` calls `forward()` before its first step (AC8 / issue #107).
+    ///
+    /// The incline is re-applied for the same reason: it lives in
+    /// `mjModel::opt.gravity`, which `mj_resetData` does NOT touch, but
+    /// re-asserting it keeps this path honestly identical to `open()`'s
+    /// rather than relying on that.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn reset(&mut self) {
+        let incline_deg = self.incline_deg;
+        let plant = self.plant.as_mut().expect("reset: backend is not open");
+        plant.reset();
+        if incline_deg != 0.0 {
+            let g = plant.gravity();
+            let mag = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+            let (s, c) = incline_deg.to_radians().sin_cos();
+            plant.set_gravity([mag * s, 0.0, -mag * c]);
+        }
+        plant.forward();
+
+        // Clear EXACTLY what `open()` clears. This list is the whole bug:
+        // `pending_current_a`/`commanded_current_a` are a BUFFERED command --
+        // this backend's own header says it "only buffers a pending command",
+        // which the next `wait_observe()` writes to `ctrl` before stepping.
+        //
+        // Leaving them set meant a reset stepped the freshly-uprighted board
+        // with the SATURATED command left over from the crash. Measured: a
+        // real forward acceleration of ~8.5 m/s^2 on the first post-reset
+        // observation, which `ComplementaryFilter::accel_pitch`
+        // (`atan2(accel[0] - a_ff, -accel[2])`) cannot distinguish from a
+        // 61 deg tilt -- and, being a fresh filter, it SNAPPED to that instead
+        // of filtering it out. The regulator answered with a full -40 A and
+        // nose-dived the board 0.28 s later.
+        //
+        // That is also why adding settle time here did not help: settling runs
+        // unpowered, and then `wait_observe()` re-applied the stale command
+        // anyway. The fix is to clear the command, not to wait longer.
+        self.cycle = 0;
+        self.pending_current_a = None;
+        self.commanded_current_a = 0.0;
+        self.applied_current_a = 0.0;
+        self.ballast_fa_target_m = 0.0;
+        self.ballast_lateral_target_m = 0.0;
+        self.last_wheel_rate_rad_s = 0.0;
+    }
+
+    /// Ground-truth WORLD-frame linear velocity of the `frame` body, m/s,
+    /// read from the model's `frame_linvel` sensor (ADR-0012).
+    ///
+    /// `[0.0; 3]` on a model that does not declare the sensor -- the same
+    /// tolerance [`SimBackend::truth_ballast_positions`] has, and for the
+    /// same reason: a caller on the driverless plant gets an honest "this
+    /// model has no such channel", not an error for something never claimed.
+    ///
+    /// # Why the sensor rather than `qvel`
+    ///
+    /// The free joint's `qvel` linear half IS already global (the fact
+    /// [`SimBackend::inject_kinematic_yaw`] relies on), so this one could
+    /// have been read there. Its angular partner below could not -- that half
+    /// is body-frame -- and reading one velocity from `qvel` and the other
+    /// from a sensor is exactly how a frame error gets introduced by a later
+    /// reader who assumes the pair match. Both come from sensors.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_frame_linvel(&self) -> [f64; 3] {
+        self.read_vec3(self.frame_linvel_sensor, "truth_frame_linvel")
+    }
+
+    /// Ground-truth WORLD-frame angular velocity of the `frame` body, rad/s,
+    /// right-hand rule, read from the model's `frame_angvel` sensor
+    /// (ADR-0012). `[0.0; 3]` on a model that does not declare it.
+    ///
+    /// **World frame, not body frame.** MuJoCo's `frameangvel` reports in
+    /// global coordinates, whereas the free joint's `qvel` angular half is
+    /// body-frame. The wire carries the world one because that is what a
+    /// receiving physics engine seeds with, and converting anywhere else
+    /// would put a rotation in a second place -- the class of error ADR-0010
+    /// named as silently poisoning everything downstream.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_frame_angvel(&self) -> [f64; 3] {
+        self.read_vec3(self.frame_angvel_sensor, "truth_frame_angvel")
+    }
+
+    /// Total normal contact force, newtons, inside the model's `nose_strike`
+    /// site -- the ADR-0012 terminating-event detector. `0.0` on a model that
+    /// does not declare the sensor.
+    ///
+    /// MuJoCo's `touch` sensor sums the normal force of every contact whose
+    /// point falls inside the site's volume, so this reads zero throughout
+    /// normal riding: the site sits 0.108 m above the ground when the board
+    /// is upright and excludes the wheel's contact patch on both the x and z
+    /// axes independently (see the site comment in `overboard_rider.xml`).
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_nose_strike_n(&self) -> f32 {
+        self.read_touch(self.nose_strike_sensor, "truth_nose_strike_n")
+    }
+
+    /// Total normal contact force, newtons, inside the model's `tail_strike`
+    /// site. The rear-bumper counterpart of
+    /// [`SimBackend::truth_nose_strike_n`], and not an afterthought: released
+    /// from upright this plant settles TAIL-down, so a nose-only detector
+    /// reads zero through half the falls it exists to catch.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_tail_strike_n(&self) -> f32 {
+        self.read_touch(self.tail_strike_sensor, "truth_tail_strike_n")
+    }
+
+    /// Shared body of the two `truth_*_strike_n` accessors.
+    fn read_touch(&self, sensor: Option<(usize, usize)>, who: &str) -> f32 {
+        let plant = self
+            .plant
+            .as_ref()
+            .unwrap_or_else(|| panic!("{who}: backend is not open"));
+        match sensor {
+            Some((adr, dim)) => plant.read_sensor(adr, dim).first().copied().unwrap_or(0.0) as f32,
+            None => 0.0,
+        }
+    }
+
+    /// Shared body of the two `truth_frame_*vel` accessors: read a 3-vector
+    /// sensor, or `[0.0; 3]` if this model does not declare it.
+    fn read_vec3(&self, sensor: Option<(usize, usize)>, who: &str) -> [f64; 3] {
+        let plant = self
+            .plant
+            .as_ref()
+            .unwrap_or_else(|| panic!("{who}: backend is not open"));
+        match sensor {
+            Some((adr, dim)) if dim >= 3 => {
+                let v = plant.read_sensor(adr, 3);
+                [v[0], v[1], v[2]]
+            }
+            _ => [0.0; 3],
+        }
+    }
+
     /// Ground-truth BODY-frame pitch rate of the `frame` body, rad/s, nose-up
     /// positive -- the exact time derivative of the pitch angle
     /// `sim-host::body_pitch_roll_rad` reads out of
@@ -731,6 +899,15 @@ impl BoardObserve for SimBackend {
         // does not happen to declare the thing an optional feature needs.
         self.frame_free_qposadr = plant.joint_qposadr("frame_free");
         self.frame_free_dofadr = plant.joint_dofadr("frame_free");
+
+        // ADR-0012 handoff sensors. Resolved by NAME, so appending them to
+        // the model cannot disturb any existing sensor's address -- and
+        // absent on any model that does not declare them, which is not an
+        // error here (see the field comment).
+        self.frame_linvel_sensor = plant.sensor_adr_dim("frame_linvel");
+        self.frame_angvel_sensor = plant.sensor_adr_dim("frame_angvel");
+        self.nose_strike_sensor = plant.sensor_adr_dim("nose_strike");
+        self.tail_strike_sensor = plant.sensor_adr_dim("tail_strike");
 
         // Built once dt_s is known, same reasoning as steps_per_cycle above:
         // a fresh ImperfectionState per open() so repeat-run bit-identity
@@ -1012,6 +1189,96 @@ mod tests {
     /// hardcoded 40.0 there is exactly what broke when this fixture moved to
     /// 60.0 A.
     const TEST_MAX_CURRENT_A: f32 = 60.0;
+
+    /// The reset the input wire's `reset` bit needs: after the board has been
+    /// driven well away from its start, `reset()` must put it back, not merely
+    /// stop whatever was happening to it.
+    ///
+    /// Regression guard for the first play-test report -- "the reset button
+    /// doesn't return me to start". At the time, `sim-host` cleared its
+    /// ADR-0012 handoff latch and nothing else, so the player got authority
+    /// over a board still lying where it had crashed.
+    #[test]
+    fn reset_returns_the_plant_to_its_starting_state() {
+        let mut b = armed();
+        let start_qpos = b.truth_qpos();
+        let start_pos = b.truth_frame_xpos();
+
+        // Shove it hard AND hold a large motor command, so "unchanged" cannot
+        // pass by accident and -- the point of this test -- so there really is
+        // a buffered command in flight at the moment of the reset. An earlier
+        // version of this test drove with `apply_external_force` alone, never
+        // commanded a current, and therefore passed with the fix reverted:
+        // there was nothing buffered to leak. A regression test that does not
+        // fail on the bug is worse than none, because it reads as coverage.
+        for _ in 0..400 {
+            b.apply_external_force([120.0, 40.0, 0.0], [0.0, 0.0, 0.0]);
+            b.wait_observe().unwrap();
+            // observe-then-apply: the backend enforces that ordering.
+            b.apply(&Command::MotorCurrent { amps: 35.0 }).unwrap();
+        }
+        assert!(
+            b.applied_current_a().abs() > 1.0,
+            "the drive phase must leave a real command in flight, else this test cannot              detect one leaking through the reset"
+        );
+        let moved_pos = b.truth_frame_xpos();
+        let displacement =
+            ((moved_pos[0] - start_pos[0]).powi(2) + (moved_pos[1] - start_pos[1]).powi(2)).sqrt();
+        assert!(
+            displacement > 0.05,
+            "the test did not actually move the board ({displacement:.4} m) -- it would then              prove nothing about reset"
+        );
+
+        b.reset();
+
+        let after = b.truth_qpos();
+        assert_eq!(
+            after.len(),
+            start_qpos.len(),
+            "reset must not change the shape of the state vector"
+        );
+        for (i, (a, s0)) in after.iter().zip(start_qpos.iter()).enumerate() {
+            assert!(
+                (a - s0).abs() < 1e-9,
+                "qpos[{i}] is {a} after reset, expected the starting {s0}"
+            );
+        }
+
+        // THE ACTUAL BUG. A reset that restores qpos but leaves the buffered
+        // command behind steps the freshly-uprighted board with the saturated
+        // current left over from the crash. That is not visible in qpos -- it
+        // shows up one cycle later as a large forward acceleration on the
+        // accelerometer, which the estimator cannot tell from a steep tilt.
+        //
+        // Asserted on the observation rather than on the private field, so
+        // this fails if the command survives by ANY route, not just the one
+        // that was fixed.
+        let obs = b.wait_observe().unwrap();
+        assert_eq!(
+            b.applied_current_a(),
+            0.0,
+            "a reset must not leave a buffered command to be applied on the next cycle"
+        );
+        let accel = obs.newest_imu().expect("imu sample").accel_m_s2;
+        assert!(
+            accel[0].abs() < 1.0,
+            "forward specific force is {:.2} m/s^2 on the first post-reset observation -- the \
+             board is being driven by a stale command. ComplementaryFilter::accel_pitch cannot \
+             distinguish that from a tilt, and snaps its initial pitch to it.",
+            accel[0]
+        );
+
+        // And `sensordata` must be primed, not left zeroed by mj_resetData --
+        // the control loop reads its attitude from there on the very next
+        // cycle, and a zeroed quaternion is not a valid attitude.
+        let quat = b.truth_frame_xquat();
+        let norm =
+            (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-6,
+            "frame quaternion after reset is not normalised ({norm}) -- mj_forward did not run"
+        );
+    }
 
     fn opened() -> SimBackend {
         let mut b = SimBackend::with_params(Params {

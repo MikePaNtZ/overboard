@@ -29,7 +29,7 @@ pub const INPUT_MAGIC: u32 = 0x4F42_4931;
 /// and 2, so a one-sided deploy in either direction cannot produce a dead
 /// window. This crate has no v1 sender left to keep around, so
 /// [`StateOut::from_bytes`] only accepts 2 -- see that method's doc comment.
-pub const STATE_SCHEMA_VERSION: u16 = 2;
+pub const STATE_SCHEMA_VERSION: u16 = 3;
 /// [`InputIn`]'s schema version. Unchanged by the v2 state-out bump --
 /// `InputIn` is explicitly untouched (issue #161 wire v2 follow-up).
 pub const INPUT_SCHEMA_VERSION: u16 = 1;
@@ -40,6 +40,21 @@ pub const STATE_FLAG_ARMED: u16 = 1 << 0;
 pub const STATE_FLAG_VALID: u16 = 1 << 1;
 /// `StateOut::flags` bit 2.
 pub const STATE_FLAG_FALLEN: u16 = 1 << 2;
+/// `StateOut::flags` bit 3 -- the ADR-0011 condition 3 loss-of-authority
+/// warning (issue #216).
+pub const STATE_FLAG_AUTHORITY_WARNING: u16 = 1 << 3;
+/// `StateOut::flags` bit 4 -- ADR-0012 physics-authority handoff.
+///
+/// Set from the cycle a terminating event is declared onward, and NEVER
+/// cleared except by the input `reset` bit. While it is set this host has
+/// stopped propagating the board: `pos`/`quat`/`lin_vel`/`ang_vel` are frozen
+/// at the values they held on the strike cycle, and Unreal owns the board.
+///
+/// The latch is what makes the transfer safe against packet loss. A one-shot
+/// edge could be dropped by the UDP wire and the client would follow a board
+/// the host had already stopped simulating -- so the bit is a LEVEL, and a
+/// client that misses the first packet takes over on the next one.
+pub const STATE_FLAG_HANDOFF: u16 = 1 << 4;
 
 /// `InputIn::flags` bit 0.
 pub const INPUT_FLAG_ARM: u16 = 1 << 0;
@@ -141,11 +156,29 @@ pub struct StateOut {
     /// **v2.** ACTUAL `ballast_lat` joint position, metres, signed. Same
     /// status as `rider_fore_aft_m` in every respect but axis.
     pub rider_lateral_m: f32,
+    /// **v3 (ADR-0012).** World-frame linear velocity of the board body,
+    /// m/s, raw MuJoCo -- untransformed, exactly as `pos`/`quat` are, so
+    /// `CoordinateTransform` on the game side stays the single place the
+    /// MuJoCo->Unreal conversion happens.
+    ///
+    /// Present on every packet, not only handoff ones: a velocity that
+    /// appeared only at the instant it was needed would be a field nobody
+    /// could sanity-check until the one moment it had to be right.
+    pub lin_vel: [f32; 3],
+    /// **v3 (ADR-0012).** World-frame angular velocity of the board body,
+    /// rad/s, right-hand rule, raw MuJoCo.
+    ///
+    /// **World frame**, from the model's `frame_angvel` sensor -- NOT the
+    /// free joint's `qvel` angular half, which is body-frame. The receiving
+    /// physics engine seeds with a world angular velocity; converting
+    /// anywhere but `CoordinateTransform` is the error ADR-0010 named as
+    /// silently poisoning everything downstream.
+    pub ang_vel: [f32; 3],
 }
 
 impl StateOut {
     /// The exact on-wire byte count -- also asserted at compile time below.
-    pub const WIRE_SIZE: usize = 80;
+    pub const WIRE_SIZE: usize = 104;
 
     #[allow(clippy::too_many_arguments)]
     pub fn to_bytes(&self) -> [u8; Self::WIRE_SIZE] {
@@ -176,6 +209,12 @@ impl StateOut {
         put!(self.motor_current_a);
         put!(self.rider_fore_aft_m);
         put!(self.rider_lateral_m);
+        for v in self.lin_vel {
+            put!(v);
+        }
+        for v in self.ang_vel {
+            put!(v);
+        }
         debug_assert_eq!(off, Self::WIRE_SIZE);
         buf
     }
@@ -228,6 +267,8 @@ impl StateOut {
         let motor_current_a = take!(f32);
         let rider_fore_aft_m = take!(f32);
         let rider_lateral_m = take!(f32);
+        let lin_vel = [take!(f32), take!(f32), take!(f32)];
+        let ang_vel = [take!(f32), take!(f32), take!(f32)];
         debug_assert_eq!(off, Self::WIRE_SIZE);
         Ok(StateOut {
             magic,
@@ -244,6 +285,8 @@ impl StateOut {
             motor_current_a,
             rider_fore_aft_m,
             rider_lateral_m,
+            lin_vel,
+            ang_vel,
         })
     }
 }
@@ -398,8 +441,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn state_out_is_exactly_80_bytes() {
-        assert_eq!(core::mem::size_of::<StateOut>(), 80);
+    fn state_out_is_exactly_104_bytes() {
+        assert_eq!(core::mem::size_of::<StateOut>(), 104);
     }
 
     #[test]
@@ -423,7 +466,67 @@ mod tests {
             motor_current_a: 4.5,
             rider_fore_aft_m: 0.021,
             rider_lateral_m: -0.013,
+            lin_vel: [5.5, -0.25, 0.125],
+            ang_vel: [0.75, -1.5, 2.25],
         }
+    }
+
+    /// ADR-0012's named enforcement: a KNOWN-ANSWER test, so this encoder and
+    /// `overboard-game`'s `wire/OverboardWire.cpp` cannot drift apart
+    /// quietly. The same fixed packet is asserted byte-for-byte on the C++
+    /// side. If these two ever disagree, one of them is wrong and CI says so
+    /// -- rather than a plausible-looking float misparse showing up as a
+    /// board that tumbles in the wrong direction.
+    ///
+    /// Every value below is exactly representable in f32/f64 (halves,
+    /// quarters, eighths), so the expected bytes are unambiguous and this
+    /// test is not asserting a rounding mode.
+    #[test]
+    fn state_out_known_answer_bytes() {
+        let s = sample_state();
+        let b = s.to_bytes();
+
+        // Header.
+        assert_eq!(&b[0..4], &0x4F42_5731u32.to_le_bytes(), "magic 'OBW1'");
+        assert_eq!(&b[4..6], &3u16.to_le_bytes(), "schema_version = 3");
+        assert_eq!(&b[6..8], &0x0003u16.to_le_bytes(), "flags armed|valid");
+        assert_eq!(&b[8..16], &42u64.to_le_bytes(), "seq");
+        assert_eq!(&b[16..24], &1.5f64.to_le_bytes(), "sim_time_s");
+
+        // v1 body -- offsets fixed by ADR-0010 and unchanged by v2/v3.
+        assert_eq!(&b[24..28], &1.0f32.to_le_bytes(), "pos.x @24");
+        assert_eq!(&b[36..40], &1.0f32.to_le_bytes(), "quat.w @36");
+        assert_eq!(&b[68..72], &4.5f32.to_le_bytes(), "motor_current_a @68");
+
+        // v2 rider fields, then the v3 velocities -- the offsets ADR-0012
+        // fixes. These four asserts are the ones that fail if either side
+        // inserts a field in the middle instead of appending.
+        assert_eq!(&b[72..76], &0.021f32.to_le_bytes(), "rider_fore_aft_m @72");
+        assert_eq!(&b[80..84], &5.5f32.to_le_bytes(), "lin_vel.x @80");
+        assert_eq!(&b[92..96], &0.75f32.to_le_bytes(), "ang_vel.x @92");
+        assert_eq!(&b[100..104], &2.25f32.to_le_bytes(), "ang_vel.z @100");
+
+        assert_eq!(b.len(), 104, "v3 wire size");
+    }
+
+    /// The handoff bit is bit 4 and does not collide with any bit already on
+    /// the wire -- the property that let ADR-0012 add it without a second
+    /// schema bump.
+    #[test]
+    fn handoff_flag_is_a_free_bit() {
+        for other in [
+            STATE_FLAG_ARMED,
+            STATE_FLAG_VALID,
+            STATE_FLAG_FALLEN,
+            STATE_FLAG_AUTHORITY_WARNING,
+        ] {
+            assert_eq!(
+                STATE_FLAG_HANDOFF & other,
+                0,
+                "handoff bit overlaps {other:#06x}"
+            );
+        }
+        assert_eq!(STATE_FLAG_HANDOFF, 0b1_0000);
     }
 
     #[test]
