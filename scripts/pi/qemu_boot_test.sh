@@ -152,6 +152,20 @@ INITRD="$WORK/initrd.img"
 cp "$BOOT_MNT/$INITRD_NAME" "$INITRD"
 echo "initramfs: $INITRD_NAME ($(du -h "$INITRD" | cut -f1))"
 
+# Diagnostic, not yet load-bearing: the first two boot attempts (MMIO, then
+# PCI virtio-blk) both failed identically at "/dev/vda2 does not exist",
+# which is consistent with virtio_blk simply not being in this initramfs at
+# all -- this project's kernel has never needed it, real Pi hardware has no
+# virtio devices. Listing the module set directly, rather than guessing a
+# third transport, is the check that actually answers the question.
+echo "--- initramfs module inventory (virtio / common root-fs drivers) ---"
+if command -v lsinitramfs >/dev/null; then
+  lsinitramfs "$INITRD" 2>/dev/null | grep -iE 'virtio|/(nvme|mmc|sd|scsi|ahci)' \
+    || echo "(none found -- see full listing below if this looks wrong)"
+else
+  echo "(lsinitramfs not available; skipping)"
+fi
+
 section "stage synthetic boot-partition credentials"
 # Deliberately not mk_boot_config.py's output format verbatim -- hand-written
 # so it is obviously synthetic on inspection, and so this script carries no
