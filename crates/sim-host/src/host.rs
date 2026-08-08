@@ -229,6 +229,146 @@ pub const DEFAULT_KERB: KerbSpec = KerbSpec {
     height_m: 0.12,
 };
 
+/// A City Park heightfield, read from the artifacts
+/// `overboard-game/tools/terrain_probe/rasterize_hfield.py` writes.
+///
+/// # The repo boundary this crosses, and why it is the allowed direction
+///
+/// ADR-0009's rule is that nothing outside `overboard` computes board physics.
+/// This is the opposite direction: authored geometry moving INTO the sim's
+/// frame, to be simulated here. `overboard-game` measures the world it draws
+/// and writes a file; this crate reads it and does all the physics. No board
+/// state crosses, and no control decision is tuned from a renderer.
+///
+/// The path is supplied by the operator rather than hardcoded, so this crate
+/// carries no build-time dependency on a sibling checkout -- the coupling is a
+/// data contract, exactly as the repo-boundary rule requires.
+#[derive(Debug, Clone)]
+pub struct TerrainSpec {
+    pub hfield_path: PathBuf,
+    pub nrow: usize,
+    pub ncol: usize,
+    pub half_extent_m: f64,
+    /// Real-world elevation of the grid's minimum, metres. MuJoCo normalises
+    /// hfield file data to [0,1], so the geom has to be placed at this value
+    /// for a post to land at the height it was measured at.
+    pub z_min_m: f64,
+    pub z_max_m: f64,
+    /// Terrain height at the board's spawn point, metres. The shared model
+    /// spawns the frame at a hardcoded z that assumes a flat plane at zero;
+    /// on real terrain the board has to be lifted onto the surface or it
+    /// starts the run embedded in the road.
+    pub z_at_origin_m: f64,
+}
+
+/// Reads `metadata.json` from the same directory as the hfield binary, and
+/// cross-checks it against the binary's own header.
+///
+/// Both are read because they can disagree: `metadata.json` is written from
+/// the rasteriser's parameters while the `.bin` carries its own `nrow`/`ncol`,
+/// and a stale metadata file beside a fresh binary would otherwise place the
+/// terrain at the wrong scale with nothing to say so.
+fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
+    let dir = hfield_path.parent().unwrap_or(Path::new("."));
+    let meta_path = dir.join("metadata.json");
+    let meta_raw = std::fs::read_to_string(&meta_path).map_err(|e| {
+        HostError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "sim-host: --terrain needs {} beside the hfield binary (written by \
+                 rasterize_hfield.py): {e}",
+                meta_path.display()
+            ),
+        ))
+    })?;
+
+    // Deliberately a tiny scan rather than a serde dependency: six scalars out
+    // of a file whose schema this crate does not own.
+    let pick = |key: &str| -> Result<f64, HostError> {
+        let needle = format!("\"{key}\"");
+        let at = meta_raw.find(&needle).ok_or_else(|| {
+            HostError::Io(std::io::Error::other(format!(
+                "sim-host: {} has no \"{key}\"",
+                meta_path.display()
+            )))
+        })?;
+        let rest = &meta_raw[at + needle.len()..];
+        let rest = rest
+            .trim_start()
+            .strip_prefix(':')
+            .unwrap_or(rest)
+            .trim_start();
+        let end = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
+            .unwrap_or(rest.len());
+        rest[..end].parse::<f64>().map_err(|_| {
+            HostError::Io(std::io::Error::other(format!(
+                "sim-host: {} has a non-numeric \"{key}\"",
+                meta_path.display()
+            )))
+        })
+    };
+
+    let nrow = pick("nrow")? as usize;
+    let ncol = pick("ncol")? as usize;
+    let half_extent_m = pick("half_extent_m")?;
+    let z_min_m = pick("z_min_m")?;
+    let z_max_m = pick("z_max_m")?;
+
+    let raw = std::fs::read(hfield_path).map_err(|e| {
+        HostError::Io(std::io::Error::new(
+            e.kind(),
+            format!("sim-host: cannot read {}: {e}", hfield_path.display()),
+        ))
+    })?;
+    if raw.len() < 8 {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: {} is too short to be an hfield",
+            hfield_path.display()
+        ))));
+    }
+    let bin_nrow = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+    let bin_ncol = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
+    if bin_nrow != nrow || bin_ncol != ncol {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: hfield binary is {bin_nrow}x{bin_ncol} but {} says {nrow}x{ncol} -- \
+             the metadata is stale relative to the binary, and using it would place the \
+             terrain at the wrong scale",
+            meta_path.display()
+        ))));
+    }
+    let expect = 8 + nrow * ncol * 4;
+    if raw.len() != expect {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: {} is {} bytes, expected {expect} for a {nrow}x{ncol} f32 grid",
+            hfield_path.display(),
+            raw.len()
+        ))));
+    }
+    if z_max_m <= z_min_m {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: degenerate terrain z range [{z_min_m}, {z_max_m}]"
+        ))));
+    }
+
+    // Centre post = the board's spawn point, by construction of the grid (odd
+    // post count so a post lands exactly on x=0, y=0).
+    let centre = (nrow / 2) * ncol + (ncol / 2);
+    let off = 8 + centre * 4;
+    let z_at_origin_m =
+        f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f64;
+
+    Ok(TerrainSpec {
+        hfield_path: hfield_path.to_path_buf(),
+        nrow,
+        ncol,
+        half_extent_m,
+        z_min_m,
+        z_max_m,
+        z_at_origin_m,
+    })
+}
+
 /// The spliced kerb spans the WHOLE drivable corridor in X, derived from
 /// `CORRIDOR_X_MIN_M`/`CORRIDOR_X_MAX_M` rather than picked.
 ///
@@ -236,6 +376,22 @@ pub const DEFAULT_KERB: KerbSpec = KerbSpec {
 /// drifted to the kerb's Y only once it was at x = -112 m -- long past the
 /// end of the kerb -- and sailed by with nothing to hit. A kerb the player
 /// can outrun is a kerb that is not there.
+/// How far inside the heightfield's edge the drivable corridor stops. The
+/// grid ends at a cliff with no geom beyond it, and the corridor's lean-arrest
+/// is soft -- a board already moving needs room to be turned around.
+const TERRAIN_EDGE_MARGIN_M: f64 = 3.0;
+
+/// The frame spawn height in the shared model, metres -- one wheel radius, on
+/// the assumption of a flat plane at z = 0. Mirrored here so the terrain
+/// splice can fail loudly if the model moves it, rather than silently
+/// spawning the board somewhere else.
+const FRAME_SPAWN_Z_M: f64 = 0.1454;
+
+/// Extra height above the measured terrain to spawn at, metres. Small enough
+/// to settle in a few steps, large enough that no interpolation detail of the
+/// hfield cell under the wheel can leave the board starting inside the road.
+const TERRAIN_SPAWN_CLEARANCE_M: f64 = 0.005;
+
 const KERB_HALF_LENGTH_M: f64 = (CORRIDOR_X_MAX_M - CORRIDOR_X_MIN_M) / 2.0;
 /// Centre of the spliced kerb along X -- the midpoint of the same corridor.
 const KERB_CENTRE_X_M: f64 = (CORRIDOR_X_MAX_M + CORRIDOR_X_MIN_M) / 2.0;
@@ -246,7 +402,10 @@ const KERB_HALF_DEPTH_M: f64 = 0.6;
 /// Writes `overboard_rider.xml` with `kerb` spliced into its `<worldbody>` to
 /// a temporary file, and returns that path. The original file is never
 /// modified.
-fn write_model_with_kerb(kerb: &KerbSpec) -> Result<PathBuf, HostError> {
+fn write_model_with_kerb(
+    kerb: Option<&KerbSpec>,
+    terrain: Option<&TerrainSpec>,
+) -> Result<PathBuf, HostError> {
     let src = rider_model_path();
     let xml = std::fs::read_to_string(&src).map_err(|e| {
         HostError::Io(std::io::Error::new(
@@ -255,34 +414,107 @@ fn write_model_with_kerb(kerb: &KerbSpec) -> Result<PathBuf, HostError> {
         ))
     })?;
 
-    // A kerb on EACH side, mirrored: near faces at +-y_face_m, each body
-    // extending away from the board, tops flush at z = height_m. The board
-    // spawns between them, which is where City Park actually puts it.
-    let hz = kerb.height_m / 2.0;
-    let mut geom = String::from(
-        "\n    <!-- ADR-0012: spliced in by sim-host --kerb, NOT part of the shared model. -->",
-    );
-    for (tag, sign) in [("kerb_left", 1.0f64), ("kerb_right", -1.0f64)] {
-        let cy = sign * (kerb.y_face_m.abs() + KERB_HALF_DEPTH_M);
-        geom.push_str(&format!(
-            "\n    <geom name=\"{tag}\" type=\"box\" pos=\"{KERB_CENTRE_X_M} {cy} {hz}\" \
-             size=\"{KERB_HALF_LENGTH_M} {KERB_HALF_DEPTH_M} {hz}\" \
-             rgba=\"0.62 0.60 0.57 1\" condim=\"3\" friction=\"0.8 0.005 0.0001\"/>"
-        ));
-    }
-    geom.push_str("\n  ");
+    let mut xml = xml;
 
-    // `terrain.py` splices at `</asset>`; the kerb is geometry, so it goes at
-    // the single `</worldbody>`. Exactly one, or fail loudly -- a splice that
-    // silently no-ops would present as "the kerb does nothing", which is the
-    // hardest possible version of this bug to see.
-    if xml.matches("</worldbody>").count() != 1 {
-        return Err(HostError::Io(std::io::Error::other(format!(
-            "sim-host: expected exactly one </worldbody> in {} to splice the kerb into",
-            src.display()
-        ))));
+    // --- Terrain: the real City Park surface, in place of the flat plane ----
+    if let Some(t) = terrain {
+        // MuJoCo normalises hfield file data to [0,1] and scales it by the
+        // asset's elevation term, so the geom must sit at the grid's MINIMUM
+        // for a post to land at the height it was measured at:
+        //     surface_z = pos_z + normalised * elevation
+        //               = z_min  + (h - z_min)                = h
+        let elevation = t.z_max_m - t.z_min_m;
+        // Depth of solid below the surface. Generous, because the board must
+        // not tunnel through a thin shell on a hard kerb strike.
+        let base = 2.0_f64;
+        let asset = format!(
+            "\n    <hfield name=\"citypark\" file=\"{}\" size=\"{:.6} {:.6} {:.6} {:.6}\"/>\n  ",
+            t.hfield_path.display(),
+            t.half_extent_m,
+            t.half_extent_m,
+            elevation,
+            base
+        );
+        if xml.matches("</asset>").count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: expected exactly one </asset> to splice the hfield into",
+            )));
+        }
+        xml = xml.replace("</asset>", &format!("{asset}</asset>"));
+
+        // Replace the plane OUTRIGHT rather than laying terrain over it. A
+        // plane left in place would win every contact wherever the road dips
+        // below z=0 -- and the City Park road is cambered, falling to about
+        // -0.19 m at the gutter, which is exactly where the kerbs are. The
+        // kerb would then be unreachable behind an invisible flat floor.
+        let plane =
+            "<geom name=\"ground\" type=\"plane\" size=\"20 20 0.1\" material=\"ground_mat\"/>";
+        if !xml.contains(plane) {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: could not find the ground plane geom to replace with terrain -- \
+                 the shared model has changed and this splice needs updating",
+            )));
+        }
+        // SPAWN THE BOARD ON THE ROAD, not inside it. The shared model puts the
+        // frame at z = 0.1454 (wheel radius) because it assumes a flat plane at
+        // zero. City Park's road at the spawn point is at +0.0043 m, so the
+        // unmodified spawn buries the wheel 4.3 mm into the surface -- and a
+        // board that starts penetrating gets a contact impulse on frame one,
+        // which the estimator snaps its initial pitch to. Measured before this
+        // fix: est_pitch 5.36 deg against a true 0.00 deg, and the board was
+        // flat on its face within two seconds. Same failure mode as the reset
+        // bug, arriving through a different door.
+        //
+        // The extra clearance means it settles DOWN onto the road over the
+        // first few steps rather than being pushed up out of it.
+        let spawn_z = FRAME_SPAWN_Z_M + t.z_at_origin_m + TERRAIN_SPAWN_CLEARANCE_M;
+        let spawn_from = format!("<body name=\"frame\" pos=\"0 0 {FRAME_SPAWN_Z_M}\">");
+        if !xml.contains(&spawn_from) {
+            return Err(HostError::Io(std::io::Error::other(format!(
+                "sim-host: could not find the frame spawn '{spawn_from}' to lift onto the \
+                 terrain -- the shared model has changed and this splice needs updating"
+            ))));
+        }
+        xml = xml.replace(
+            &spawn_from,
+            &format!("<body name=\"frame\" pos=\"0 0 {spawn_z:.6}\">"),
+        );
+
+        xml = xml.replace(
+            plane,
+            &format!(
+                "<geom name=\"ground\" type=\"hfield\" hfield=\"citypark\" \
+                 pos=\"0 0 {:.6}\" material=\"ground_mat\" condim=\"3\" \
+                 friction=\"0.8 0.005 0.0001\"/>",
+                t.z_min_m
+            ),
+        );
     }
-    let spliced = xml.replace("</worldbody>", &format!("{geom}</worldbody>"));
+
+    // --- Kerb: an authored box, for runs without the real terrain ----------
+    if let Some(kerb) = kerb {
+        let hz = kerb.height_m / 2.0;
+        let mut geom = String::from(
+            "\n    <!-- ADR-0012: spliced in by sim-host --kerb, NOT part of the shared model. -->",
+        );
+        for (tag, sign) in [("kerb_left", 1.0f64), ("kerb_right", -1.0f64)] {
+            let cy = sign * (kerb.y_face_m.abs() + KERB_HALF_DEPTH_M);
+            geom.push_str(&format!(
+                "\n    <geom name=\"{tag}\" type=\"box\" pos=\"{KERB_CENTRE_X_M} {cy} {hz}\" \
+                 size=\"{KERB_HALF_LENGTH_M} {KERB_HALF_DEPTH_M} {hz}\" \
+                 rgba=\"0.62 0.60 0.57 1\" condim=\"3\" friction=\"0.8 0.005 0.0001\"/>"
+            ));
+        }
+        geom.push_str("\n  ");
+
+        if xml.matches("</worldbody>").count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(format!(
+                "sim-host: expected exactly one </worldbody> in {} to splice the kerb into",
+                src.display()
+            ))));
+        }
+        xml = xml.replace("</worldbody>", &format!("{geom}</worldbody>"));
+    }
 
     // Alongside the real model, so MuJoCo's `meshdir` (a RELATIVE path) still
     // resolves. A temp dir would break every mesh reference in the file.
@@ -290,7 +522,7 @@ fn write_model_with_kerb(kerb: &KerbSpec) -> Result<PathBuf, HostError> {
         "overboard_rider_kerb_{}.generated.xml",
         std::process::id()
     ));
-    std::fs::write(&dst, spliced).map_err(|e| {
+    std::fs::write(&dst, xml).map_err(|e| {
         HostError::Io(std::io::Error::new(
             e.kind(),
             format!("sim-host: cannot write {}: {e}", dst.display()),
@@ -1204,6 +1436,12 @@ pub struct HostConfig {
     /// authority handoff; `None` (the default) opens the shared model
     /// unchanged and never sets the handoff bit. See [`KerbSpec`].
     pub kerb: Option<KerbSpec>,
+
+    /// ADR-0012. Path to a MuJoCo hfield binary produced by
+    /// `overboard-game`'s `tools/terrain_probe/` pipeline. `Some` replaces the
+    /// flat ground plane with the real City Park surface; `None` (the default)
+    /// leaves the shared model untouched. See [`TerrainSpec`].
+    pub terrain: Option<PathBuf>,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1281,6 +1519,7 @@ impl Default for HostConfig {
             incline_deg: 0.0,
             trace_path: None,
             kerb: None,
+            terrain: None,
         }
     }
 }
@@ -1541,9 +1780,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
 
     // ADR-0012: a kerb run opens a spliced copy; every other run opens the
     // shared model itself, unchanged.
-    let generated_model = match &cfg.kerb {
-        Some(kerb) => Some(write_model_with_kerb(kerb)?),
+    let terrain = match &cfg.terrain {
+        Some(path) => Some(read_terrain_spec(path)?),
         None => None,
+    };
+    let generated_model = if cfg.kerb.is_some() || terrain.is_some() {
+        Some(write_model_with_kerb(cfg.kerb.as_ref(), terrain.as_ref())?)
+    } else {
+        None
     };
     let model_path = generated_model.clone().unwrap_or_else(rider_model_path);
     if let Some(kerb) = &cfg.kerb {
@@ -1628,6 +1872,29 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         Some(k) => CORRIDOR_HALF_WIDTH_M.max(k.y_face_m.abs() + 0.5),
         None => CORRIDOR_HALF_WIDTH_M,
     };
+    // The heightfield is finite. Outside its extent there is no geom at all --
+    // not flat ground, NOTHING, because the terrain splice replaces the plane
+    // rather than overlaying it (see write_model_with_kerb for why). A board
+    // that leaves the grid falls forever. The corridor is therefore clamped
+    // inside the grid with a margin, so the existing soft lean-arrest turns
+    // the board back before it reaches an edge that has no floor beyond it.
+    let (corridor_x_min_m, corridor_x_max_m, corridor_half_width_m) = match &terrain {
+        Some(t) => {
+            let limit = t.half_extent_m - TERRAIN_EDGE_MARGIN_M;
+            (
+                CORRIDOR_X_MIN_M.max(-limit),
+                CORRIDOR_X_MAX_M.min(limit),
+                corridor_half_width_m.min(limit),
+            )
+        }
+        None => (CORRIDOR_X_MIN_M, CORRIDOR_X_MAX_M, corridor_half_width_m),
+    };
+    if terrain.is_some() {
+        eprintln!(
+            "sim-host: drivable corridor clamped to the heightfield: \
+             x[{corridor_x_min_m:.1},{corridor_x_max_m:.1}] y+-{corridor_half_width_m:.1} m"
+        );
+    }
 
     let mut handoff_latched = false;
     let mut handoff_state: Option<HandoffSnapshot> = None;
@@ -1902,7 +2169,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // as of the END of the PREVIOUS tick (issue #163: this used to read
         // the dead-reckoned path, which no longer exists) -- the same
         // one-cycle lag the speed cap above uses, and for the same reason.
-        let outside_corridor = !(CORRIDOR_X_MIN_M..=CORRIDOR_X_MAX_M).contains(&truth_pos_x_m)
+        let outside_corridor = !(corridor_x_min_m..=corridor_x_max_m).contains(&truth_pos_x_m)
             || truth_pos_y_m.abs() > corridor_half_width_m;
         if outside_corridor && !prev_outside_corridor {
             eprintln!(
@@ -2202,7 +2469,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 pitch_rad.to_degrees()
             );
         }
-        if cfg.kerb.is_some() && !handoff_latched {
+        // Armed by EITHER an authored kerb or real terrain. Terrain was
+        // missing from this condition at first, which meant the whole point of
+        // loading City Park -- striking its real kerbs -- could not fire.
+        if (cfg.kerb.is_some() || cfg.terrain.is_some()) && !handoff_latched {
             let by_strike = strike_n > STRIKE_FORCE_N;
             let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
             if by_strike || by_tilt {
