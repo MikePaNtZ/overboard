@@ -11,10 +11,14 @@
 # all; `raspi4b` emulates the Pi 4 (BCM2711) and is a different SoC, so using
 # it would silently substitute one unverified assumption for another. `virt`
 # with the extracted kernel and the image's own root partition attached as a
-# virtio disk is the standard, widely-documented way to boot a Raspberry Pi
-# OS-family aarch64 image generically (root=/dev/vda2 in place of the
-# firmware/mmcblk chain); see the PR description for the sources this was
-# checked against.
+# disk is the standard, widely-documented way to boot a Raspberry Pi
+# OS-family aarch64 image generically, in place of the firmware/mmcblk
+# chain -- see the PR description for the sources this was checked against.
+# The disk is attached as AHCI, not virtio: this kernel's initramfs (see the
+# module-inventory check below) ships no virtio driver under any name --
+# unsurprising, since real Pi hardware has no virtio devices -- but does
+# carry ahci.ko, and AHCI is a PCI device `virt` can host the same way it
+# hosts the default NIC.
 #
 # WHAT THIS DOES NOT PROVE, stated up front so a green run is not
 # over-read: RP1, real SPI, the CAN HAT, thermals and every latency number
@@ -306,13 +310,19 @@ LOOP=""
 # before the kernel ever loads, for a machine that was never asked to have
 # a network device in the first place. First real CI run caught this.
 #
-# `virtio-blk-pci`, not `virtio-blk-device` (the MMIO transport). The `virt`
-# machine's default NIC being a PCI device (the finding directly above)
-# already proves PCI/GPEX is live here, and this kernel evidently carries
-# virtio_blk as a PCI-attached module -- the MMIO form left the initramfs
-# waiting on a /dev/vda2 that never appeared and never would, no matter how
-# long the timeout, because nothing was probing that bus at all. Second
-# real CI run caught this, one layer past the first fix.
+# NOT virtio, in the end. Both a virtio-blk MMIO attempt and a virtio-blk
+# PCI attempt failed identically at "/dev/vda2 does not exist" -- the
+# initramfs module inventory this script now prints (see above) shows why:
+# this kernel's initramfs carries no virtio driver of any kind, under
+# either name. Unsurprising in hindsight -- real Pi hardware has no virtio
+# devices, so nothing about this image's build ever needed one. Confirmed
+# by evidence, not inferred from the symptom alone, before spending a third
+# CI round changing transport again.
+#
+# What the inventory DOES show is `ahci.ko` -- and AHCI is a PCI device
+# like the default NIC turned out to be, so it can be added to `virt` the
+# same way. `root=/dev/sda2`, because libata/SCSI-attached disks enumerate
+# as sdX, not vdX.
 # ---------------------------------------------------------------------------
 boot_phase() {
   local label="$1" log="$2"
@@ -324,9 +334,10 @@ boot_phase() {
     -m "$QEMU_MEM" \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "root=/dev/vda2 rw rootwait console=ttyAMA0 systemd.log_target=console systemd.log_level=info systemd.journald.forward_to_console=1" \
+    -append "root=/dev/sda2 rw rootwait console=ttyAMA0 systemd.log_target=console systemd.log_level=info systemd.journald.forward_to_console=1" \
     -drive file="$RAW",format=raw,if=none,id=hd0 \
-    -device virtio-blk-pci,drive=hd0 \
+    -device ahci,id=ahci0 \
+    -device ide-hd,drive=hd0,bus=ahci0.0 \
     -nic none \
     -nographic -no-reboot \
     -serial "file:$log" \
