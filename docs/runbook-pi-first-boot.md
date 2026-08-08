@@ -5,7 +5,7 @@ covers:
   - scripts/pi/flash_pi.sh
   - scripts/pi/pins.env
   - crates/loop-profiler/src/lib.rs
-reconciled: 7665f70
+reconciled: ec67a9e
 -->
 
 **Owned by: Senior Controls.** **Executed by: the CEO**, at a desk, with a monitor and a
@@ -220,9 +220,17 @@ $EDITOR ~/.overboard/pi-secrets.env       # real SSID/passphrase/pubkey; keep PI
 scripts/pi/flash_pi.sh --disk /dev/diskN --image ~/Downloads/<stock-raspios>.img.xz --dry-run
 ```
 
-`--dry-run` runs every guard and generates the boot payload, skipping only the write. Find the
-disk with `diskutil list external` (macOS) or `lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT` (Linux)
-first.
+`--dry-run` runs every guard and generates the boot payload, skipping only the write.
+
+**Finding the disk on macOS: use `diskutil list`, not `diskutil list external`.** A MacBook's
+built-in SDXC slot reports `Device Location: Internal` — it hangs off an internal bus — while the
+card in it is `Removable Media: Removable`. So the card does **not** appear under `external`, and
+the obvious command silently shows you everything except the disk you want. On Linux,
+`lsblk -o NAME,SIZE,TYPE,RM,MOUNTPOINT`.
+
+**Match the size.** `flash_pi.sh` refuses the system disk and refuses non-removable media, but it
+cannot tell one removable device from another — a USB stick is as valid a target as your card.
+Size is what distinguishes them, and that part is the operator's job.
 
 **What this does and does not do.** `--image` points at the stock image purely to satisfy the
 resolver; the exercise validates the removable-media guard, the confirmation prompt and
