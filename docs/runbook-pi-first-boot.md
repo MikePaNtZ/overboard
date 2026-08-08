@@ -5,7 +5,7 @@ covers:
   - scripts/pi/flash_pi.sh
   - scripts/pi/pins.env
   - crates/loop-profiler/src/lib.rs
-reconciled: 3251993
+reconciled: 7665f70
 -->
 
 **Owned by: Senior Controls.** **Executed by: the CEO**, at a desk, with a monitor and a
@@ -77,6 +77,13 @@ In **OS customisation**, set:
 - **Username: `overboard`** — matching the real image, so nothing about the login changes later.
 - **SSH: enabled, public-key only.** The same key that will go on the real card
   (`~/.ssh/id_ed25519.pub`). No agent generates or handles a keypair — reference doc §7.
+- **Set `PI_PASSWORD`. This is not optional on a first card.** The example file
+  leaves it blank and the installer then *locks* the account rather than leaving it
+  passwordless — correct for a public image, wrong for bring-up. On 2026-08-06 that
+  combination left a board with a hung first boot, no network, no mDNS and no console
+  login, recoverable only via `init=/bin/sh` on the kernel command line. The network
+  is the single most likely thing to be broken on a first boot, so the console must
+  not depend on it.
 - **Wi-Fi** with the correct **two-letter country code**. An unset country disables 5 GHz and
   presents as "the network is not there" rather than as a configuration error.
 
