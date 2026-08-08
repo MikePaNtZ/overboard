@@ -71,19 +71,40 @@ assert_removable() {
   [ -e "$disk" ] || die "$disk does not exist"
 
   if [ "$OS" = "Darwin" ]; then
-    local info removable internal
+    local info removable virtual this_whole root_whole
     info="$(diskutil info "$disk" 2>/dev/null)" || die "diskutil could not read $disk"
-    removable="$(echo "$info" | awk -F': *' '/Removable Media/{print $2}' | xargs)"
-    internal="$(echo "$info" | awk -F': *' '/Device Location/{print $2}' | xargs)"
+    removable="$(echo "$info"  | awk -F': *' '/Removable Media/{print $2}' | xargs)"
+    virtual="$(echo "$info"    | awk -F': *' '/^ *Virtual:/{print $2}' | xargs)"
+    this_whole="$(echo "$info" | awk -F': *' '/Part of Whole/{print $2}' | xargs)"
     echo "$info" | grep -E 'Device / Media Name|Disk Size|Device Location|Removable Media|Volume Name' \
       | sed 's/^ */    /'
-    if [ "$internal" = "Internal" ]; then
-      die "$disk is an INTERNAL disk. Refusing.
-       This is almost certainly your system drive. Re-read `diskutil list external`."
+
+    # Refuse the system disk BY IDENTITY, not by which bus it hangs off.
+    #
+    # This replaces a `Device Location: Internal` test that was simply wrong
+    # about the world. A MacBook's built-in SDXC slot reports **Internal**
+    # while holding **Removable** media, so the old check refused the CEO's
+    # only card reader on 2026-08-06 -- the worst failure mode a safety guard
+    # has. Not a missed catch: a false refusal on the correct target, which
+    # teaches the operator to route around the guard. One that cries wolf gets
+    # disabled, and then it is not there on the day it matters.
+    root_whole="$(diskutil info / 2>/dev/null | awk -F': *' '/Part of Whole/{print $2}' | xargs)"
+    if [ -n "$root_whole" ] && [ -n "$this_whole" ] && [ "$root_whole" = "$this_whole" ]; then
+      die "$disk holds the volume this Mac is booted from. Refusing.
+       There is no --force. The only reason to want one here is a mistake."
     fi
+
+    # Removability is now the load-bearing test, so it must be exact. An
+    # internal NVMe reports 'Fixed' or 'Not removable' and is refused here.
     case "$removable" in
-      Removable|"Yes") ;;
+      Removable|Yes) ;;
       *) die "$disk does not report as removable media (got: '${removable:-unknown}'). Refusing." ;;
+    esac
+
+    # Synthesized APFS containers are Virtual: Yes and are not raw targets.
+    case "$virtual" in
+      No|"") ;;
+      *) die "$disk is a virtual/synthesized device (Virtual: $virtual), not physical media. Refusing." ;;
     esac
   else
     local base rm_flag
