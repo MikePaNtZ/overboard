@@ -46,13 +46,19 @@ fn print_help() {
     );
     println!("    --no-rt            Stay at normal priority. Numbers describe a");
     println!("                       fair-share scheduler, not a real-time one.");
+    println!("    --under-load       Attest that stress-ng CPU + network load was running");
+    println!("                       throughout this run. This process cannot observe that");
+    println!("                       about its own machine, so a PASS without this flag is");
+    println!("                       always withheld -- see AC-5's own load requirement.");
     println!("    --json <PATH>      Also write the machine-readable report.");
     println!("    --strict           Exit 1 if an acceptance-grade run fails AC-5.");
     println!("    -h, --help         Print this help and exit.");
     println!();
-    println!("At the default rate a 100000-cycle run takes about 200 seconds.");
-    println!("Run cyclictest alongside this, not instead of it: that measures the");
-    println!("kernel, this measures our loop on it.");
+    println!("At the default rate a 100000-cycle run takes about 200 seconds -- short of");
+    println!("AC-5's own 30-minute floor by design; pass --cycles 900000 (or more) for an");
+    println!("actual AC-5 attempt. Run cyclictest alongside this, not instead of it: that");
+    println!("measures the kernel, this measures our loop on it. This tool is never a");
+    println!("substitute for cyclictest, no matter what flags are passed.");
 }
 
 fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -109,6 +115,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 cfg.rt_prio = Some(p);
             }
             "--no-rt" => cfg.rt_prio = None,
+            "--under-load" => cfg.under_load = true,
             "--json" => json_path = Some(next_val(&mut argv, "--json")?),
             "--strict" => strict = true,
             "-h" | "--help" => {
@@ -220,5 +227,11 @@ mod tests {
         let a = parse(&["--json", "/tmp/x.json", "--strict"]).unwrap();
         assert_eq!(a.json_path.as_deref(), Some("/tmp/x.json"));
         assert!(a.strict);
+    }
+
+    #[test]
+    fn under_load_defaults_off_and_the_flag_turns_it_on() {
+        assert!(!parse(&[]).unwrap().cfg.under_load);
+        assert!(parse(&["--under-load"]).unwrap().cfg.under_load);
     }
 }

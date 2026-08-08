@@ -7,11 +7,16 @@
 //! `serde_json` -- the schema is flat, it is the only JSON this crate emits,
 //! and a dependency is a poor trade for twenty lines.
 
-use crate::profile::{Report, AC5_MAX_LIMIT_NS, AC5_P999_LIMIT_NS};
+use crate::profile::{Report, AC5_MAX_LIMIT_NS, AC5_MIN_DURATION_NS, AC5_P999_LIMIT_NS};
 use crate::stats::Percentiles;
 
 /// Bump on any incompatible field change.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (issue #226): `ac5.verdict` now also gates on measured duration and
+/// operator-attested load, not platform alone -- a `true` under v1 semantics
+/// can now be `null` under v2 for the same platform, so a consumer diffing
+/// across schema versions needs to know that changed.
+pub const SCHEMA_VERSION: u32 = 2;
 
 fn us(ns: u64) -> f64 {
     ns as f64 / 1_000.0
@@ -67,16 +72,23 @@ pub fn render_text(r: &Report) -> String {
         us(AC5_MAX_LIMIT_NS),
     ));
     match r.ac5_verdict() {
-        Some(true) => s.push_str("  AC-5: PASS\n"),
+        // A bare PASS is exactly what issue #226 found gets pasted into the
+        // acceptance record as if it were the full criterion -- so the gaps
+        // this run still cannot close (load self-attestation, cyclictest
+        // itself) print immediately underneath every verdict, pass or fail.
+        Some(true) => s.push_str("  AC-5: PASS (this tool's own measurement only -- see gaps below)\n"),
         Some(false) => {
             s.push_str("  AC-5: FAIL - escalate as an architecture finding, do not tune it away\n")
         }
         // The distinction the whole report is built around: not measurable
         // and failed are different findings, and only one is about the Pi.
         None => s.push_str(
-            "  AC-5: NOT ASSESSED - this run was not acceptance-grade, so these numbers\n         \
+            "  AC-5: NOT ASSESSED - this run does not clear every AC-5 gate, so these numbers\n         \
              exercise the harness and describe this machine. They are not an AC-5 result.\n",
         ),
+    }
+    for gap in r.ac5_gaps() {
+        s.push_str(&format!("    - {gap}\n"));
     }
 
     for w in &r.rt.warnings {
@@ -133,6 +145,12 @@ pub fn render_json(r: &Report, git_sha: &str) -> String {
         Some(p) => p.to_string(),
         None => "null".to_string(),
     };
+    let gaps = r
+        .ac5_gaps()
+        .iter()
+        .map(|g| format!("\"{}\"", esc(g)))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     format!(
         "{{\n  \"schema_version\": {SCHEMA_VERSION},\n  \
@@ -147,8 +165,10 @@ pub fn render_json(r: &Report, git_sha: &str) -> String {
          \"compute\": {},\n  \
          \"overruns\": {},\n  \
          \"clock_overhead_ns\": {},\n  \
+         \"elapsed_ns\": {},\n  \
          \"ac5\": {{\"p999_limit_ns\": {AC5_P999_LIMIT_NS}, \"max_limit_ns\": {AC5_MAX_LIMIT_NS}, \
-         \"verdict\": {}}},\n  \
+         \"min_duration_ns\": {AC5_MIN_DURATION_NS}, \"under_load\": {}, \
+         \"verdict\": {}, \"gaps\": [{}]}},\n  \
          \"warnings\": [{}]\n}}\n",
         esc(git_sha),
         r.config.period_ns,
@@ -164,7 +184,10 @@ pub fn render_json(r: &Report, git_sha: &str) -> String {
         pct_json(&r.compute),
         r.overruns,
         r.clock_overhead_ns,
+        r.elapsed_ns,
+        r.config.under_load,
         opt_bool(r.ac5_verdict()),
+        gaps,
         warnings,
     )
 }
@@ -210,6 +233,7 @@ mod tests {
             cycles: 20,
             warmup: 2,
             rt_prio: None,
+            under_load: false,
         })
     }
 
@@ -226,15 +250,27 @@ mod tests {
     #[test]
     fn json_is_parseable_and_carries_provenance() {
         let j = render_json(&a_report(), "abc1234");
-        assert!(j.contains("\"schema_version\": 1"));
+        assert!(j.contains("\"schema_version\": 2"));
         assert!(j.contains("\"git_sha\": \"abc1234\""));
         assert!(j.contains("\"verdict\": null"));
         assert!(j.contains("\"acceptance_grade\": false"));
-        // Balanced braces is a cheap structural check on hand-rolled JSON.
+        assert!(j.contains("\"under_load\": false"));
+        // Balanced braces/brackets is a cheap structural check on hand-rolled JSON.
         assert_eq!(
             j.chars().filter(|&c| c == '{').count(),
             j.chars().filter(|&c| c == '}').count(),
         );
+        assert_eq!(
+            j.chars().filter(|&c| c == '[').count(),
+            j.chars().filter(|&c| c == ']').count(),
+        );
+    }
+
+    #[test]
+    fn a_platform_gap_and_the_cyclictest_gap_are_always_named_off_rt() {
+        let j = render_json(&a_report(), "abc1234");
+        assert!(j.contains("not confirmed PREEMPT_RT"));
+        assert!(j.contains("this tool is not cyclictest"));
     }
 
     #[test]
