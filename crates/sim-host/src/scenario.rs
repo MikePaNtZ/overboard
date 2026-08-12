@@ -385,6 +385,82 @@ pub const CRUISE_TURN_SCHEDULE: Schedule = &[
     ),
 ];
 
+/// A MEASUREMENT schedule, not a viewing one: hold 0.6 fore/aft lean AND full
+/// steer/lateral together from a standing start, long enough for ground
+/// speed to climb through the low-speed-tighten ramp (`crate::host::
+/// YAW_LOW_SPEED_TIGHTEN`) and approach the reference speed, so the achieved
+/// turn RADIUS can be measured off the ground track instead of being quoted
+/// from `1 / (steer * k)` and hoped for.
+///
+/// It exists because the CEO's steering feedback is about a radius ("too wide
+/// by maybe 2x to turn around completely") and nothing else in this file
+/// produces one: `default`'s turn phase happens while the board is reversing
+/// at low speed, and `s-curve` flips before it ever reaches its carve (issue
+/// #190, ADR-0011) -- neither can answer "what radius does full stick
+/// actually give?".
+///
+/// # Why there is no separate build phase
+///
+/// [`crate::host`]'s yaw law makes turn radius a function of ground speed
+/// ALONE (`1 / (steer * yaw_curvature_per_steer(v) * roll_authority)`) --
+/// what the fore/aft stick is doing barely matters except through what speed
+/// it produces. `feat/controls/turn-radius-and-reset`'s stale version of this
+/// schedule (salvaged for the general shape, not the numbers) built speed
+/// straight first, THEN released fore/aft to zero for the turn -- with
+/// nothing left driving it, the coasting board decelerated under turning
+/// drag the whole way round, so radius and speed were both changing
+/// continuously and a single circle-fit number was never well-defined.
+///
+/// This version holds 0.6 lean straight through -- entering the turn at
+/// t=[`ACCEPTANCE_SETTLE_S`] from a standing start, at issue #201's own
+/// acceptance criterion's stated lean, and simply keeping it there. Ground
+/// speed then climbs on its own (this plant has no outer velocity loop, see
+/// this crate's own header, so a sustained positive lean keeps accelerating
+/// it) and the achieved radius is READ OFF WHATEVER SPEED THE BOARD IS
+/// ACTUALLY DOING at each instant, via the ground-track derivative
+/// (`tests/test_turn_radius.py`), not assumed constant. Measuring the
+/// reported radius once the speed trace is within a few percent of
+/// [`crate::host::MAX_GROUND_SPEED_M_S`] (a) matches this file's own pinned
+/// property that radius is *widest* at/above the reference speed and *only
+/// gets tighter below it, never wider* (`the_turn_radius_shrinks_as_the_board
+/// _slows`), so a near-top-speed reading is the worst-case (widest) turn the
+/// board can produce at this lean, not a cherry-picked favourable one; and
+/// (b) stays inside the drivable corridor (`CORRIDOR_HALF_WIDTH_M`), which a
+/// full multi-loop circle at the PRE-fix (too-wide) radius does not.
+///
+/// **Lean is 0.6, not 1.0.** Full-stick lean is exactly what issue #190's
+/// flip needs: the current to hold the frame saturates the 40 A envelope at
+/// ~6.5 m/s and the board is inverted 1.55 s later. A measurement scenario
+/// that flipped would measure nothing, and ADR-0011 has the launch held on
+/// that defect. 0.6 is `DEFAULT_SCHEDULE`'s own already-validated
+/// accelerating value, and it is what issue #201's own acceptance criterion
+/// names.
+///
+/// Lateral and steer are at full stick throughout: the radius being measured
+/// is the tightest one the board offers at a given speed, which is the
+/// number the CEO's feedback is about.
+const TURNAROUND_LEAN: f32 = 0.6;
+const TURNAROUND_HOLD_S: f64 = 16.0;
+pub const TURNAROUND_SCHEDULE: Schedule = &[
+    (0.0, ACCEPTANCE_SETTLE_S, 0.0, 0.0, 0.0, "settle"),
+    (
+        ACCEPTANCE_SETTLE_S,
+        ACCEPTANCE_SETTLE_S + TURNAROUND_HOLD_S,
+        TURNAROUND_LEAN,
+        1.0,
+        1.0,
+        "hold 0.6 lean + full steer (measure the radius)",
+    ),
+    (
+        ACCEPTANCE_SETTLE_S + TURNAROUND_HOLD_S,
+        ACCEPTANCE_SETTLE_S + TURNAROUND_HOLD_S + 1.5,
+        0.0,
+        0.0,
+        0.0,
+        "release (coast)",
+    ),
+];
+
 /// Every schedule a `--scenario`/`--scripted-scenario` flag accepts, by name.
 pub const BY_NAME: &[(&str, Schedule)] = &[
     ("default", DEFAULT_SCHEDULE),
@@ -394,6 +470,7 @@ pub const BY_NAME: &[(&str, Schedule)] = &[
     ("brake-stop", BRAKE_STOP_SCHEDULE),
     ("brake-turn", BRAKE_TURN_SCHEDULE),
     ("cruise-turn", CRUISE_TURN_SCHEDULE),
+    ("turnaround", TURNAROUND_SCHEDULE),
 ];
 
 /// Looks up a schedule by its command-line name.

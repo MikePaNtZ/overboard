@@ -596,14 +596,47 @@ const BALLAST_RANGE_M: f32 = 0.05;
 /// yaw rate is zero too -- you cannot carve a stationary onewheel.
 ///
 /// `k` (this constant) is picked for a believable radius at full steer, not
-/// derived: 0.15 rad/m gives a tightest radius of `1 / 0.15` ≈ 6.7 m at full
-/// steer, at ANY speed -- a wide, committed arc rather than a go-kart-tight
-/// spin, closer to "very large turning radius" than the old flat gain's
-/// spin-in-place. "Tune for feel, he will judge" -- this is a first
-/// approximation, picked to be conservative ("reduce overall authority" per
-/// the COO) rather than to hit an exact number; see this file's own
-/// measured results for what it produces against the new speed cap.
-const YAW_CURVATURE_PER_STEER_RAD_PER_M: f32 = 0.15;
+/// derived: at ANY speed at or above [`YAW_TIGHTEN_REF_SPEED_M_S`] the
+/// tightest achievable radius is `1 / k` -- a wide, committed arc rather than
+/// a go-kart-tight spin. "Tune for feel, he will judge" -- this is still a
+/// first approximation, not a hit-an-exact-number derivation.
+///
+/// # Issue #201 -- 0.15 measured too wide, doubled to 0.30
+///
+/// The CEO's own report: **"turn radius is too wide by maybe 2x to turn
+/// around completely."** `0.15` was quoted as ≈6.7 m from the formula above
+/// and never actually driven through a full turn to check; issue #201 did,
+/// with `--scripted-scenario turnaround` (`tests/test_turn_radius.py`) and a
+/// ground-track measurement rather than the formula alone, because full-sim
+/// turning also passes through `roll_authority`
+/// (`YAW_AUTHORITY_FLOOR`/`ROLL_FULL_YAW_AUTHORITY_RAD`, added after this
+/// constant was first picked) and the low-speed tighten ramp, neither of
+/// which the plain `1 / k` formula accounts for.
+///
+/// **BEFORE (0.15):** measured **6.16 m** at 8.67 m/s ground speed (93% of
+/// the 9.34 m/s reference speed), climbing toward the formula's 6.67 m
+/// asymptote as speed approaches the reference -- i.e. the formula was
+/// right, `roll_authority` saturates to ~1.0 in practice and does not
+/// explain the discrepancy from a naive expectation; the number was simply
+/// too wide, as reported.
+///
+/// **AFTER (0.30, this constant):** median **3.284 m** (10th-90th percentile
+/// spread 0.096 m) across samples within 5% of the 9.34 m/s reference speed,
+/// comfortably inside issue #201's `≤ 3.6 m` acceptance bound, and inside the
+/// drivable corridor (`CORRIDOR_HALF_WIDTH_M` = 8.6 m half-width) throughout
+/// the measurement hold -- max lateral excursion 5.05 m, not the ±8.6 m the
+/// pre-fix radius would need. The median is used rather than the max because
+/// the local `dheading/dt` estimate is numerically unstable for the 1-2
+/// samples exactly at the ground-speed peak (`dv/dt -> 0` there); see
+/// `tests/test_turn_radius.py` for the full method and the outliers this
+/// excludes. Doubling `k` exactly halves the radius at every speed (the
+/// formula is linear in `k`, confirmed by measurement, not just assumed).
+///
+/// `full_steer_at_a_standstill_injects_nothing` and
+/// `the_turn_radius_shrinks_as_the_board_slows` (this file's own unit tests)
+/// both re-derive their expectations from this constant directly and needed
+/// no changes for the retune -- see their own doc comments.
+const YAW_CURVATURE_PER_STEER_RAD_PER_M: f32 = 0.30;
 
 /// How much tighter the turn gets at a standstill than at top speed, as a
 /// multiple of [`YAW_CURVATURE_PER_STEER_RAD_PER_M`].
@@ -1557,6 +1590,12 @@ struct TraceRow {
     applied_amps: f32,
     /// `safety::Envelope` reported the clamp bound this cycle.
     saturated: bool,
+    /// MuJoCo's true world-frame ground position (issue #201: the turn
+    /// radius has to be fitted off an actual track, not quoted from
+    /// `1 / (steer * k)`). Same values `truth_pos_x_m`/`truth_pos_y_m`
+    /// carry elsewhere in this file -- see [`write_stats`].
+    pos_x_m: f32,
+    pos_y_m: f32,
     /// `|proposed_amps| / MAX_CURRENT_A`, unfiltered.
     utilisation: f32,
     /// ... and low-passed at [`AUTHORITY_UTILISATION_TAU_S`].
@@ -2516,6 +2555,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 proposed_amps,
                 applied_amps: last_amps,
                 saturated,
+                pos_x_m: truth_pos_x_m as f32,
+                pos_y_m: truth_pos_y_m as f32,
                 utilisation,
                 utilisation_filtered,
                 authority_warning,
@@ -2727,12 +2768,12 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
     out.push_str(
         "seq,sim_time_s,stick_fore_aft,shaped_fore_aft,applied_fore_aft,truth_pitch_deg,\
          est_pitch_deg,est_pitch_rate_deg_s,truth_pitch_rate_deg_s,forward_speed_m_s,proposed_amps,applied_amps,\
-         saturated,utilisation,utilisation_filtered,authority_warning,fallen\n",
+         saturated,utilisation,utilisation_filtered,authority_warning,fallen,pos_x_m,pos_y_m\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{}",
+            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?}",
             r.seq,
             r.sim_time_s,
             r.stick_fore_aft,
@@ -2750,6 +2791,8 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
             r.utilisation_filtered,
             r.authority_warning as u8,
             r.fallen as u8,
+            r.pos_x_m,
+            r.pos_y_m,
         );
     }
     std::fs::write(path, out).map_err(HostError::Io)
