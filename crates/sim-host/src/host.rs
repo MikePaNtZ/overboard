@@ -131,7 +131,9 @@ use crate::wire::{self, InputIn, StateOut};
 use board_types::{
     Command, Faults, ImuSample, Params, Saturation, DEFAULT_R_EFF_M, RAD_S_PER_ERPM,
 };
-use control_core::{CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator};
+use control_core::{
+    CommandFeedforward, ComplementaryFilter, Estimator, PitchRegulator, WheelAccelEstimator,
+};
 use hal::BoardObserve;
 use hal_actuate::BoardActuate;
 use safety::Envelope;
@@ -551,6 +553,12 @@ const ESTIMATOR_TAU_S: f32 = 2.0;
 /// rather than passing its own gain, so this host does too, duplicated here
 /// because this host does not link `control-ffi`.
 const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
+/// `impulse-response-rust`'s own constant (`crates/board-app-driverless/src/
+/// bin/impulse-response-rust.rs`), which mirrors `RustController()`'s
+/// `wheel_accel_tau_s` default (`sim/scenarios/rust_controller.py`).
+/// Duplicated here for the same reason `ACCEL_FF_GAIN_M_S2_PER_A` above is:
+/// this host does not link `control-ffi`.
+const WHEEL_ACCEL_TAU_S: f32 = 0.05;
 
 /// `weight_shift_fore_aft` / `weight_shift_lateral`, both clamped to
 /// `[-1, 1]` on the wire, map linearly onto this range -- the SAME +/-0.05 m
@@ -1341,6 +1349,10 @@ pub struct HostConfig {
     /// exists.
     pub pitch_source: PitchSource,
 
+    /// **Verification only.** Which signal aids the complementary filter's
+    /// accelerometer branch. See [`EstimatorAiding`]; issue #227.
+    pub estimator_aiding: EstimatorAiding,
+
     /// **Verification only.** A static pitch offset, DEGREES, added to
     /// whatever [`HostConfig::pitch_source`] hands the regulator. Positive is
     /// nose-up, matching ICD 10.1.
@@ -1477,6 +1489,31 @@ pub enum PitchSource {
     PlantTruth,
 }
 
+/// Which signal aids the complementary filter's accelerometer branch --
+/// issue #227.
+///
+/// ADR-0011's (f1)/(f2) freeze-and-pin regression-tests only the
+/// [`CommandFeedforward`] path, because until now this host offered no
+/// other one to test: `hill.py`/`terrain.py` (and therefore
+/// `tests/test_terrain.py`, which found the anomaly (f1)/(f2) are cited
+/// against) default to `control-ffi`'s wheel-odometry aiding instead, via
+/// [`WheelAccelEstimator`]. This enum makes that second path selectable
+/// here too, so it can be measured rather than assumed to behave the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EstimatorAiding {
+    /// Predicts the acceleration from the current just commanded --
+    /// `RustController()`'s mode 2. The deployed default: matches
+    /// `shuttle_run.py`'s "recommended configuration" and every ADR-0011
+    /// acceptance number measured so far.
+    #[default]
+    CommandFeedforward,
+    /// Measures the acceleration by differentiating wheel speed --
+    /// `RustController()`'s mode 1, and `hill.py`/`terrain.py`'s default.
+    /// Not pinned before issue #227; see
+    /// `tests/test_cmd_envelope_reserve.py` for the coverage this adds.
+    WheelOdometry,
+}
+
 /// A scheduled external force/torque disturbance, world frame, applied to the
 /// `frame` body over a fixed window of SIMULATED time.
 ///
@@ -1511,6 +1548,7 @@ impl Default for HostConfig {
             scripted_scenario: None,
             max_sim_time_s: None,
             pitch_source: PitchSource::Estimator,
+            estimator_aiding: EstimatorAiding::CommandFeedforward,
             pitch_bias_deg: 0.0,
             free_run: false,
             cmd_envelope_reserve: None,
@@ -1832,6 +1870,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let regulator = PitchRegulator::new(KP_NM_PER_RAD, KD_NM_PER_RAD_S);
     let mut estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
     let accel_ff = CommandFeedforward::new(ACCEL_FF_GAIN_M_S2_PER_A);
+    // Only advanced when `cfg.estimator_aiding` selects it (issue #227) --
+    // built unconditionally anyway, since a `WheelAccelEstimator` is cheap
+    // and this keeps the loop body below free of a branch on construction.
+    let mut wheel_accel = WheelAccelEstimator::new(WHEEL_ACCEL_TAU_S);
     // Last cycle's POST-envelope commanded current, amps -- the feedforward's
     // input (mode 2 / "commanded", matching `shuttle_run.py`'s own default
     // `accel_ff_current_source`, rather than the measured-current mode
@@ -2253,11 +2295,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let obs = backend.wait_observe().map_err(HostError::Backend)?;
         t_known_s = obs.t_recv_ns as f64 * 1e-9;
 
-        // Controller: raw IMU -> estimate -> regulate -> envelope. Mode 2
-        // (command feedforward), matching `shuttle_run.py`'s tuned ridden
-        // config -- "the recommended configuration" per that scenario's own
-        // comment. `pitch_ref` is always 0: no outer loop (see this file's
-        // header).
+        // Controller: raw IMU -> estimate -> regulate -> envelope. Aiding
+        // mode is `cfg.estimator_aiding` (default: command feedforward,
+        // matching `shuttle_run.py`'s tuned ridden config -- "the
+        // recommended configuration" per that scenario's own comment).
+        // `pitch_ref` is always 0: no outer loop (see this file's header).
         let sample = obs.newest_imu().copied().unwrap_or(ImuSample::ZERO);
         let wheel_rate_rad_s = obs.erpm * RAD_S_PER_ERPM;
         // Real forward ground speed, m/s, signed -- computed here (rather
@@ -2267,7 +2309,15 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // `last_forward_speed_m_s` above) at the end of this loop body.
         let forward_speed_m_s = wheel_rate_rad_s * DEFAULT_R_EFF_M;
         last_forward_speed_m_s = forward_speed_m_s;
-        let aiding = accel_ff.predict(last_amps);
+        // Issue #227: the two aiding sources are mutually exclusive, matching
+        // `control-ffi`'s "at most one is Some" (`crates/control-ffi/src/
+        // lib.rs`). `wheel_accel` is only ADVANCED on the branch that uses
+        // it, so its filter state does not silently accumulate on a run that
+        // never reads it.
+        let aiding = match cfg.estimator_aiding {
+            EstimatorAiding::CommandFeedforward => accel_ff.predict(last_amps),
+            EstimatorAiding::WheelOdometry => wheel_accel.update(forward_speed_m_s, DT_S as f32),
+        };
         // The estimator runs on EVERY run, including a `PitchSource::
         // PlantTruth` acceptance run where the regulator is not listening to
         // it -- it is the only signal path a real board has, and an

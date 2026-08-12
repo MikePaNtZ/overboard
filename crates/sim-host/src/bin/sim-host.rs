@@ -13,6 +13,7 @@
 //!          [--stats-path PATH|none]
 //!          [--free-run] [--max-sim-secs SECONDS]
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
+//!          [--estimator-aiding command-feedforward|wheel-odometry]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--kerb [Y[,HEIGHT]]]
 //!          [--terrain HFIELD.bin]
@@ -132,6 +133,28 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 cfg.max_sim_time_s = Some(secs);
+                i += 2;
+            }
+            // Issue #227: which signal aids the complementary filter's
+            // accelerometer branch. `command-feedforward` is the deployed
+            // default and the only path (f1)/(f2) pinned before this issue;
+            // `wheel-odometry` is what `hill.py`/`terrain.py` actually run.
+            "--estimator-aiding" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --estimator-aiding needs a value");
+                    return ExitCode::FAILURE;
+                };
+                cfg.estimator_aiding = match v.as_str() {
+                    "command-feedforward" => sim_host::host::EstimatorAiding::CommandFeedforward,
+                    "wheel-odometry" => sim_host::host::EstimatorAiding::WheelOdometry,
+                    other => {
+                        eprintln!(
+                            "sim-host: unknown --estimator-aiding '{other}' \
+                             (want: command-feedforward, wheel-odometry)"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                };
                 i += 2;
             }
             // ADR-0011 criterion (f): "every pass must hold with the
