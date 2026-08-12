@@ -225,6 +225,22 @@ int plant_mujoco_joint_dofadr(void* model, int joint_id) {
   return ((mjModel*)model)->jnt_dofadr[joint_id];
 }
 
+// `mjModel::dof_damping[dofadr]` -- read AND write, for the same reason
+// `plant_mujoco_get_gravity`/`plant_mujoco_set_gravity` are: ADR-0011
+// criterion (g) requires a damping sweep (0.5x-2x on the wheel-hinge joint)
+// to be TAKEN, not assumed, and the model's own `damping="0.08"` can
+// otherwise only be varied by editing sim/models/ and rebuilding. A 1-DOF
+// joint (e.g. `wheel_hinge`, a hinge) has exactly one damping slot at its
+// dofadr; this is not valid for a multi-DOF joint (free/ball), which the
+// caller must not pass here.
+double plant_mujoco_get_dof_damping(void* model, int dofadr) {
+  return ((mjModel*)model)->dof_damping[dofadr];
+}
+
+void plant_mujoco_set_dof_damping(void* model, int dofadr, double damping) {
+  ((mjModel*)model)->dof_damping[dofadr] = damping;
+}
+
 // The only WRITE path into qpos/qvel this crate exposes, and deliberately a
 // RANGE write rather than a whole-array one (issue #163's kinematic yaw
 // injection): the caller names exactly which slots it means, so a bug can

@@ -206,6 +206,15 @@ pub struct SimBackend {
     /// value, so a run with no incline is bit-identical to one built before
     /// this knob existed.
     incline_deg: f64,
+    /// **Verification only.** Multiplier on the `wheel_hinge` joint's
+    /// `mjModel::dof_damping`, applied at `open()`. See
+    /// [`SimBackend::set_damping_scale`]. `None` (the default) leaves the
+    /// model's declared damping untouched -- not applied as an implicit
+    /// `1.0`, so a run with no override is bit-identical to one built before
+    /// this knob existed. Deliberately not an `f64` defaulting to `1.0`:
+    /// `#[derive(Default)]` would give `0.0`, which is a real (and
+    /// destructive) damping multiplier, not an identity value.
+    damping_scale: Option<f64>,
 }
 
 impl SimBackend {
@@ -275,6 +284,26 @@ impl SimBackend {
     /// an estimator fault.
     pub fn set_incline_deg(&mut self, incline_deg: f64) {
         self.incline_deg = incline_deg;
+    }
+
+    /// **Verification only.** Scales the `wheel_hinge` joint's declared
+    /// `mjModel::dof_damping` by `scale`, taking effect at the next `open()`.
+    /// `None` (the default -- see [`SimBackend::set_incline_deg`]'s sibling
+    /// field for why) leaves the model's declared damping untouched.
+    ///
+    /// ADR-0011 criterion (g): "every pass must hold across a damping sweep
+    /// of 0.5x-2x" on `wheel_hinge`'s `damping="0.08"`, the only load-bearing
+    /// constant in the MJCF with no provenance comment. That sweep needs a
+    /// runtime knob or it can only be taken by editing `sim/models/` (Sr.
+    /// Mechanical & Systems' fidelity contract) and rebuilding for every
+    /// point -- the same reasoning [`SimBackend::set_incline_deg`] already
+    /// established for the incline tolerance sweep.
+    ///
+    /// A no-op (`None`) on a model that declares no `wheel_hinge` joint,
+    /// rather than an error -- same tolerance [`SimBackend::apply_external_force`]
+    /// has for a body/site a model does not declare.
+    pub fn set_damping_scale(&mut self, scale: Option<f64>) {
+        self.damping_scale = scale;
     }
 
     /// As [`SimBackend::with_params`], but with a non-default imperfection
@@ -429,6 +458,15 @@ impl SimBackend {
     /// `mjModel::opt.gravity`, which `mj_resetData` does NOT touch, but
     /// re-asserting it keeps this path honestly identical to `open()`'s
     /// rather than relying on that.
+    ///
+    /// The damping override (`damping_scale`) is deliberately NOT re-applied
+    /// here, unlike the incline. `mjModel::dof_damping` is also untouched by
+    /// `mj_resetData`, so `open()`'s scaling is still in effect -- but
+    /// re-deriving it the way the incline block does would read the ALREADY
+    /// scaled value as `base` and scale it again, compounding on every reset.
+    /// The incline block avoids this only because rotating a vector preserves
+    /// its magnitude; multiplying a damping coefficient by a scale has no
+    /// such property.
     ///
     /// # Panics
     /// If called before `open()`.
@@ -766,6 +804,18 @@ impl BoardObserve for SimBackend {
             let mag = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
             let (s, c) = self.incline_deg.to_radians().sin_cos();
             plant.set_gravity([mag * s, 0.0, -mag * c]);
+        }
+
+        // The damping override, if any -- same "before forward()" placement
+        // as the incline above, and for the same underlying rule
+        // (`Plant::set_dof_damping` must run before the first `Plant::step`).
+        // A no-op on a model with no `wheel_hinge` joint (the ballast lookups
+        // further down tolerate the same kind of absence).
+        if let Some(scale) = self.damping_scale {
+            if let Some(dofadr) = plant.joint_dofadr("wheel_hinge") {
+                let base = plant.dof_damping(dofadr);
+                plant.set_dof_damping(dofadr, base * scale);
+            }
         }
 
         // AC8 (issue #107, carried forward from I1b/#106): the CONTROLLED
@@ -1196,6 +1246,63 @@ mod tests {
         let mut b = opened();
         b.arm().unwrap();
         b
+    }
+
+    /// The `wheel_hinge` dof this backend's own damping override targets,
+    /// read directly off the opened plant -- the same accessor `open()`
+    /// itself uses, so this fails first if the joint name or lookup ever
+    /// drifts, before any test relying on it produces a confusing result.
+    fn wheel_hinge_damping(b: &SimBackend) -> f64 {
+        let dofadr = b
+            .plant
+            .as_ref()
+            .expect("backend must be open")
+            .joint_dofadr("wheel_hinge")
+            .expect("the onewheel model declares a wheel_hinge joint");
+        b.plant.as_ref().unwrap().dof_damping(dofadr)
+    }
+
+    /// ADR-0011 criterion (g)'s sweep needs `set_damping_scale` to actually
+    /// scale the model's declared damping, and needs `None` (the default) to
+    /// leave it untouched -- mirroring `set_incline_deg`'s own "zero is a
+    /// true no-op, not merely small" guarantee.
+    #[test]
+    fn set_damping_scale_scales_the_declared_wheel_hinge_damping() {
+        let default = opened();
+        assert_eq!(
+            wheel_hinge_damping(&default),
+            0.08,
+            "wheel_hinge's declared damping moved off 0.08 -- the sweep centre in \
+             tests/test_damping_sweep.py is now wrong"
+        );
+
+        let mut half = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        half.set_damping_scale(Some(0.5));
+        half.open().unwrap();
+        assert_eq!(wheel_hinge_damping(&half), 0.04);
+
+        let mut double = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        double.set_damping_scale(Some(2.0));
+        double.open().unwrap();
+        assert_eq!(wheel_hinge_damping(&double), 0.16);
+
+        let mut explicit_one = SimBackend::with_params(Params {
+            max_current_a: 40.0,
+            ..Params::default()
+        });
+        explicit_one.set_damping_scale(Some(1.0));
+        explicit_one.open().unwrap();
+        assert_eq!(
+            wheel_hinge_damping(&explicit_one),
+            0.08,
+            "an explicit scale of 1.0 must reproduce the declared value exactly"
+        );
     }
 
     /// `truth_body_pitch_rate_rad_s` must be the actual time derivative of
