@@ -63,9 +63,18 @@ from sim.scenarios.shuttle_run import ShuttleParams, VelocityProfile  # noqa: E4
 
 INK, AMBER, MINT, MUTED, RED = "#16232E", "#F2A24A", "#2AAE97", "#96A8B0", "#C2513B"
 
-#: Where the inner loop crosses over, rad/s. From the gain derivation in
-#: `rust_controller.DEFAULT_KP_NM_PER_RAD`'s docstring, at the ridden inertia.
-OMEGA_C = 12.0
+#: Where the RIDDEN inner loop crosses over, rad/s.
+#:
+#: **Correction (#133): this was 12.0, inherited from the DRIVERLESS gain
+#: derivation (J ~ 0.403) despite the comment's own claim to be "at the ridden
+#: inertia" -- it was not.** At 12 rad/s the ridden loop's measured phase is a
+#: LEAD, not a lag, so anything here that fits `tau = tan|phase|/OMEGA_C` (see
+#: `discriminate`/`fix_sweep` below) was reporting a lead as though it were a
+#: lag. The real ridden crossover, re-derived from `scripts/analyse_delay_
+#: budget.py`'s own linearization (`kp`=200, `kd`=30 A/rad -- same GAINS as
+#: this file) at the settled ridden trim, is 4.4825 rad/s -- reproduce with
+#: `python scripts/analyse_delay_budget.py` and read `loop.omega_c_rad_s`.
+OMEGA_C = 4.4825
 
 # 200 A/rad, 30 A/(rad/s) at kt = 0.7 N*m/A, re-denominated in torque (#137).
 GAINS = dict(kp_nm_per_rad=200.0 * KT_NM_PER_A, kd_nm_per_rad_s=30.0 * KT_NM_PER_A,
