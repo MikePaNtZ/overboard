@@ -1239,7 +1239,10 @@ const HANDOFF_TILT_RAD: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// `impulse-response-rust` uses (issue #107 AC6: `NOMINAL_IMPULSE_NS` = 20
 /// N*s over 0.05 s), reused rather than invented; direction and application
 /// point mirror that binary's own `ImpulseParams` defaults too (force along
-/// -X, zero torque).
+/// -X, zero torque). **World frame** (issue #194): fired at `t=1.0s`, before
+/// any steer input, so this has never yet been able to land at a non-zero
+/// heading -- but the constant itself does not know that and does not rotate
+/// with heading if that ever changes.
 const STARTUP_KICK_T0_S: f64 = 1.0;
 const STARTUP_KICK_DURATION_S: f64 = 0.05;
 const STARTUP_KICK_FORCE_N: [f64; 3] = [-(20.0 / STARTUP_KICK_DURATION_S), 0.0, 0.0];
@@ -1270,7 +1273,15 @@ const STARTUP_KICK_FORCE_N: [f64; 3] = [-(20.0 / STARTUP_KICK_DURATION_S), 0.0, 
 /// direction/torque convention as the startup kick (force along -X, zero
 /// applied torque -- the pitching moment comes from the wheel-ground
 /// contact being below the force's application point, not from any
-/// deliberately-applied torque).
+/// deliberately-applied torque). **World frame, not body frame** (issue
+/// #194): this is operator-triggered and CAN land while the board is mid-carve
+/// at a non-zero heading (unlike the startup kick above, which cannot). It
+/// pushes along world -X regardless -- an exogenous "something hit the board"
+/// shove is what this exists to simulate, and that does not rotate with the
+/// board any more than a real kerb does. If a future need wants this to read
+/// as "push the nose" during a turn, that is a body-frame push and belongs at
+/// the call site (rotate before it reaches [`select_disturbance_force_torque`]),
+/// not a change to this constant.
 const FALL_KICK_DURATION_S: f64 = 0.05;
 const FALL_KICK_FORCE_N: [f64; 3] = [-(400.0 / FALL_KICK_DURATION_S), 0.0, 0.0];
 
@@ -1498,6 +1509,49 @@ pub struct Disturbance {
     pub force_n: [f64; 3],
     /// World-frame torque about the frame body's own origin, N*m.
     pub torque_nm: [f64; 3],
+}
+
+/// Picks which disturbance (if any) is live this tick, and returns its
+/// force/torque verbatim -- world frame, per [`apply_external_force`]'s own
+/// contract and every one of these sources' doc comments
+/// ([`Disturbance`], [`STARTUP_KICK_FORCE_N`], [`FALL_KICK_FORCE_N`]).
+///
+/// # Why this is its own function (issue #194)
+///
+/// Every disturbance this repo fires today -- the startup/fall kicks and the
+/// ADR-0011 kerb impulse -- is a physically world-anchored event: a kerb does
+/// not rotate with the board, and neither does an exogenous shove. Deliberately
+/// NOT taking a heading/yaw parameter is how that stays true rather than just
+/// documented: there is nothing here for a future edit to rotate by mistake,
+/// and the compiler enforces it, not a comment. A scenario that genuinely
+/// needs a body-frame push (e.g. a "nose shove" that must track the board
+/// mid-carve) does not exist today; when one does, it should rotate its own
+/// vector by the current heading before it reaches this function, not grow a
+/// silent frame flag here.
+///
+/// Precedence when windows overlap -- unchanged from the inline form this
+/// replaced: scheduled disturbance, then the startup kick, then the on-demand
+/// fall kick, then nothing. Windows are not expected to overlap in practice
+/// (the fall kick is operator-triggered and the other two are off by default
+/// or fixed to `t=1.0s`), so precedence over correctly rejecting an overlap is
+/// the acceptable simplification.
+fn select_disturbance_force_torque(
+    in_disturbance_window: bool,
+    disturbance: Option<Disturbance>,
+    in_kick_window: bool,
+    in_fall_kick_window: bool,
+) -> ([f64; 3], [f64; 3]) {
+    if in_disturbance_window {
+        let d =
+            disturbance.expect("in_disturbance_window is only set when cfg.disturbance is Some");
+        (d.force_n, d.torque_nm)
+    } else if in_kick_window {
+        (STARTUP_KICK_FORCE_N, [0.0; 3])
+    } else if in_fall_kick_window {
+        (FALL_KICK_FORCE_N, [0.0; 3])
+    } else {
+        ([0.0; 3], [0.0; 3])
+    }
 }
 
 impl Default for HostConfig {
@@ -2238,16 +2292,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let in_disturbance_window = cfg
             .disturbance
             .is_some_and(|d| (d.t0_s..d.t0_s + d.duration_s).contains(&t_known_s));
-        let (force, torque) = if in_disturbance_window {
-            let d = cfg.disturbance.expect("checked by is_some_and above");
-            (d.force_n, d.torque_nm)
-        } else if in_kick_window {
-            (STARTUP_KICK_FORCE_N, [0.0; 3])
-        } else if in_fall_kick_window {
-            (FALL_KICK_FORCE_N, [0.0; 3])
-        } else {
-            ([0.0; 3], [0.0; 3])
-        };
+        let (force, torque) = select_disturbance_force_torque(
+            in_disturbance_window,
+            cfg.disturbance,
+            in_kick_window,
+            in_fall_kick_window,
+        );
         backend.apply_external_force(force, torque);
 
         let obs = backend.wait_observe().map_err(HostError::Backend)?;
@@ -2871,6 +2921,65 @@ mod tests {
                 "yaw={yaw}: recovered ({p}, {r}), wanted ({pitch}, {roll})"
             );
         }
+    }
+
+    // --- Issue #194: disturbance forces are world-frame, on purpose ------
+
+    /// `select_disturbance_force_torque` takes no heading/yaw parameter --
+    /// this is checked by the compiler on every call, but this test pins the
+    /// consequence in the units the issue cares about: the same inputs
+    /// produce the exact same force/torque no matter what heading the board
+    /// is carrying "outside" the function. There is nothing to plumb a yaw
+    /// through even if a future edit wanted to.
+    #[test]
+    fn disturbance_force_is_independent_of_heading_by_construction() {
+        let d = Disturbance {
+            t0_s: 0.0,
+            duration_s: 1.0,
+            force_n: [12.0, -3.0, 0.0],
+            torque_nm: [0.0, 0.0, 4.0],
+        };
+        // "Heading" isn't even representable in this call -- the assertion
+        // is that the same (bool, Option<Disturbance>, bool, bool) tuple is
+        // the ENTIRE input, and it always returns the same output.
+        let first = select_disturbance_force_torque(true, Some(d), false, false);
+        let second = select_disturbance_force_torque(true, Some(d), false, false);
+        assert_eq!(first, second);
+        assert_eq!(first, (d.force_n, d.torque_nm));
+    }
+
+    /// Precedence when windows overlap, unchanged by the #194 extraction:
+    /// scheduled disturbance beats the startup kick beats the on-demand fall
+    /// kick beats nothing. A refactor-safety net, not new behaviour.
+    #[test]
+    fn disturbance_window_precedence_is_scheduled_then_startup_then_fall_then_none() {
+        let d = Disturbance {
+            t0_s: 0.0,
+            duration_s: 1.0,
+            force_n: [1.0, 0.0, 0.0],
+            torque_nm: [0.0, 0.0, 0.0],
+        };
+
+        // Scheduled disturbance wins even if the kick windows are also open.
+        assert_eq!(
+            select_disturbance_force_torque(true, Some(d), true, true),
+            (d.force_n, d.torque_nm)
+        );
+        // No scheduled disturbance: the startup kick wins over the fall kick.
+        assert_eq!(
+            select_disturbance_force_torque(false, None, true, true),
+            (STARTUP_KICK_FORCE_N, [0.0; 3])
+        );
+        // Only the fall kick window open.
+        assert_eq!(
+            select_disturbance_force_torque(false, None, false, true),
+            (FALL_KICK_FORCE_N, [0.0; 3])
+        );
+        // Nothing open: zero force, zero torque.
+        assert_eq!(
+            select_disturbance_force_torque(false, None, false, false),
+            ([0.0; 3], [0.0; 3])
+        );
     }
 
     // --- ADR-0011 criterion (b): the command-envelope reserve -----------
