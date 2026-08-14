@@ -1,0 +1,15 @@
+[package]
+name = "platform-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+# libc's sysconf/_SC_PAGESIZE binding is a Unix facility and the rest of the
+# real probe (`/proc`, `/sys`) is Linux-specific anyway. Target-gated so
+# `cargo build --workspace` still succeeds off Linux (issue #62's precedent,
+# see `crates/can-harness/Cargo.toml`); `src/lib.rs` cfg-gates the code that
+# uses it to match.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
