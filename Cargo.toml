@@ -17,6 +17,7 @@ members = [
     "crates/plant-mujoco",
     "crates/sim-host",
     "crates/loop-profiler",
+    "crates/platform-contract",
     "crates/xtask",
 ]
 
