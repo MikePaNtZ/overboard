@@ -106,21 +106,48 @@ fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
     sorted_ms[idx.min(sorted_ms.len() - 1)]
 }
 
+/// The subset of `sim-host`'s stats file this tool reports. `jitter_*` is
+/// `None` on a stats file written before issue #168's fields existed --
+/// this is internal, best-effort tooling, not the wire, so an old-format
+/// file degrades to the pre-#168 report rather than failing to parse.
+struct HostStats {
+    ticks: u64,
+    missed_deadlines: u64,
+    jitter_p50_ns: Option<u64>,
+    jitter_p99_ns: Option<u64>,
+    jitter_max_ns: Option<u64>,
+}
+
 /// Best-effort read of `sim-host`'s own stats file. Internal tooling, not
 /// the wire -- absent or unparsable is reported honestly, not faked.
-fn read_host_stats(path: &std::path::Path) -> Option<(u64, u64)> {
+fn read_host_stats(path: &std::path::Path) -> Option<HostStats> {
     let contents = std::fs::read_to_string(path).ok()?;
     let mut ticks = None;
     let mut missed = None;
+    let mut jitter_p50_ns = None;
+    let mut jitter_p99_ns = None;
+    let mut jitter_max_ns = None;
     for line in contents.lines() {
         if let Some(v) = line.strip_prefix("ticks=") {
             ticks = v.trim().parse().ok();
         } else if let Some(v) = line.strip_prefix("missed_deadlines=") {
             missed = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("jitter_p50_ns=") {
+            jitter_p50_ns = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("jitter_p99_ns=") {
+            jitter_p99_ns = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("jitter_max_ns=") {
+            jitter_max_ns = v.trim().parse().ok();
         }
     }
     match (ticks, missed) {
-        (Some(t), Some(m)) => Some((t, m)),
+        (Some(ticks), Some(missed_deadlines)) => Some(HostStats {
+            ticks,
+            missed_deadlines,
+            jitter_p50_ns,
+            jitter_p99_ns,
+            jitter_max_ns,
+        }),
         _ => None,
     }
 }
@@ -262,11 +289,40 @@ fn main() {
     println!("inter-packet interval (ms): mean={mean_ms:.4} p50={p50_ms:.4} p99={p99_ms:.4} max={max_ms:.4}");
 
     match read_host_stats(&args.host_stats) {
-        Some((host_ticks, missed)) => {
-            println!(
-                "missed-deadline count from the host: {missed} (host reports {host_ticks} ticks, stats file {})",
-                args.host_stats.display()
-            );
+        Some(stats) => {
+            // Issue #168: a raw miss count against a zero-slack deadline
+            // reads as catastrophic ("70% missed") even when the underlying
+            // jitter is small and the mean is correct. Percentiles are the
+            // actionable form of the same fact; the count stays alongside
+            // them rather than being replaced, since "how often" is still a
+            // real question the percentiles alone don't answer.
+            match (
+                stats.jitter_p50_ns,
+                stats.jitter_p99_ns,
+                stats.jitter_max_ns,
+            ) {
+                (Some(p50), Some(p99), Some(max)) => {
+                    println!(
+                        "host-side jitter (ms, recent window): p50={:.4} p99={:.4} max={:.4} \
+                         -- {}/{} ticks missed overall, stats file {}",
+                        p50 as f64 / 1e6,
+                        p99 as f64 / 1e6,
+                        max as f64 / 1e6,
+                        stats.missed_deadlines,
+                        stats.ticks,
+                        args.host_stats.display()
+                    );
+                }
+                _ => {
+                    println!(
+                        "missed-deadline count from the host: {} (host reports {} ticks, stats \
+                         file {} predates issue #168's jitter fields)",
+                        stats.missed_deadlines,
+                        stats.ticks,
+                        args.host_stats.display()
+                    );
+                }
+            }
         }
         None => {
             println!(
