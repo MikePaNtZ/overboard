@@ -15,12 +15,20 @@ measured number, (a)-entry-1 full stick from rest, (a)-entry-2 the full stick
 reversal at speed -- which the ADR records as never having been tested and
 names as the worst case.
 
-Two do not pass, at any value of the constant, and are written here as
+Three do not pass, at any value of the constant, and are written here as
 `xfail(strict=True)`:
 
 * **(a)-entry-3, the kerb strike.** During a full-stick hold the board cannot
   ride out a strike much above a 1 mm lip.
 * **(f), "every pass must hold with the estimator bias removed".**
+* **(a)-entry-1, ON THE WHEEL-ODOMETRY ESTIMATOR PATH (issue #227).** Every
+  test above this line runs `CommandFeedforward` aiding -- the only path this
+  file covered before issue #227. `hill.py`/`terrain.py` (and therefore
+  `tests/test_terrain.py`) default to the OTHER aiding source,
+  `WheelAccelEstimator`, which is unpinned by anything above and, measured
+  here, does not survive the same full-stick-from-rest hold the
+  `CommandFeedforward` path clears. See
+  `test_criterion_a1_full_stick_from_rest_does_not_invert_on_the_wheel_odometry_path`.
 
 They are written as the criteria SHOULD read, and marked expected-to-fail,
 rather than being softened into something that passes or left out. `strict=True`
@@ -28,6 +36,18 @@ matters: the day somebody fixes the underlying problem these turn RED as
 XPASS, which is the only mechanism that reliably tells a future session a known
 failure has stopped being one. A green suite that quietly stopped covering the
 thing it was written for is the failure mode this repo keeps hitting.
+
+WHY THE (f1)/(f2) TRIM PINS DO NOT COVER THE WHEEL-ODOMETRY PATH (issue #227)
+-------------------------------------------------------------------------------
+`PINNED_TRIM_DEG`/`PINNED_TRIM_BAND_DEG` below are measured and pinned only
+for `CommandFeedforward`, on FLAT GROUND -- neither the pin nor ADR-0011's
+text says so explicitly, and both should be read with that scope. An
+equivalent settled-trim pin for the wheel-odometry path is not written here
+because there is no settled trim to pin: that path inverts during the same
+full-stick-from-rest hold `test_criterion_a1_full_stick_from_rest_does_not_
+invert` (the `CommandFeedforward` version) clears, so criterion (a)-entry-1
+fails before the run ever reaches `TRIM_WINDOW_S`. A trim pin is downstream
+of surviving the hold; this path does not get there.
 
 WHY CRITERION (f) IS ALSO FLAGGED AS MIS-SPECIFIED
 ---------------------------------------------------
@@ -451,6 +471,51 @@ def test_criterion_a2_a_full_stick_reversal_at_speed_does_not_invert(tmp_path):
     assert _inversion_time(rows) is None, "a full stick reversal at speed inverted the board"
     print(f"\n(a)2 full stick reversal at speed -- {_margin(rows)}")
     assert _peak_pitch_deg(rows) < PITCH_CEILING_DEG
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issue #227: on the WheelAccelEstimator (wheel-odometry) aiding path "
+        "-- the one hill.py/terrain.py actually run, not CommandFeedforward -- "
+        "a full-stick hold from rest inverts the board at 5.470 s, deterministic "
+        "to the bit (two runs diffed byte-identical). The envelope saturates at "
+        "4.502 s (close to CommandFeedforward's 4.92 s -- the shaped command "
+        "map does not depend on the aiding source), FALLEN trips at 5.196 s, "
+        "and the authority warning leads all of it at 3.618 s, but none of that "
+        "matters here: the board goes over anyway. CMD_ENVELOPE_RESERVE was "
+        "derived from, and only ever measured against, the CommandFeedforward "
+        "path's peak-demand slope (test_f2_...); it buys nothing on this one. "
+        "test_criterion_a2 (stick reversal) fails identically at the same "
+        "5.470 s, because both schedules share this build phase and the board "
+        "has already gone over before either schedule's reversal input would "
+        "arrive -- not filed as a second xfail since it is the same event, not "
+        "a second one. NOT a harness defect: the estimate tracks truth closely "
+        "throughout (both cross 90 deg within 0.1 deg of each other), so the "
+        "aiding is doing its job right up to the point where the job is not "
+        "survivable."
+    ),
+)
+def test_criterion_a1_full_stick_from_rest_does_not_invert_on_the_wheel_odometry_path(tmp_path):
+    """The (a1) positive control this file has been missing since it was
+    written -- every test above this line covers `CommandFeedforward` only.
+
+    Same schedule, same shipped `CMD_ENVELOPE_RESERVE`, same shaping -- the
+    only thing that changes is `--estimator-aiding wheel-odometry`, i.e.
+    which signal aids the complementary filter. See `EstimatorAiding` in
+    `host.rs` (issue #227) for why this option exists at all: it did not,
+    before this test needed it, because nothing on this signal path had ever
+    been measured against ADR-0011's own acceptance matrix.
+    """
+    rows = _run(
+        tmp_path, "a1wheel", "full-stick",
+        pitch_source="estimator", estimator_aiding="wheel-odometry",
+    )
+    t = _inversion_time(rows)
+    assert t is None, (
+        f"full stick from rest inverted the board at {t:.3f} s on the "
+        "wheel-odometry aiding path"
+    )
 
 
 def test_the_worst_point_in_the_matrix_is_quoted_in_both_currencies(tmp_path):
