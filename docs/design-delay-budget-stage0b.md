@@ -12,6 +12,8 @@ covers:
 - **Status:** Analysis. **AC-6 is DEMOTED, not amended — it currently gates nothing** (§3).
   The 20 ms figure is a measured capacity at a design point whose gains, `kt` and reference
   disturbance are all scheduled to change. No implementation change.
+  **Addresses [#133](https://github.com/MikePaNtZ/overboard/issues/133) (AC1's time-domain half,
+  AC3, AC4) — not closed: AC1's frequency-domain re-sweep is left open, see §2's correction.**
 - **Owner:** Senior Controls.
 - **Closes:** [#113](https://github.com/MikePaNtZ/overboard/issues/113),
   [#138](https://github.com/MikePaNtZ/overboard/issues/138),
@@ -81,8 +83,11 @@ Two standard bounds follow from `p` alone, independent of gain choice:
 - **Fundamental delay-margin ceiling, `1/p` = 191 ms** (was quoted as 313 ms).
 - **Textbook robust-design target, `0.2/p` = 38.2 ms** (was quoted as 63 ms).
 
-**The second is not loose — it is accurate to 2%** against the measured 38–39 ms ceiling. See
-§3, where the original "over-predicted by 1.6×" reading is corrected.
+**The second was reported as accurate to 2% against the measured 38–39 ms ceiling — that
+comparison does not survive the #133 tau correction** (§3): the ceiling it was checked against
+moved to 51–52 ms once the estimator was measured at the production time constant, and `0.2/p`
+is now ~26% low against it. See §3 for the corrected comparison and why the original "1.6×
+over-prediction" reading was still right to reject.
 
 **Why this doesn't route through `kt`.** `KT_NM_PER_A = 0.7` (`sim/scenarios/plant.py`) is
 explicitly flagged in-repo as an **unfitted guess**. A crossover-frequency derivation from the
@@ -99,44 +104,70 @@ is trustworthy where a gain-based crossover estimate would not be.
 | CAN transport bit time (extended frame, 8-byte payload, 500 kbit/s per `docs/runbook-stage0a-bench.md`) | ~0.26–0.32 ms | **COMPUTED** from the CAN 2.0B protocol + documented bitrate. The real VESC `SET_CURRENT` frame size is **unconfirmed** — `vesc-wire`/`vesc-tx` are honest stubs (issue #1, issue #52) — so this is a generic protocol bound, not a measurement of our actual frame |
 | Sensor transport (Pi 5 SPI tail, community-reported) | 1.5–2 ms | **REPORTED, not measured on our hardware** — `design-pi-image-stage0b-reference.md` AC-9 is the pending real measurement |
 | Compute (one `control-core` cycle) | not separately measured | **ASSUMED negligible** relative to the items above; no isolated benchmark exists yet |
-| **Estimator cost** (measured: truth-pitch margin − estimate-pitch margin) | **≈21 ms** | **MEASURED**, this issue — `tests/test_delay_budget_stage0b.py` |
-| Sum of the stated line items above | ≈3 + 1 + 0.3 + 2 + 21 ≈ **27.3 ms** | — |
-| **Measured total closed-loop ceiling** (ridden/cascade, nominal impulse, estimator ON — the honest default) | **survives 38 ms, strikes 39 ms** | **MEASURED**, bit-identical on repeat |
+| **Estimator cost** (measured: truth-pitch margin − estimate-pitch margin) | **≈9 ms** | **MEASURED**, this issue — `tests/test_delay_budget_stage0b.py` |
+| Sum of the stated line items above | ≈3 + 1 + 0.3 + 2 + 9 ≈ **15.3 ms** | — |
+| **Measured total closed-loop ceiling** (ridden/cascade, nominal impulse, estimator ON — the honest default) | **survives 51 ms, strikes 52 ms** | **MEASURED**, bit-identical on repeat |
 | For comparison: truth-pitch (no estimator) ceiling | **survives 59 ms, strikes 60 ms** | **MEASURED** |
 
-**The line items do not sum to the measured ceiling, and that gap is reported rather than
-papered over.** ~27.3 ms of accounted-for line items against a measured ~38–39 ms ceiling
-leaves ~11 ms unattributed — likely a mix of the current clamp's nonlinearity and coupling
-terms the simple additive picture does not capture. The **measured total** is the authoritative
-number; the line-item table is diagnostic, not an exhaustive accounting.
+**Correction (#133): the estimator cost above was measured at the wrong time constant.**
+Every number in this section previously used `estimator_tau_s`'s FFI default of 1.0 s, not the
+`tau = 2 s` `sim/scenarios/hill.py:140` documents as the recommended production config — nothing
+had ever asked the estimator for the config that actually ships. The correction runs the
+opposite direction from what was assumed going in: a longer tau trusts the delay-free gyro more
+and the phase-corrupted accelerometer less (see `WheelAccelEstimator`'s comment in
+`crates/control-core/src/lib.rs`), so it **costs less** delay margin, not more — the estimator
+cost drops from ~21 ms to ~9 ms, and the closed-loop ceiling rises from 38–39 ms to 51–52 ms.
+This holds consistently across every disturbance amplitude in §3's sweep, not just the reference
+one. The truth-pitch ceiling (59–60 ms) is untouched — it does not depend on the estimator.
 
-**The estimator is confirmed as the dominant term**, exactly as the issue predicted: ~21 ms
-against a 1.5–2 ms SPI spike is roughly **10–14×**, in the "5–15×" range flagged before this was
-measured. `tests/test_delay_budget_stage0b.py::test_the_estimator_costs_a_large_fraction_of_the_delay_budget`
-pins this as a standing regression gate — a future estimator change that quietly eats more of
-this margin should fail a test, not wait for a bench surprise.
+**The line items do not sum to the measured ceiling, and that gap is reported rather than
+papered over.** ~15.3 ms of accounted-for line items against a measured ~51–52 ms ceiling
+leaves **~36 ms unattributed** — a bigger unattributed share than before the #133 correction,
+not a smaller one. The named line items shrank (the estimator's did); the ceiling grew by more
+than they shrank. This is likely still a mix of the current clamp's nonlinearity and coupling
+terms the simple additive picture does not capture, but that is now the majority of the ceiling
+rather than a minority, and is worth its own measurement rather than being carried as
+"unattributed" indefinitely. The **measured total** is the authoritative number regardless; the
+line-item table remains diagnostic, not an exhaustive accounting.
+
+**The estimator is a real cost, but no longer the dominant term.** ~9 ms against a 1.5–2 ms SPI
+spike is roughly **4.5–6×** — still the single largest *named* line item, but well under the
+previously-reported 10–14× and the "5–15×" range flagged before either measurement.
+`tests/test_delay_budget_stage0b.py::test_the_estimator_costs_a_large_fraction_of_the_delay_budget`
+still pins this as a standing regression gate (threshold lowered from 1.4× to 1.15×, matching the
+smaller-but-real measured ratio) — a future estimator change that quietly eats more of this
+margin should fail a test, not wait for a bench surprise.
 
 ## 3. Outcome (AC3)
 
 **500 Hz is not the problem, and the honest budget says so with a wide margin, not a
 knife's-edge one.** The known/assumed transport-adjacent line items (SPI 1.5–2 ms + sampling/ZOH
-3 ms + CAN ~0.3 ms + current-loop lag 1 ms ≈ **6.3 ms**) sit inside the measured 38–39 ms ceiling
-with roughly **6× headroom**, even before crediting the ~11 ms of unattributed slack in §2. The
+3 ms + CAN ~0.3 ms + current-loop lag 1 ms ≈ **6.3 ms**) sit inside the measured 51–52 ms ceiling
+with roughly **8× headroom**, even before crediting the ~36 ms of unattributed slack in §2. The
 originally-proposed AC-6 (`p99.9 ≤ 1 ms, max ≤ 2 ms`) was not wrong about there being a real
 constraint — it was wrong about which quantity to gate on.
 
 **Correction (#134): the textbook target did not over-predict — the pole was wrong.** This
 section previously recorded the 63 ms robust target as over-predicting by ~1.6×, and blamed the
-current clamp and the estimator. With §1's corrected pole, `0.2/p` = **38.2 ms** against a
-measured **39 ms** ceiling: an agreement of **2%**. The clamp and estimator are real and do
-matter — the estimator demonstrably costs ~21 ms (§2) — but they are not what explained that
-gap, because with the right pole there is no gap to explain. Attributing an error to the
-nearest plausible physical effect, when the arithmetic upstream was simply wrong, is how a wrong
-number survives review.
+current clamp and the estimator. With §1's corrected pole, `0.2/p` = **38.2 ms**, which at the
+time was compared against a measured **39 ms** ceiling — an apparent agreement of **2%**.
 
-The conclusion is unchanged: **gate on the measured number.** What changes is that the analytic
-bound is a far sharper cross-check than it appeared — a future measurement drifting far from
-`0.2/p` should now read as a signal that something moved.
+**Correction (#133) reopens that agreement, and it does not survive.** `0.2/p` is a property of
+the plant and control law alone; it does not depend on the estimator. The 39 ms figure it was
+checked against did — it was the estimator-in-loop ceiling, measured (like everything else in
+§2) at the wrong tau. At the corrected, production-tau ceiling of 51–52 ms, `0.2/p` = 38.2 ms is
+**~26% low**, not a 2% match. Checked instead against the estimator-independent truth-pitch
+ceiling (59–60 ms, unchanged by either correction) it is **~36% low**. Neither is a close
+agreement; the earlier "2%" was this document coincidentally comparing a plant-only bound
+against an estimator-dependent number that happened, at the wrong tau, to land nearby. **This is
+reported rather than re-explained** — a new hypothesis for the analytic/measured gap is real
+analysis work, not a byproduct of a tau fix, and is left open rather than guessed at here.
+
+The conclusion of #134 is otherwise unchanged: **gate on the measured number, not the linear
+one.** What #133 removes is the specific claim that the analytic bound was validated to 2% — it
+was not; that arithmetic itself was correct, but what it was being checked against was not the
+right comparison. `0.2/p` remains a useful order-of-magnitude cross-check (§1's pole correction
+stands on its own, independent of the estimator), just not the tight one previously reported.
 
 **Recommendation — keep the 500 Hz schedule** (already independently justified by IMU
 anti-aliasing, `crates/control-core/src/lib.rs`, `crates/board-types/src/lib.rs`; lowering it
@@ -146,11 +177,14 @@ was a FORBIDDEN outcome per the issue).
 
 **It is deliberately not written as a requirement, and it must not be cited as one.**
 
-> **Measured delay capacity at the stated design point is 38–39 ms; 20 ms is half of it.**
-> The binding hardware threshold is **re-derived after the `kt` fit (#132) and the reference
-> disturbance is settled (#142)** — it does not exist yet.
+> **Measured delay capacity at the stated design point is 51–52 ms; 20 ms is well under half of
+> it.** The binding hardware threshold is **re-derived after the `kt` fit (#132) and the
+> reference disturbance is settled (#142)** — it does not exist yet.
 
-All four conditions are part of the number, not context for it:
+All five conditions are part of the number, not context for it — the estimator's τ is added
+here (#133) having previously been named in the re-open trigger below but never actually
+listed as one of "the" conditions, which is how it went unmeasured at its production value for
+as long as it did:
 
 | Condition | Value | Status |
 |---|---|---|
@@ -158,14 +192,15 @@ All four conditions are part of the number, not context for it:
 | Inner gain `kd` | 30 A/(rad/s) | **about to change** — #132 retune |
 | `kt` | 0.7 N·m/A | **UNFITTED placeholder** |
 | Reference disturbance | 20 N·s | **INHERITED, underived** — see §4 |
+| Estimator `estimator_tau_s` | 2.0 s | **PRODUCTION value** (#133) — was measured at the FFI default of 1.0 s until this correction |
 
 **Re-open trigger, in the criterion itself:** *any* change to `kp`, `kd`, `kt`, the estimator's
 τ, or the reference disturbance **voids this number** and requires re-running
 `scripts/analyse_delay_budget.py`. Three of those five are already scheduled to change.
 
 **The 2× safety factor has moved from the delay axis to the disturbance axis.** §4's table is
-the reason: a 1.5× change in disturbance (20 → 30 N·s) collapses the ceiling from 38 ms to
-15 ms, which outweighs a 2× factor on delay entirely. **A safety factor on the wrong axis is
+the reason: a 1.5× change in disturbance (20 → 30 N·s) collapses the ceiling from 51 ms to
+28 ms, which outweighs a 2× factor on delay entirely. **A safety factor on the wrong axis is
 worse than none, because it reads as covered.** The margin that matters is the one on how hard
 the board gets hit.
 
@@ -174,10 +209,10 @@ the board gets hit.
 `docs/design-pi-image-stage0b-reference.md` is COO turf (`CODEOWNERS`), so this is proposed,
 not applied. Replace AC-6's threshold sentence with:
 
-> **Not yet gateable.** Measured delay capacity is 38–39 ms at the design point
-> (`kp`=200, `kd`=30, `kt`=0.7 *unfitted*, reference disturbance 20 N·s *inherited*). A
-> binding p99.9 threshold is re-derived once #132 (gain retune, `kt` fit) and #142
-> (reference disturbance) land. Until then AC-6 gates **nothing**, and the 20 ms figure
+> **Not yet gateable.** Measured delay capacity is 51–52 ms at the design point
+> (`kp`=200, `kd`=30, `kt`=0.7 *unfitted*, reference disturbance 20 N·s *inherited*, estimator
+> τ=2 s *production*). A binding p99.9 threshold is re-derived once #132 (gain retune, `kt` fit)
+> and #142 (reference disturbance) land. Until then AC-6 gates **nothing**, and the 20 ms figure
 > may not be cited on its own to pass or fail a hardware decision.
 
 **The test for whether this demotion actually worked** (#138's own acceptance criterion): can
@@ -205,15 +240,24 @@ nothing".
 
   | Impulse | Truth ceiling | Estimator ceiling | Peak pitch at zero delay |
   |---|---|---|---|
-  | 10 N·s | 71 ms | 48 ms | 2.94° |
-  | **20 N·s (`NOMINAL_IMPULSE_NS`)** | **60 ms** | **38 ms** | 5.95° |
-  | 30 N·s | 37 ms | **15 ms** | 8.98° |
+  | 10 N·s | 71 ms | 62 ms | 3.21° |
+  | **20 N·s (`NOMINAL_IMPULSE_NS`)** | **60 ms** | **51 ms** | 6.36° |
+  | 30 N·s | 37 ms | **28 ms** | 9.71° |
   | 40 N·s | — | — | **inverts at zero delay** |
 
-  At 30 N·s the estimator-in-loop ceiling is **15 ms, below the 20 ms figure itself**. The
-  ceiling falls faster than linearly (~1.0 ms/N·s from 10→20, ~2.3 ms/N·s from 20→30).
-  (The estimator's own cost is ~22 ms at *every* amplitude — 23/22/22 — which is what justifies
-  §2 charging it as a fixed line item.)
+  **Correction (#133):** the Estimator-ceiling and peak-pitch columns above are re-measured at
+  the production `estimator_tau_s = 2.0` s; the Truth-ceiling column is unchanged (it does not
+  depend on the estimator). At 30 N·s the estimator-in-loop ceiling is now **28 ms, above the
+  20 ms figure** — the opposite of the pre-correction reading (15 ms, below it) that this
+  section previously used to argue AC-6's legacy number was already unsafe at 30 N·s. It is not,
+  at the production estimator config; the margin is thin (28 ms against 20 ms, an 8 ms cushion)
+  but positive. This does not reopen AC-6 as a threshold — that demotion stands on the "the
+  number is a design-point artefact, not a requirement" argument above, independent of which
+  side of it the measurement lands on. The ceiling still falls faster than linearly with
+  amplitude (~0.9 ms/N·s from 10→20, ~2.3 ms/N·s from 20→30), and 40 N·s is still fatal at zero
+  delay regardless of tau. (The estimator's own cost is ~9 ms at *every* amplitude — 9/9/9 — down
+  from ~22 ms (23/22/22) at the previously-used tau; still what justifies §2 charging it as a
+  fixed line item.)
 - **If any of these assumptions turn out to dominate the conclusion, that supersedes this
   document** — per the issue's own instruction, this analysis is not asking to be trusted past
   what it actually checked.

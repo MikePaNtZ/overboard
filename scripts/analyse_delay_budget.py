@@ -88,39 +88,54 @@ KP_A_PER_RAD, KD_A_PER_RAD_S = 200.0, 30.0
 #: Measured BOTH ways, and the pair is the most useful number in this file:
 #:
 #:   truth pitch      last safe 60 ms, first fatal 61 ms
-#:   estimator in loop last safe 38 ms, first fatal 39 ms
+#:   estimator in loop last safe 51 ms, first fatal 52 ms
 #:
-#: The 22 ms gap between them IS the estimator's cost in delay margin, measured
+#: The 9 ms gap between them IS the estimator's cost in delay margin, measured
 #: in the time domain, against a plant that saturates -- entirely independently
 #: of the frequency-domain phase measurement in `analyse_estimator_phase.py`.
-#: Two methods, one conclusion: the estimator is the dominant delay term.
+#: Two methods, one conclusion: the estimator is a real, but no longer the
+#: dominant, delay term (see the #133 correction below).
 #:
 #: This also supersedes `test_imperfections.py:203`'s "breaks between 40 and
-#: 60 ms", which is stale: with the estimator in the loop it breaks at 39 ms.
+#: 60 ms", which is stale: with the estimator in the loop it breaks at 52 ms.
+#:
+#: **Correction (#133): re-measured at the PRODUCTION estimator time
+#: constant.** Every number on this line previously used `estimator_tau_s`'s
+#: FFI default of 1.0 s (ESTIMATOR_BREAK_S was 0.039, an estimator cost of
+#: ~21 ms) -- not the `tau = 2 s` `sim/scenarios/hill.py:140` documents as the
+#: recommended production config. Nothing had ever asked the estimator for the
+#: config that actually ships. The correction runs the OPPOSITE direction from
+#: what was assumed going in: a longer tau trusts the delay-free gyro more and
+#: the phase-corrupted accelerometer less (see `WheelAccelEstimator`'s comment
+#: in `crates/control-core/src/lib.rs`), so it COSTS LESS delay margin, not
+#: more. `TRUTH_BREAK_S` is untouched -- it does not depend on the estimator.
 TRUTH_BREAK_S = 0.061
-ESTIMATOR_BREAK_S = 0.039
+ESTIMATOR_BREAK_S = 0.052
 
 #: The break is NOT a plant invariant. It is saturation-driven, so it is a
 #: function of disturbance amplitude, and the reference amplitude is a CHOICE.
-#: Swept at 10/20/30/40 N*s, bisected to 1 ms, both attitude sources:
+#: Swept at 10/20/30/40 N*s, bisected to 1 ms, both attitude sources, at the
+#: PRODUCTION estimator_tau_s=2.0 (#133 -- see ESTIMATOR_BREAK_S above; the
+#: `truth_s` column is tau-independent and unchanged from the original sweep):
 #:
 #:   N*s   truth   estimator   peak pitch at zero delay
-#:    10    72 ms     49 ms      2.94 deg
-#:    20    61 ms     39 ms      5.95 deg   <- NOMINAL_IMPULSE_NS
-#:    30    38 ms     16 ms      8.98 deg
+#:    10    72 ms     63 ms      3.21 deg
+#:    20    61 ms     52 ms      6.36 deg   <- NOMINAL_IMPULSE_NS
+#:    30    38 ms     29 ms      9.71 deg
 #:    40   strikes at ZERO delay -- beyond disturbance rejection entirely
 #:
 #: Two things fall out, and both matter more than anything about the transport:
 #:
-#: 1.  The slope STEEPENS: ~1.0 ms/N*s from 10->20, ~2.3 ms/N*s from 20->30.
+#: 1.  The slope STEEPENS: ~0.9 ms/N*s from 10->20, ~2.3 ms/N*s from 20->30.
 #:     A budget quoted at one amplitude and used at another is fiction.
-#: 2.  The estimator's cost is ~22 ms at EVERY amplitude (23/22/22). That is
-#:     what justifies charging it as a fixed line item rather than a fraction.
+#: 2.  The estimator's cost is ~9 ms at EVERY amplitude (9/9/9) at the
+#:     production tau -- down from ~22 ms (23/22/22) at tau=1.0. Still a fixed
+#:     line item, just a smaller one than previously documented.
 AMPLITUDE_BREAKS_NS = {
-    10.0: {"truth_s": 0.072, "estimator_s": 0.049, "zero_delay_peak_deg": 2.942},
-    20.0: {"truth_s": 0.061, "estimator_s": 0.039, "zero_delay_peak_deg": 5.950},
-    30.0: {"truth_s": 0.038, "estimator_s": 0.016, "zero_delay_peak_deg": 8.984},
-    40.0: {"truth_s": None, "estimator_s": None, "zero_delay_peak_deg": 179.956},
+    10.0: {"truth_s": 0.072, "estimator_s": 0.063, "zero_delay_peak_deg": 3.207},
+    20.0: {"truth_s": 0.061, "estimator_s": 0.052, "zero_delay_peak_deg": 6.362},
+    30.0: {"truth_s": 0.038, "estimator_s": 0.029, "zero_delay_peak_deg": 9.708},
+    40.0: {"truth_s": None, "estimator_s": None, "zero_delay_peak_deg": 179.987},
 }
 
 #: The amplitude the budget is quoted at. `NOMINAL_IMPULSE_NS` in the scenario.
@@ -444,10 +459,14 @@ def main() -> int:
     # budget written against the linear number would be writing a cheque the
     # saturated loop cannot cash.
     #
-    # The estimator is charged at its TIME-DOMAIN cost (the 22 ms difference
-    # between the two measured break points) rather than its frequency-domain
-    # phase (16.6 ms). The larger figure is the one measured against the
-    # saturating plant this budget is actually for.
+    # The estimator is charged at its TIME-DOMAIN cost (the 9 ms difference
+    # between the two measured break points, at the production estimator tau
+    # -- #133) rather than its frequency-domain phase. That frequency-domain
+    # figure (previously 16.6 ms) was ALSO measured at the wrong tau and has
+    # not been re-measured here -- `analyse_estimator_phase.py`'s sweep still
+    # needs re-running at tau=2.0 to produce a comparable number (left for a
+    # follow-up; not needed for this budget, which uses the time-domain
+    # figure regardless of which one is larger).
     estimator_cost = TRUTH_BREAK_S - ESTIMATOR_BREAK_S
 
     # The budget itself lives in `docs/design-delay-budget-stage0b.md` (#122),
