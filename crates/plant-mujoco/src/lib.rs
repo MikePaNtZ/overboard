@@ -62,6 +62,8 @@ extern "C" {
     fn plant_mujoco_joint_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_joint_qposadr(model: *mut c_void, joint_id: c_int) -> c_int;
     fn plant_mujoco_joint_dofadr(model: *mut c_void, joint_id: c_int) -> c_int;
+    fn plant_mujoco_get_dof_damping(model: *mut c_void, dofadr: c_int) -> f64;
+    fn plant_mujoco_set_dof_damping(model: *mut c_void, dofadr: c_int, damping: f64);
     fn plant_mujoco_set_qpos_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
 }
@@ -494,6 +496,39 @@ impl Plant {
         Some(adr as usize)
     }
 
+    /// `mjModel::dof_damping[dofadr]` -- the linear damping coefficient on the
+    /// degree of freedom at `dofadr` (from [`Plant::joint_dofadr`]). Valid for
+    /// a 1-DOF joint (e.g. a hinge); a multi-DOF joint has more than one
+    /// damping slot starting at `dofadr`, which this does not attempt to
+    /// return.
+    pub fn dof_damping(&self, dofadr: usize) -> f64 {
+        // SAFETY: `self.model` is non-null and owned for the life of `self`;
+        // `dofadr` came from `joint_dofadr` against this same model.
+        unsafe { plant_mujoco_get_dof_damping(self.model, dofadr as c_int) }
+    }
+
+    /// Overwrites `mjModel::dof_damping[dofadr]` -- **verification only**, the
+    /// only supported way to vary a joint's damping without editing
+    /// `sim/models/` and rebuilding (ADR-0011 criterion (g): "every pass must
+    /// hold across a damping sweep of 0.5x-2x" on `wheel_hinge`'s
+    /// `damping="0.08"`). Mirrors [`Plant::set_gravity`]'s reasoning: a model
+    /// edit changes every scenario, this changes one run.
+    ///
+    /// # Panics
+    /// If called after any [`Plant::step`] -- same "before the first step"
+    /// rule as `set_gravity`, for the same reason: damping is read every
+    /// step, so changing it mid-run is a step disturbance, not a sweep point.
+    pub fn set_dof_damping(&mut self, dofadr: usize, damping: f64) {
+        assert!(
+            self.time() == 0.0,
+            "Plant::set_dof_damping must be called before the first Plant::step (mjData::time \
+             is {:.6}, not 0) -- a mid-run change is a disturbance, not a sweep point",
+            self.time()
+        );
+        // SAFETY: see `dof_damping`; this call only writes the one slot.
+        unsafe { plant_mujoco_set_dof_damping(self.model, dofadr as c_int, damping) };
+    }
+
     /// `mjData::xmat[body_id]`, row-major, exactly `data.xmat[body].reshape(3,
     /// 3)` on the Python side. Exists so the I1c Rust-hosted impulse harness
     /// (AC6) can compute ground-truth pitch with
@@ -662,6 +697,55 @@ mod tests {
     fn timestep_matches_the_onewheel_models_documented_option() {
         let plant = Plant::open(&model_path()).expect("the onewheel model should load");
         assert_eq!(plant.timestep(), 0.002);
+    }
+
+    /// `wheel_hinge`'s declared `damping="0.08"` (`sim/models/overboard_onewheel.xml`),
+    /// read and round-tripped through `dof_damping`/`set_dof_damping` -- the
+    /// FFI plumbing ADR-0011 criterion (g)'s damping sweep (issue #229) needs
+    /// to vary that constant at runtime instead of editing `sim/models/` and
+    /// rebuilding for every sweep point.
+    #[test]
+    fn dof_damping_reads_the_declared_value_and_set_dof_damping_round_trips() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        let dofadr = plant
+            .joint_dofadr("wheel_hinge")
+            .expect("the onewheel model declares a wheel_hinge joint");
+        assert_eq!(
+            plant.dof_damping(dofadr),
+            0.08,
+            "wheel_hinge's damping is declared as 0.08 in the model; if this ever moves, the \
+             0.5x-2x sweep in tests/test_damping_sweep.py is sweeping around the wrong centre"
+        );
+
+        plant.set_dof_damping(dofadr, 0.16);
+        assert_eq!(
+            plant.dof_damping(dofadr),
+            0.16,
+            "the write did not round-trip"
+        );
+
+        // Setting a DIFFERENT dof must not perturb this one -- a shared
+        // damping array indexed wrong would silently move every joint's
+        // damping together instead of the one requested.
+        if let Some(other_dofadr) = plant.joint_dofadr("frame_free") {
+            plant.set_dof_damping(other_dofadr, 5.0);
+            assert_eq!(
+                plant.dof_damping(dofadr),
+                0.16,
+                "writing frame_free's damping must not touch wheel_hinge's"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "before the first Plant::step")]
+    fn set_dof_damping_after_a_step_panics() {
+        let mut plant = Plant::open(&model_path()).expect("the onewheel model should load");
+        let dofadr = plant
+            .joint_dofadr("wheel_hinge")
+            .expect("wheel_hinge exists");
+        plant.step();
+        plant.set_dof_damping(dofadr, 0.5);
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //!          [--pitch-source estimator|truth] [--pitch-bias-deg DEGREES]
 //!          [--estimator-aiding command-feedforward|wheel-odometry]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
-//!          [--incline-deg DEGREES] [--kerb [Y[,HEIGHT]]]
+//!          [--incline-deg DEGREES] [--damping-scale SCALE] [--kerb [Y[,HEIGHT]]]
 //!          [--terrain HFIELD.bin]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
@@ -295,6 +295,25 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 cfg.incline_deg = deg;
+                i += 2;
+            }
+            // ADR-0011 criterion (g): "every pass must hold across a damping
+            // sweep of 0.5x-2x" on `wheel_hinge`'s `damping="0.08"`. See
+            // HostConfig::damping_scale.
+            "--damping-scale" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --damping-scale needs a value");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(scale) = v.parse::<f64>() else {
+                    eprintln!("sim-host: --damping-scale value '{v}' is not a number");
+                    return ExitCode::FAILURE;
+                };
+                if !(0.0..=10.0).contains(&scale) {
+                    eprintln!("sim-host: --damping-scale must be within [0, 10], got {scale}");
+                    return ExitCode::FAILURE;
+                }
+                cfg.damping_scale = Some(scale);
                 i += 2;
             }
             // `t0,duration,fx,fy,fz,tx,ty,tz` -- world frame, SI. The kerb

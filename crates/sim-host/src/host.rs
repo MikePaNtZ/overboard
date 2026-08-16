@@ -1482,6 +1482,18 @@ pub struct HostConfig {
     /// that is the same problem and not an approximation of it.
     pub incline_deg: f64,
 
+    /// **Verification only.** Multiplier on the `wheel_hinge` joint's
+    /// declared `damping="0.08"`. `None` (the default) leaves the model's
+    /// declared damping untouched; no shipped configuration sets this.
+    ///
+    /// ADR-0011 criterion (g): "every pass must hold across a damping sweep
+    /// of 0.5x-2x" on that constant, which carries no provenance comment and
+    /// sets the whole speed-dependence of the full-stick flip (issue #229).
+    /// Applied by [`sim_backend::SimBackend::set_damping_scale`], the same
+    /// "runtime knob, not a `sim/models/` edit" pattern `incline_deg` above
+    /// established.
+    pub damping_scale: Option<f64>,
+
     /// **Verification only.** Writes one CSV row per control cycle to this
     /// path when the run ends. Buffered in memory and written once, never
     /// during the loop: a 500 Hz control thread does not do file I/O per
@@ -1642,6 +1654,7 @@ impl Default for HostConfig {
             cmd_envelope_reserve_braking: None,
             disturbance: None,
             incline_deg: 0.0,
+            damping_scale: None,
             trace_path: None,
             kerb: None,
             terrain: None,
@@ -1937,6 +1950,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // Before `open()`, which is where the tilt is applied -- see
     // `HostConfig::incline_deg`.
     backend.set_incline_deg(cfg.incline_deg);
+    // Before `open()`, same reason -- see `HostConfig::damping_scale`.
+    backend.set_damping_scale(cfg.damping_scale);
     backend.open().map_err(HostError::Backend)?;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
