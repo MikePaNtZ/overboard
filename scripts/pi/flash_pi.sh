@@ -329,9 +329,15 @@ else
   echo "    boot partition, so they are not left on a FAT32 filesystem."
   echo
   echo "    Works immediately -- these ship in the image:"
-  echo "      cyclictest -m -Sp95 -i 2000 -D 30m       # kernel wakeup jitter (AC-5)"
   echo "      ip -details link show can0               # only with the CAN HAT fitted"
   echo "      cangen vcan0 & candump vcan0             # CAN stack, no hardware needed"
+  echo
+  echo "    AC-5 (kernel wakeup jitter), full protocol -- 'cyclictest -S' only starts"
+  echo "    one thread per CPU in the current cpuset, and isolcpus=3 removes CPU 3 from"
+  echo "    it, so this pins explicitly to the isolated core the control loop will use:"
+  echo "      sudo stress-ng --cpu 4 --sock 2 &"
+  echo "      sudo cyclictest -m -S -p95 -i 2000 -D 30m -a 3 -h 1000 --histfile=ac5-cpu3.txt"
+  echo "      vcgencmd get_throttled     # 0x0 required, or the run is uninterpretable (#230)"
   echo
   echo "    NOT on the card yet -- no Overboard code ships in the image (issue"
   echo "    #182 I5). To run the controller or the loop profiler you must put"
