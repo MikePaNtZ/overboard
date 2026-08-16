@@ -99,7 +99,13 @@ class ImpulseParams:
     result depends on the impulse and not on the force profile."""
 
     direction: tuple[float, float, float] = (-1.0, 0.0, 0.0)
-    """Unit direction of the push. Forward (-X) to start; lateral is follow-on."""
+    """Unit direction of the push, WORLD frame -- written straight into
+    `data.xfrc_applied`, which MuJoCo interprets in world coordinates, and
+    never rotated by the board's heading. Forward (-X) to start; lateral is
+    follow-on. This is the same convention `crates/sim-host`'s
+    `apply_external_force`/`Disturbance` use for the Rust-hosted kerb and kick
+    disturbances (issue #194) -- both sides model an exogenous, physically
+    world-anchored shove, not one that tracks the board's nose."""
 
     application_height_m: float = 0.0
     """Height above the frame's centre of mass at which the push lands.
