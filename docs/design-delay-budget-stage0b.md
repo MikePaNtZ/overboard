@@ -7,6 +7,8 @@ covers:
   - scripts/reference_disturbance.py
   - scripts/analyse_deadline_bursts.py
   - tests/test_delay_budget_stage0b.py
+  - tests/test_reference_disturbance.py
+reconciled: 2e41fc7
 -->
 
 - **Status:** Analysis. **AC-6 is DEMOTED, not amended — it currently gates nothing** (§3).
@@ -274,79 +276,84 @@ establishes that a firm shove is the worst thing that happens to a board.
 
 The #132 retune needs a target, and "survive a firm shove" is not one.
 
-### The derivation
+### The derivation — now the canonical one, not a second model
 
-`scripts/reference_disturbance.py`. A wheel of radius `r` rolling at `v` into a step of height
-`h < r`: at impact the contact point jumps to the step edge and the wheel must begin rotating
-about it, so the velocity component **along** the edge-to-centre line is destroyed and only the
-perpendicular component survives. The edge-to-centre vector has length `r` and vertical
-component `(r − h)`, so the surviving speed is `v(r − h)/r` and
-
-```
-Δv = v · h / r          J = M · Δv = M · v · h / r
-```
-
-No tuning constant, no fitted coefficient, no `kt` — only geometry, speed and mass. Note `h` and
-`v` enter identically: a 10 mm lip at 8 m/s is the same impulse as a 20 mm lip at 4 m/s.
+`scripts/reference_disturbance.py` used to re-derive kerb impulse itself, from a rigid-wheel
+model with no angular-inertia coupling (`Δv = v·h/r`). **That has been replaced** with Sr.
+Mechanical & Systems' landed answer to #142 AC2 — `kerb_strike_impulse` /
+`kerb_strike_vs_com_impulse` in `sim/scenarios/plant.py`, the same model
+`crates/sim-host/src/host.rs` already names as *"the kerb derivation this repo trusts... one
+place"* and `tests/test_cmd_envelope_reserve.py` already drives the closed loop with. The two
+models disagreed — at 20 mm/4 m/s the retired one said 45.4 N·s where the canonical bracket is
+**[56.7, 87.9] N·s**, understated by 20–90% depending on height and speed. This was exactly the
+two-models-that-could-disagree failure the `host.rs` comment warns about, just not yet fixed on
+the Python side. `scripts/reference_disturbance.py` now imports rather than reimplements.
 
 ### What the current numbers mean as obstacles
 
-At `r` = 145.4 mm and `M` = 82.5 kg, read backwards from the measured thresholds:
+At `r` = 145.4 mm and `M` = 82.5 kg, from the canonical bracket:
 
-| Threshold | What it is | Equivalent obstacle at 4 m/s | at 8 m/s |
+| Obstacle | Speed | Impulse (N·s) | Pitch rate imparted |
 |---|---|---|---|
-| 20 N·s | the current reference | **8.8 mm** | 4.4 mm |
-| 30 N·s | budget insolvent | 13.2 mm | 6.6 mm |
-| 40 N·s | **inverts at zero delay** | **17.6 mm** | 8.8 mm |
+| 5 mm lip | 4 m/s | 20 (both models agree at small `h`) | 42 deg/s |
+| 20 mm lip | 4 m/s | 57–88 | **119–222 deg/s** |
+| 20 mm lip | 8 m/s | 113–176 | **239–443 deg/s** |
 
-**The current reference disturbance is a 9 mm pavement lip at 14 km/h.** The board inverts, with
-a perfect zero-delay controller, on **18 mm at the same speed** — a raised paving slab. A
-standard UK kerb face (100–125 mm) computes to **227–568 N·s**, six to fourteen times beyond
-inversion.
+**The current 20 N·s reference is closer to a 5 mm crack than a kerb.** A 20 mm lip — brick edge,
+root heave, the kind of thing a pavement has every few metres — is already 3–4× that in N·s, and
+imparts real pitch rate a same-magnitude CoM impulse does not.
 
 ### Does the current design point survive it? (#142 AC4)
 
-**No — not by a wide margin, on this model.** Stated plainly as the issue requires. Any obstacle
-a board would actually meet on a footpath exceeds the envelope the delay budget is quoted at.
+**No — measured, not just derived.**
+`tests/test_cmd_envelope_reserve.py::test_criterion_a3_full_stick_during_a_kerb_strike_does_not_invert`
+(ADR-0011 criterion (a) entry 3) takes this model's own impulse and pitch rate for a 20 mm lip at
+hold speed, injects the equivalent force/torque into the closed-loop host, and the board inverts.
+`xfail(strict=True)`, attributed to ballast stroke / CoM height being undersized — **not fixable
+by input shaping**, and not the motor. This supersedes the earlier zero-delay-only derivation
+below: the closed loop, with the estimator and delay in the loop, was actually run against it.
 
-### Two caveats, pointing in OPPOSITE directions
-
-Quoting either alone would mislead, so both:
+### Two caveats, pointing in OPPOSITE directions — one is now closed
 
 1. **The wheel and step are rigid here; the real tyre is pneumatic.** A real tyre deforms over
    the edge and spreads the impulse over a longer window, so this **overstates `J`** — by how
-   much is a tyre-compliance question this repo cannot answer, because there is no tyre model.
-   **This is an upper bound on a rigid-wheel strike, and the gap is probably large.**
+   much is a tyre-compliance question this repo still cannot answer; there is no tyre model.
+   **Still open. This is an upper bound on a rigid-wheel strike, and the gap is probably large.**
+   `KERB_STRIKE_VALIDITY` in `plant.py` names the same gap explicitly.
 2. **A kerb acts at the contact patch; the sim's impulse acts through the CoM.**
    `ImpulseParams.application_height_m` defaults to 0.0 so the disturbance is a pure *linear*
-   impulse. A real kerb force lands ~0.83 m **below** the CoM, adding an angular impulse and
-   decelerating the base — and decelerating the base of an inverted pendulum pitches it further
-   forward, the opposite of the recovery input. **So feeding a kerb-derived `J` in as a CoM
-   impulse understates its severity.**
+   impulse with zero initial pitch rate by construction. **Closed, not just flagged:**
+   `kerb_strike_vs_com_impulse` derives the pitch rate a real strike imparts and states plainly
+   that comparing the two on N·s alone — which this section used to do — "matches them on the
+   channel that matters least." Pitch rate, not N·s, is the right currency, and §4's table above
+   now reports it directly rather than inverting a mismatched unit.
 
-Neither is quantified. **The honest reading is therefore a magnitude with its assumptions
-attached, not a blessed number** — and the direction of the residual is genuinely unknown,
-because (1) and (2) fight each other.
+Caveat (1) remains genuinely unquantified and is Sr. Mechanical & Systems' surface. Caveat (2) no
+longer is — **the direction of the residual used to be unknown because the two caveats fought
+each other; it no longer is, because (2) now has a number and a closed-loop measurement behind
+it, and that measurement alone already inverts the board.**
 
 ### What this changes, and what it does not
 
 - It does **not** justify lowering the envelope quietly. It says the envelope is currently
-  described by a number nobody derived, and that credible obstacles are outside it.
+  described by a number nobody derived, and that credible obstacles are outside it — now
+  confirmed in the closed loop, not only asserted from a zero-delay derivation.
 - It **does** give #132 a target: the retune should be scoped against a defended disturbance,
-  not against 20 N·s.
-- **The tyre model is now on the critical path**, not a nice-to-have. Caveat (1) is the single
-  largest uncertainty, and it sits on Sr. Mechanical & Systems' surface.
+  not against 20 N·s. #132 itself remains blocked on Sr. Mechanical & Systems' bench `kt` fit —
+  unaffected by this update.
+- **The tyre model is still on the critical path.** Caveat (1) is the single remaining
+  uncertainty in this section, and it still sits on Sr. Mechanical & Systems' surface.
 
-### Open, and owned elsewhere (#142 AC2)
+### AC2, landed (previously "open, owned elsewhere")
 
-**What is a kerb strike worth, in N·s, for this vehicle?** That is a plant and duty-cycle
-question, not a control-law one. Controls has supplied the geometry-to-impulse mapping and the
-measured envelope; **Sr. Mechanical & Systems owns the obstacle spec** — realistic kerb/lip
-heights for the intended riding surface, realistic approach speeds, and above all the tyre
-compliance that decides how much of caveat (1) survives.
-
-Until that lands, **20 N·s stays as the quoted reference with `inherited, underived` on its
-face** (§3), rather than being replaced by another undefended number.
+**What is a kerb strike worth, in N·s, for this vehicle?** Answered:
+`roles/sr-mechanical-systems/log/2026-07-31-kerb-strike-reference.md` and
+`sim/scenarios/plant.py::kerb_strike_impulse`/`kerb_strike_vs_com_impulse`, with tests in
+`tests/test_plant_kerb_strike.py`. **The inherited 20 N·s nominal is not conservative** — it is
+exceeded at every riding speed by even a modest lip, measured against the model's own lower
+bound. `20 N·s` stays as the quoted reference in §1–§3 above with `inherited, underived` on its
+face, since replacing it is #132's retune, not this section's call — but it is no longer an
+undefended guess as to whether that reference is adequate: it is not.
 
 ---
 
