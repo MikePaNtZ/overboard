@@ -262,12 +262,19 @@ def test_the_estimator_is_what_loses_the_hill_not_the_motor():
 
 
 def test_the_estimator_absorbs_the_slope_into_its_attitude_error():
-    """The predicted first-order mechanism, measured.
+    """The apparent-tilt-approaches-slope-angle result, measured -- **not** the
+    mechanism issue #228 found this docstring previously claimed for it.
 
-    `CommandFeedforward` attributes gravity-holding current to acceleration, so
-    the apparent-tilt error approaches the slope angle itself and the estimator
-    believes a board on a hill is level. Holding "level" on a hill means
-    accelerating down it.
+    `run()` never passes `estimator_accel_aiding` to the controller, so this
+    scenario runs on `RustController`'s own default, mode 1 (`WheelAccelEstimator`,
+    wheel odometry) -- not `CommandFeedforward` (mode 2), which the code here
+    does not configure. Forcing mode 2 on with the real shipped gain
+    (`ACCEL_FF_GAIN_M_S2_PER_A = 0.0584`) measures `est_error_over_slope` ≈ 0.036
+    at both grades below, nowhere near the ~0.8-0.84x this test actually gates
+    on -- so the retracted mechanism does not reproduce even under the
+    estimator it names. What in mode 1 actually produces the near-slope-angle
+    error is open; not re-derived here, see `sim/scenarios/hill.py`'s module
+    docstring.
     """
     for grade in (5.0, 10.0):
         m = run(HillParams(grade_pct=grade, v_ref_m_s=1.0, duration_s=SHORT)).metrics
@@ -275,7 +282,9 @@ def test_the_estimator_absorbs_the_slope_into_its_attitude_error():
         assert 0.6 < m.est_error_over_slope < 1.3, (
             f"{grade}% grade: estimator error was {m.est_error_over_slope:.2f}x the "
             f"slope angle ({m.pitch_est_rms_deg:.2f} deg vs {m.slope_angle_deg:.2f} deg). "
-            "The mechanism predicts ~1x; a value far from it means the mechanism moved."
+            "This band is a measured characterisation of mode 1's behaviour, not a "
+            "derivation from a known mechanism -- a value outside it means mode 1's "
+            "behaviour moved, re-derive rather than widen."
         )
 
 

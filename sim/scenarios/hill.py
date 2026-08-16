@@ -30,14 +30,31 @@ the good news it looks like. What actually breaks is *speed authority*:
 commanded 1.0 m/s down a 10% grade, the board finishes above 11 m/s, and the
 final speed is almost completely insensitive to the commanded speed.
 
-The mechanism is the one the handoff derived, and it survives the frame fix
-intact. `CommandFeedforward` predicts forward acceleration as `K_ff·I` and
-subtracts it from the accelerometer. On a slope, much of that current is
-fighting *gravity* rather than accelerating anything, so the feedforward
-attributes gravity-holding torque to acceleration. The resulting apparent-tilt
-error is, to first order, **the slope angle itself** — the estimator believes a
-board on a hill is level. Holding "level" on a hill means accelerating down it.
-Measured here: estimator RMS error tracks ≈0.87 × the slope angle across 5–20%.
+**Correction (issue #228): the paragraph below is what an earlier version of
+this file claimed, and it is wrong about which estimator produces the
+measured number.** `run()` never passes `estimator_accel_aiding` to
+`RustController`, so this scenario actually runs on `RustController`'s own
+default, **mode 1 (`WheelAccelEstimator`, wheel-odometry)** — `CommandFeedforward`
+(mode 2) is not configured here despite `estimator_tau_s`'s docstring below
+having claimed otherwise. Re-run with mode 2 forced on and the real shipped
+gain (`ACCEL_FF_GAIN_M_S2_PER_A = 0.0584`, from `host.rs`/`loop-profiler`):
+`est_error_over_slope` drops to ≈0.036 at both 5% and 10% grade, nowhere near
+the ≈0.8–0.84 this file actually measures under mode 1. So the mechanism
+described below does not reproduce even under the estimator it names — it is
+not merely misattributed, it is falsified as an explanation. What error
+mode 1 is actually attributing to slope-angle-sized tilt has **not been
+re-derived here**; that is open, flagged rather than guessed at.
+
+The original claim, kept for the record and as the thing now retracted:
+`CommandFeedforward` predicts forward acceleration as `K_ff·I` and subtracts
+it from the accelerometer. On a slope, much of that current is fighting
+*gravity* rather than accelerating anything, so the feedforward attributes
+gravity-holding torque to acceleration. The resulting apparent-tilt error is,
+to first order, **the slope angle itself** — the estimator believes a board on
+a hill is level. Holding "level" on a hill means accelerating down it.
+Measured here: estimator RMS error tracks ≈0.87 × the slope angle across 5–20%
+— **this number is still what mode 1 measures** (`test_hill.py`'s own
+5%/10% check: ≈0.81/0.84); only the causal story attached to it is retracted.
 
 So the gate is on **speed authority**, and nose strike is reported as the
 secondary, more violent outcome rather than the primary one. A scenario that
@@ -137,9 +154,14 @@ class HillParams:
     ballast_mass_kg: float = 70.0
     ballast_height_m: float = 0.75
     max_current_a: float = 40.0
-    #: Estimator crossover. The handoff's recommended config is tau = 2 s with
-    #: command feedforward, and this scenario defaults to it because a hill run
-    #: on truth pitch cannot show the failure that makes hills dangerous.
+    #: Estimator crossover, tau = 2 s. The handoff's recommended config paired
+    #: this with command feedforward, but `run()` below never passes
+    #: `estimator_accel_aiding` to the controller, so this scenario actually
+    #: runs on `RustController`'s own default, mode 1 (wheel odometry) --
+    #: corrected by issue #228, see the module docstring's mechanism note. A
+    #: hill run on truth pitch still can't show the failure that makes hills
+    #: dangerous, which is the reason a tau this long matters here regardless
+    #: of which aiding source ends up active.
     estimator_tau_s: float = 2.0
     use_estimator: bool = True
     #: 0 = commanded current, 1 = measured. Hardware must use 1; the default
