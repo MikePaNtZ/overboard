@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Runs ON THE PI, at boot, before overboard-firstboot. Shipped inside the
+# image (I1).
+#
+# rpi-image-gen's image-rpios layer sizes partition 2 to its BUILD-TIME
+# content -- currently ~651 MB -- with no knowledge of the card the image
+# will end up on. Left alone, a freshly flashed card boots 100% full: no
+# free space for the journal, for apt, or for anything else (#285), and the
+# image ships no partition tool to fix it from the Pi itself.
+#
+# growpart, NOT parted: verified in a loop-device rehearsal of this exact
+# scenario (grow the currently-mounted root partition live) that parted
+# refuses outright -- `parted -s -f resizepart` exits 1 on "Partition ...
+# is being used" even with --fix, because that prompt is a hard abort in
+# script mode, not one --fix answers. growpart is what cloud-init images
+# use for precisely this case (grow the mounted root partition at boot, no
+# reboot) and it succeeded in the same rehearsal. sfdisk is growpart's MBR
+# backend (this image's layout, per image/config/overboard.yaml) -- ships
+# in the `fdisk` package, not `cloud-guest-utils` itself.
+#
+# No completion marker: growpart and resize2fs each report their own
+# "nothing to do" state (NOCHANGE / "already ... blocks long"), so asking
+# them is more honest than a marker file could be -- a marker written before
+# the job is truly done is exactly the bug overboard-firstboot.service was
+# rewritten to avoid, and it would be worse here: a card stuck at 651 MB
+# permanently, not just missing credentials for one boot.
+set -euo pipefail
+
+log() { echo "overboard-rootfs-expand: $*"; }
+
+root_part="$(findmnt -n -o SOURCE /)"
+root_disk_name="$(lsblk -no PKNAME "$root_part" 2>/dev/null || true)"
+part_num="$(cat "/sys/class/block/$(basename "$root_part")/partition" 2>/dev/null || true)"
+
+if [ -z "$root_disk_name" ] || [ -z "$part_num" ]; then
+  log "ERROR: could not determine the root disk/partition number from '$root_part' -- rootfs NOT expanded"
+  exit 1
+fi
+root_disk="/dev/$root_disk_name"
+
+log "growing partition $part_num of $root_disk to fill the device"
+set +e
+growpart_out="$(growpart "$root_disk" "$part_num" 2>&1)"
+growpart_rc=$?
+set -e
+
+if [ "$growpart_rc" -eq 0 ]; then
+  log "partition grown: $growpart_out"
+elif printf '%s\n' "$growpart_out" | grep -q "NOCHANGE"; then
+  log "partition already fills the device: $growpart_out"
+else
+  log "ERROR: growpart could not resize partition $part_num on $root_disk -- rootfs NOT expanded: $growpart_out"
+  exit 1
+fi
+
+log "resizing the filesystem on $root_part"
+if resize2fs "$root_part"; then
+  log "complete - $(df -h / | tail -1)"
+else
+  log "WARNING: partition grown but the filesystem resize did not complete -- will retry on the next boot"
+fi
