@@ -53,6 +53,15 @@ mmdebstrap:
     # be inspected. Ship the tools the scripts actually call.
     - iw
     - rfkill
+    # network-manager above has nothing to drive the radio without this: the
+    # staged NetworkManager profiles reached `nmcli d` as `unavailable` and
+    # could never associate (issue #286, found on hardware 2026-08-16). The
+    # Debian package name is `wpasupplicant`, one word -- `wpa_supplicant`
+    # does not resolve.
+    - wpasupplicant
+    # Needed for any SPI encoder work, the next hardware step after CAN
+    # (issue #286).
+    - python3-spidev
     # Required by the STOCK image-rpios layer, not by us: its
     # `customize05-pkgs` hook shells out to apt inside the target, and a slim
     # base does not install apt there. Build round 4 died on
