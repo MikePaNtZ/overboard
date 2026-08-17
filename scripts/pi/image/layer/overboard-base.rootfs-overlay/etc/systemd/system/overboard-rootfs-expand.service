@@ -1,0 +1,29 @@
+# Grows the root partition and filesystem to fill the card, at boot.
+#
+# rpi-image-gen's image-rpios layer sizes partition 2 to its build-time
+# content (~651 MB today) and never grows it -- a fresh flash boots 100%
+# full and is unrecoverable headless (#285). Ordered before
+# overboard-firstboot so credential installation, journald, and everything
+# after it has room to work.
+[Unit]
+Description=Overboard root filesystem expansion
+After=local-fs.target
+Before=overboard-firstboot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/overboard-rootfs-expand
+
+# Generous but bounded, matching overboard-firstboot.service's own reasoning:
+# Type=oneshot disables TimeoutStartSec by default, so an unbounded resize
+# could wedge the boot with no rescue. `resize2fs` on a card this size is a
+# matter of seconds, not minutes.
+TimeoutStartSec=90
+
+# The journal is the only record on a headless board with no console user.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

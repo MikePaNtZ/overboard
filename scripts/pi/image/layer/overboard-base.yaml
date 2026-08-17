@@ -60,6 +60,19 @@ mmdebstrap:
     # bootstrapped. Ours holds the kernel with dpkg and does not need apt --
     # but the layer we compose with does, so it ships.
     - apt
+    # image-rpios sizes partition 2 to its build-time content and never
+    # grows it -- a fresh flash boots 100% full with no way to fix itself
+    # (#285). `overboard-rootfs-expand.service` uses `growpart` to grow the
+    # partition at boot; `resize2fs` (the filesystem half) is already on the
+    # card via e2fsprogs. NOT `parted`: a loop-device rehearsal of this exact
+    # scenario (growing the currently-mounted root partition) showed parted
+    # refuses outright even with `--fix`, where growpart -- what cloud-init
+    # images use for the identical case -- succeeds.
+    - cloud-guest-utils
+    # growpart's resize backend for an MBR table (this image's layout, per
+    # image/config/overboard.yaml) is sfdisk, which ships in `fdisk`, not in
+    # cloud-guest-utils itself.
+    - fdisk
 
   customize-hooks:
     # -----------------------------------------------------------------------
@@ -100,6 +113,11 @@ mmdebstrap:
 
     # enable-units rather than `chroot systemctl enable`: the idiomatic helper
     # here, and it works when the chroot's systemd cannot be run natively.
+    #
+    # rootfs-expand first: it must run before overboard-firstboot (the unit's
+    # own Before= says so), so credential install and everything after it has
+    # room on a freshly flashed card.
+    - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-rootfs-expand
     - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-firstboot
     - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-can0
     - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-vcan0
