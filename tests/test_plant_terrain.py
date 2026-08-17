@@ -251,6 +251,26 @@ def _roll_rotated_gravity(grade, steps):
 
     This is `hill.py`'s model, reproduced here directly rather than imported, so
     the cross-check does not depend on that module's scenario plumbing.
+
+    STARTING POSE MUST BE ROTATED TOO — issue #232
+    ------------------------------------------------
+    Rotating gravity by `phi` about +Y is only the SAME physics as tilting the
+    ground by `phi` if the board's own starting pose is carried through the
+    same rotation, `R_y(phi)`, that carries the tilted ground's normal
+    (`slope_normal(grade)`) onto the flat one, `(0, 0, 1)`. `tilt_ground`
+    leaves the board at world pitch 0 (see its docstring) — that is the
+    "case A" pose this function must match under `R_y(phi)`, which is axle
+    position `(r sin phi, 0, r cos phi)` and pitch `+phi`, NOT the flat
+    model's own resting pose `(0, 0, r)` at pitch 0.
+
+    Comparing the two formulations from those inequivalent starting poses is
+    exactly what this function did before this fix, and it was not a small
+    effect: at 10% grade it accounted for essentially the entire measured
+    disagreement (1.56% -> 0.001% once corrected here). It is a bug in the
+    COMPARISON, not in either formulation, and it does not apply to `hill.py`
+    itself — that scenario runs a closed-loop balance controller through a
+    2 s settle phase before scoring anything, which absorbs an initial-pose
+    mismatch that an uncontrolled free-roll cannot.
     """
     m = _model(0.0)
     phi = slope_rad(grade)
@@ -258,26 +278,51 @@ def _roll_rotated_gravity(grade, steps):
     d = mujoco.MjData(m)
     bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "frame")
     mujoco.mj_forward(m, d)
+    if grade != 0.0:
+        r = float(d.xpos[bid][2])
+        c, s = math.cos(phi), math.sin(phi)
+        jadr = m.body_jntadr[bid]
+        qadr = m.jnt_qposadr[jadr]
+        d.qpos[qadr : qadr + 3] = [r * s, 0.0, r * c]
+        d.qpos[qadr + 3 : qadr + 7] = [math.cos(phi / 2), 0.0, math.sin(phi / 2), 0.0]
+        mujoco.mj_forward(m, d)
     x0 = float(d.xpos[bid][0])
     out = []
     for _ in range(steps):
         mujoco.mj_step(m, d)
-        out.append(-(float(d.xpos[bid][0]) - x0))   # downhill is -x
+        out.append(-(float(d.xpos[bid][0]) - x0))   # downhill is -x, unchanged by the pose fix
     return np.asarray(out)
 
 
-@pytest.mark.parametrize("grade", [0.0, 10.0])
+@pytest.mark.parametrize("grade", GRADES)
 def test_tilted_ground_agrees_with_rotated_gravity(grade):
     """**The reason both models exist.**
 
     Two independent routes to a slope — one changes `opt.gravity`, the other
     changes the contact geometry — must produce the same free-roll down it. On
-    the flat they are the same model and must agree exactly; at a mid grade they
-    are genuinely different formulations and are allowed to differ only by
-    contact-solver detail.
+    the flat they are the same model and must agree exactly; at any other
+    grade they are genuinely different formulations and are allowed to differ
+    only by contact-solver detail.
 
     Senior Controls asked for this explicitly in issue #17: *"if they disagree,
     that disagreement is itself a finding and I would rather see it early."*
+
+    THE BOUND, MEASURED NOT ASSUMED — issue #232
+    ----------------------------------------------
+    Before this fix, the two models were compared from inequivalent starting
+    poses (see `_roll_rotated_gravity`), which manufactured most of the
+    measured disagreement and hid a smaller, genuine residual. With that
+    fixed, a 1%-resolution sweep from -20% to +20% grade tops out at 1.57%
+    (at -14.5%) and is NOT monotonic in the angle — it jumps around by grade
+    in a way a smooth physical effect would not. That signature matches
+    contact-mesh discretization (the tyre's collision hull engaging a tilted
+    plane vs. a tilted gravity vector is not bit-for-bit the same set of
+    active mesh facets), not a defect in either formulation, and it would
+    shrink with a finer tyre mesh rather than with tighter solver settings —
+    which is also why solver iterations and tolerance swept to zero effect in
+    the original report. 2% keeps ~25% margin over the measured worst case
+    without being widened to fit a still-broken comparison — the whole
+    GRADES sweep now runs through this assertion instead of just two points.
     """
     steps = 1500                      # 3 s at the model's 2 ms step
     a = _roll_tilted(grade, steps)
