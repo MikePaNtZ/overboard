@@ -1,0 +1,24 @@
+[Unit]
+Description=Overboard SSH host key generation
+# openssh-server's postinst generates host keys at PACKAGE-INSTALL time --
+# inside the build container, not on the card. Every image built from that
+# container would otherwise ship the identical private key, published as a
+# public CI artefact anyone can download and use to impersonate the board
+# (#284). overboard-base.yaml's customize-hooks strip /etc/ssh/ssh_host_*
+# from the built rootfs; this unit regenerates a fresh, unique pair before
+# sshd can start, which needs to exist for ssh.service to come up at all.
+#
+# `ssh-keygen -A` only creates key types that do not already exist, so this
+# is idempotent and safe to leave enabled on every boot -- unlike
+# overboard-firstboot.service there is no staged, single-use credential here
+# to shred, so no marker-file gating is needed.
+Before=ssh.service
+Wants=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=multi-user.target
