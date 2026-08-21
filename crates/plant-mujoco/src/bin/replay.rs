@@ -53,8 +53,10 @@ fn main() -> ExitCode {
         );
     }
     let ctrl: Vec<f64> = ctrl_bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().expect("chunks_exact(8)")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| f64::from_le_bytes(*c))
         .collect();
     if nu == 0 || !ctrl.len().is_multiple_of(nu) {
         panic!(
