@@ -142,36 +142,6 @@ change are not obviously comparable, and nothing in the data says so. Tracked in
 
 ---
 
-## What `pins.env` carries besides the kernel
-
-Updated 2026-08-22. Five packages were added after every one of them had to be
-installed **by hand** on the bench Pi, because the image did not carry it. Each
-absence stopped work at the bench:
-
-| Package | Why its absence hurts |
-|---|---|
-| `python3-spidev` | The AS5047U joint encoders read over SPI0 from Python. The recorder cannot open a device without it. |
-| `wpasupplicant` | **The worst one to omit.** NetworkManager's wifi backend. Without it the staged wifi profile is dropped in *silence*, the Pi never joins, and a headless board looks dead. |
-| `build-essential` | A linker. `rustup` installs happily without one and then cannot link, so the failure surfaces at first `cargo build`, not at install. Also supplies `linux/can.h`. |
-| `curl` | `rustup` is fetched with it, and the image ships no `wget` either — with neither there is no way to bootstrap a toolchain at all. |
-| `git` | No way to get a repository onto the Pi. |
-
-**Three image requirements are NOT packages** and nothing applies them yet;
-each was done by hand on the current card, and they are recorded in `pins.env`
-so the choice is made rather than forgotten:
-
-1. **The spidev udev rule.** The image ships none, so nodes come up
-   `root:root 0600` and membership of group `spi` does not help — the group
-   *on the node* is root. `sudo` is not the fix: root has a different
-   environment from the one the control loop runs in, and the difference
-   resurfaces later disguised as a sensor fault.
-2. **The Rust toolchain.** M4 needs a 1 kHz Rust loop on this host. Debian's
-   `rustc` is deliberately not used — the repositories carry
-   `rust-toolchain.toml`, which only rustup honours.
-3. **`cpufrequtils` does not exist in trixie.** Do not add it.
-
----
-
 ## 5. Close Q12 — which kernel the firmware actually selects
 
 The highest-value step available before the image exists.
