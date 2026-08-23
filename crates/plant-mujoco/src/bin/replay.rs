@@ -52,10 +52,11 @@ fn main() -> ExitCode {
             ctrl_bytes.len()
         );
     }
-    let ctrl: Vec<f64> = ctrl_bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().expect("chunks_exact(8)")))
-        .collect();
+    // as_chunks, not chunks_exact(8): the chunk size is a constant, so the
+    // array size is known at compile time and the try_into/expect disappears.
+    // clippy flags the older form, and CI treats warnings as errors.
+    let (whole, _rest) = ctrl_bytes.as_chunks::<8>();
+    let ctrl: Vec<f64> = whole.iter().copied().map(f64::from_le_bytes).collect();
     if nu == 0 || !ctrl.len().is_multiple_of(nu) {
         panic!(
             "plant-replay: ctrl file holds {} f64s, not a whole number of \
