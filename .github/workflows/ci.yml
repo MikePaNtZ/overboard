@@ -567,3 +567,99 @@ jobs:
           GH_TOKEN="$WEB_DISPATCH_TOKEN" gh api repos/MikePaNtZ/overboard-web/dispatches \
             -f event_type=sim-artifact \
             -F client_payload[commit]="${{ github.sha }}"
+
+  # ---------------------------------------------------------------------
+  # Issue #182 I5, first half only: prove the binary that will eventually
+  # run on the Pi actually cross-builds and publishes on every mainline
+  # merge. The other half of I5 -- an on-device pull/verify/restart script
+  # and its systemd unit -- is deliberately NOT here; see the PR that added
+  # this job for why (`board-app-driverless` links `libmujoco.so` dynamically
+  # and nothing yet provisions that library on a card, which is I7's
+  # question to answer, not this job's).
+  #
+  # Native ubuntu-24.04-arm, not a cross-compile off ubuntu-latest -- same
+  # choice pi-image.yml already made and documented: no QEMU, no cross
+  # linker to maintain, and it is the same architecture the mujoco wheel
+  # this build links against actually ships for (manylinux aarch64 wheels
+  # exist for 3.10.0, verified against PyPI's own JSON API).
+  publish-controller-binary:
+    needs: [rust]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    permissions:
+      contents: write        # rolling release upload
+    env:
+      ARTIFACT_SHA: >-
+        ${{ github.event_name == 'pull_request'
+            && github.event.pull_request.head.sha
+            || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same pin, same reason as the `rust` job: plant-mujoco's build.rs
+      # links against whatever `import mujoco` resolves to, so the linked
+      # library must come from the one pin the rest of the repo tests
+      # against, not whatever a bare `pip install mujoco` would resolve to.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install MuJoCo (native dep for plant-mujoco's build.rs)
+        run: pip install "$(grep '^mujoco==' requirements-sim.txt)"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The only binary with motion authority (ICD SS6.3, DR-MODE-1) --
+      # board-app-ridden is deliberately never shipped to run unattended.
+      - name: Build board-app-driverless (release, native aarch64)
+        run: cargo build --release -p board-app-driverless --bin board-app-driverless
+
+      - name: Stage artifact + checksum + provenance
+        run: |
+          mkdir -p dist
+          cp target/release/board-app-driverless \
+            "dist/board-app-driverless-aarch64-unknown-linux-gnu"
+          cd dist
+          sha256sum "board-app-driverless-aarch64-unknown-linux-gnu" \
+            > "board-app-driverless-aarch64-unknown-linux-gnu.sha256"
+          cat "board-app-driverless-aarch64-unknown-linux-gnu.sha256"
+          python3 - <<PY
+          import json, os
+          json.dump({
+              "schema": 1,
+              "commit": os.environ["ARTIFACT_SHA"],
+              "commit_short": os.environ["ARTIFACT_SHA"][:7],
+              "target": "aarch64-unknown-linux-gnu",
+              "bin": "board-app-driverless",
+              "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }, open("board-app-driverless-provenance.json", "w"), indent=2)
+          PY
+
+      # Rolling release = one stable URL an on-device update mechanism can
+      # poll, matching the sim-latest pattern below. Upsert rather than
+      # delete-then-create for the same reason as that job: a deleted-then-
+      # recreated release has a window where the download URL 404s.
+      #
+      # Master-push only, same guard as sim-latest's publish step -- a fork
+      # PR gets a read-only token and would fail the upload rather than skip
+      # it, and a per-commit preview channel is not asked for by issue #182's
+      # I5 (unlike the sim artifacts, nothing today would consume one).
+      - name: Publish to rolling controller-latest release
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view controller-latest >/dev/null 2>&1 || \
+            gh release create controller-latest \
+              --title "Latest controller binary (mainline)" \
+              --notes "Auto-published by CI. aarch64 release build of board-app-driverless, the motion-authority controller binary (ICD SS6.3). Not yet consumed on-device -- issue #182 I5/I7."
+          gh release edit controller-latest \
+            --notes "Auto-published by CI from ${{ github.sha }}. aarch64 release build of board-app-driverless. Not yet consumed on-device -- issue #182 I5/I7."
+          gh release upload controller-latest --clobber \
+            dist/board-app-driverless-aarch64-unknown-linux-gnu \
+            dist/board-app-driverless-aarch64-unknown-linux-gnu.sha256 \
+            dist/board-app-driverless-provenance.json
