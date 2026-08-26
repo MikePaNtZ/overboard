@@ -162,6 +162,44 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
+  # Issue #261. Every one of the six defects #249 found on real hardware was
+  # invisible to every job above: the build was green on the exact commit
+  # that produced a card that hung forever on first boot. This boots the
+  # built image and asserts it actually reaches multi-user.target with
+  # userspace configured the way overboard-firstboot promises to.
+  #
+  # NOT a required check, same reasoning as the rest of this file: it needs
+  # `build-image` to have produced an artefact first, and its own boot
+  # timeout makes it a further tens of minutes on top of that. NOT a
+  # hardware-fidelity test either -- see scripts/pi/qemu_boot_test.sh's own
+  # header for exactly what it does and does not prove. AC-5/AC-6 stay
+  # hardware-only.
+  # -------------------------------------------------------------------------
+  boot-test:
+    runs-on: ubuntu-24.04-arm
+    needs: [build-image]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-arm zstd xz-utils initramfs-tools-core
+
+      - name: Download the built image
+        uses: actions/download-artifact@v4
+        with:
+          name: overboard-image-${{ github.sha }}
+          path: /tmp/overboard-image
+
+      - name: Boot it and assert first-boot behaves
+        run: |
+          img="$(ls -1 /tmp/overboard-image/*.img.xz /tmp/overboard-image/*.img.zst /tmp/overboard-image/*.img 2>/dev/null | head -1)"
+          [ -n "$img" ] || { echo "FATAL: no image found in the downloaded artefact"; exit 1; }
+          bash scripts/pi/qemu_boot_test.sh --image "$img"
+
+  # -------------------------------------------------------------------------
   # I0 -- the D3 spike. Gates the builder choice for everything after it.
   #
   # Native arm64, no QEMU: `ubuntu-24.04-arm` hosted runners are GA and free
