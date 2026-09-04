@@ -100,6 +100,25 @@ else
   exit 1
 fi
 
+section "no baked-in ssh host keys (#284)"
+
+# openssh-server's postinst generates host keys at package-install time,
+# inside THIS build container -- every image built from a given container
+# state would otherwise ship the identical private key, published as a
+# public CI artefact anyone can download and use to impersonate the board.
+# overboard-base.yaml's customize-hooks strip them from the rootfs; this is
+# the second line of defence in case that hook is ever weakened without
+# anyone noticing until a card ships.
+leaked_keys="$(find "$WORK/work" -path '*/etc/ssh/ssh_host_*' 2>/dev/null)"
+if [ -n "$leaked_keys" ]; then
+  echo "FATAL: /etc/ssh/ssh_host_* found in the built rootfs -- every card"
+  echo "       flashed from this image would share the same SSH identity."
+  echo "$leaked_keys" | sed 's/^/         /'
+  exit 1
+else
+  echo "OK: no ssh_host_* files in the built rootfs"
+fi
+
 section "collect artefacts"
 mkdir -p "$OUT"
 rm -f "$OUT"/*

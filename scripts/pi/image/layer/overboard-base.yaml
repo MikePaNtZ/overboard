@@ -98,8 +98,26 @@ mmdebstrap:
       set -eu
       chroot "$1" dpkg-query -W -f='${Package}=${Version}\n' | sort > "$1/etc/overboard-packages.txt"
 
+    # -----------------------------------------------------------------------
+    # #284: openssh-server's postinst generates host keys at PACKAGE-INSTALL
+    # time, which just happened above, inside this build container -- so
+    # every image built from a given container state would ship the
+    # identical private key, published as a public CI artefact anyone can
+    # download and use to impersonate the board. Strip them here; the
+    # overboard-ssh-hostkeys unit (enabled below) generates a fresh, unique
+    # pair on the card's own first boot, before ssh.service can start.
+    # -----------------------------------------------------------------------
+    - |
+      set -eu
+      rm -f "$1"/etc/ssh/ssh_host_*
+      if ls "$1"/etc/ssh/ssh_host_* >/dev/null 2>&1; then
+        echo "FATAL: ssh host keys survived the strip hook" >&2
+        exit 1
+      fi
+
     # enable-units rather than `chroot systemctl enable`: the idiomatic helper
     # here, and it works when the chroot's systemd cannot be run natively.
     - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-firstboot
     - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-can0
     - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-vcan0
+    - $BDEBSTRAP_HOOKS/enable-units "$1" overboard-ssh-hostkeys
