@@ -7,6 +7,23 @@ constant upstream of the estimator, the regulator and the safety envelope,
 changing nothing else. This file is the evidence for that fix and, more
 importantly, the evidence for where it stops working.
 
+RE-VERIFIED 2026-09-14 AGAINST THE CORRECTED DRAG MODEL (ADR-0011 THIRD
+RATIFICATION, PR #237, 2026-08-06)
+-------------------------------------------------------------------------
+The third ratification declared every quantitative claim in ADR-0011 that
+predates 2026-08-05 -- including the (f1)/(f2) trim pin -- superseded and
+uncitable "until re-measured against the corrected model." That re-measurement
+had not been recorded anywhere as of 2026-09-14, though the `sim` CI gate had
+been silently re-running these exact assertions on every PR since #237 merged.
+Built `sim-host --release` and ran this file for real against current master:
+every pin reproduces to the precision already asserted below -- (f1) trim
+-2.5009 deg against the -2.501 +/- 0.10 deg pin, (f2) slope 41.967 A/unit, the
+2.868 s warning lead, and the kerb-strike 20 mm/201 deg/s xfail figure. The
+atan(a/g) ~= 1 rad/g residual ratio measured 1.028, so the slope did not move
+and ADR-0011's own branch for that case is "no re-derivation" -- these values
+stand as pinned. Full run transcript:
+`roles/senior-controls/log/2026-09-14-adr-0011-third-ratification-reverify.md`.
+
 WHAT THIS FILE ASSERTS, AND WHAT IT DELIBERATELY MARKS xfail
 ------------------------------------------------------------
 Three of ADR-0011's criteria pass on the DEPLOYED signal path and are asserted
