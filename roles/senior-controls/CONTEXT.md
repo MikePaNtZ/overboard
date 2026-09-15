@@ -11,20 +11,40 @@
 
 ### ADR-0011 balance loop (issue #207) — the launch hold
 
-- **Read ADR-0011's SECOND RATIFICATION before touching anything in the balance loop.** It
-  replaced criterion (f) with freeze-and-pin, and the old "accidental ~1 deg nose-down
-  estimator bias" reading is superseded. The residual is `atan(a/g)`, one radian per g, which
-  is the *same number* as the ADR's geometric 5.84 °/(m/s²) because it is the same physics.
-  The estimator is implementing the textbook balance-vehicle lean. **Do not "fix" it.**
-- **(f1)/(f2) landed (PR #215).** The trim is pinned at **−2.501° ± 0.10°** and the reserve's
-  derivation is pinned to it. The band is NOT a tolerance — it is the trim movement at which
-  `CMD_ENVELOPE_RESERVE` stops being derived from anything true. **If a pin fails, re-derive;
-  never re-baseline.** ±0.25° is a measured characterisation and must never become a threshold
-  (ADR-0011 says so explicitly).
-- **Open and unowned: the world-authoring asset rule.** ADR-0011 condition 2 requires it, the
-  measured inputs now exist (`tests/test_incline_tolerance.py`), and **no role has picked up
-  writing it.** Not my turf. This will sit still until somebody claims it — flagged on the
-  2026-08-01 board.
+- **Read ADR-0011's THIRD RATIFICATION (2026-08-06, PR #237) before touching anything in the
+  balance loop — it, not the second ratification, is current.** The drag model was wrong in
+  *shape* (pure-viscous, missing Coulomb rolling resistance and quadratic aero) and has been
+  replaced (`Crr = 0.02` Coulomb + `damping = 0.009` + a MuJoCo ellipsoid aero model). The third
+  ratification's own words: **every quantitative claim predating 2026-08-05 — margins, headroom,
+  the (f1)/(f2) trim pin, the 0.80 reserve derivation — is superseded, "not approximately still
+  valid," and may not be cited until re-measured against the corrected model.** The second
+  ratification's freeze-and-pin *structure* for (f) survives untouched; only its numbers do not.
+- **Re-verified 2026-09-14, this session, against current master (post-#237).** Ran
+  `tests/test_cmd_envelope_reserve.py` and `tests/test_incline_tolerance.py` for real (built
+  `sim-host --release`, pytest, not read-and-assume). Every pinned value reproduces to the
+  precision already asserted in those files: (f1) trim measured **−2.5009°** against the
+  **−2.501° ± 0.10°** pin; (f2) peak-demand slope **41.967 A/unit**; residual ratio (the
+  atan(a/g) ≈ 1 rad/g identity (f) depends on) **1.028** — the slope did not move, so per the
+  ADR's own branch ("if the slope moved, re-derive; if not, ...") **no re-derivation is
+  triggered**; (a)-1/(a)-2 headroom, the 2.868 s warning lead, and the kerb-strike 20 mm/201°/s
+  figure (still a strict xfail, per its move to the hardware gate) all reproduced too. Full
+  detail and every number: `roles/senior-controls/log/2026-09-14-adr-0011-third-ratification-reverify.md`.
+  **This clears the "re-measured against the corrected model" gate for (f1)/(f2) and for
+  condition 2's input numbers — not by asserting it, by having just run it.** It does not
+  re-open or re-derive anything; the pins stand as they were.
+- **(f1)/(f2) landed (PR #215), now reconfirmed above.** The trim is pinned at
+  **−2.501° ± 0.10°** and the reserve's derivation is pinned to it. The band is NOT a tolerance
+  — it is the trim movement at which `CMD_ENVELOPE_RESERVE` stops being derived from anything
+  true. **If a pin fails, re-derive; never re-baseline.** ±0.25° is a measured characterisation
+  and must never become a threshold (ADR-0011 says so explicitly).
+- **The world-authoring asset rule (issue #208, ADR-0011 condition 2) is open, and IS my
+  turf — a prior note here calling it "not my turf" was wrong.** `policy_check.py --who` says
+  `sim/scenarios/` and a new `sim/assets/terrain` path are both Senior Controls, ratified;
+  only `sim/models/` geometry/mass/friction and `plant.py`/`imperfections.py` are Mechanical's,
+  and #208 asks for a *validator*, not authored geometry. Its input numbers (the ~1 mm/20 mm
+  kerb figures and the incline-tolerance sweep) are exactly what the re-verification above just
+  confirmed still holds, so #208 is now unblocked. Not done here — kept out to keep this PR to
+  one thing — but the next Senior Controls session should pick it up rather than re-flag it.
 
 ### Standing facts worth not rediscovering
 

@@ -31,6 +31,15 @@ Measured: the board does not invert at any incline in the swept range, which
 reaches 24x the predicted 0.5 deg. Nothing in the ADR's acceptance matrix
 inverts on a hill.
 
+RE-VERIFIED 2026-09-14 AGAINST THE CORRECTED DRAG MODEL (ADR-0011 THIRD
+RATIFICATION, PR #237, 2026-08-06). That ratification superseded every
+quantitative claim in ADR-0011 predating 2026-08-05, this file's measurements
+included, until re-measured against the corrected model. Ran this file for
+real against current master: every test still passes, and the two headline
+numbers below reproduce exactly -- no inversion anywhere in the swept range,
+and the corridor-brake arrest boundary at 6.5 deg arrested / 7.0 deg outrun.
+Detail: `roles/senior-controls/log/2026-09-14-adr-0011-third-ratification-reverify.md`.
+
 WHAT ACTUALLY BINDS, WHICH IS NOT INVERSION
 --------------------------------------------
 The board is a pitch regulator. It has no position loop and no speed loop --
