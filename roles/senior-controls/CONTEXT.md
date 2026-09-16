@@ -21,10 +21,23 @@
   `CMD_ENVELOPE_RESERVE` stops being derived from anything true. **If a pin fails, re-derive;
   never re-baseline.** ±0.25° is a measured characterisation and must never become a threshold
   (ADR-0011 says so explicitly).
-- **Open and unowned: the world-authoring asset rule.** ADR-0011 condition 2 requires it, the
-  measured inputs now exist (`tests/test_incline_tolerance.py`), and **no role has picked up
-  writing it.** Not my turf. This will sit still until somebody claims it — flagged on the
-  2026-08-01 board.
+- **World-authoring asset rule — PR (this pass), issue #208.** The "not my turf" line that used
+  to be here was wrong: `python3 .github/policy_check.py --who sim/scenarios/terrain_validate.py`
+  and `--who sim/assets/terrain` both return **Senior Controls [Ratified]** via the generic
+  `/sim/` rule, independently confirmed, not assumed. Implemented as
+  `sim/scenarios/terrain_validate.py` (a heightfield step/slope check) +
+  `tests/test_terrain_validate.py` + one example asset under `sim/assets/terrain/`. Both default
+  limits are set **inside**, not equal to, the measured figures they cite (half the ~1 mm
+  calm-point kerb figure for step height; well inside both the 6.5° corridor-arrest boundary and
+  the 8%-grade estimator ceiling for slope) — per ADR-0011's own instruction that the margin is
+  this role's to judge, not to restate the boundary itself. Run-out length (a slope that is
+  individually harmless but runs long enough to build unbounded speed) is **not** modelled —
+  flagged as a follow-up, not silently assumed away.
+  **Also worth knowing:** PR #295 (open, not yet merged as of this pass) claims ADR-0011 has a
+  THIRD ratification (2026-08-06, PR #237) that superseded the second one this file used to cite,
+  and that it re-verified the (f1)/(f2) pins and condition-2's input numbers against it. Not
+  independently re-checked here — this pass only needed and only verified the turf claim above —
+  so treat that framing as PR #295's claim until it lands, not yet restated as fact in this file.
 
 ### Standing facts worth not rediscovering
 
