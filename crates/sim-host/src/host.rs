@@ -485,6 +485,7 @@ fn write_model_with_kerb(
     max_current_a: Option<f32>,
     variation: PlantVariation,
     smooth_wheel_contact: bool,
+    pad_solref_s: f64,
 ) -> Result<PathBuf, HostError> {
     let src = rider_model_path();
     let xml = std::fs::read_to_string(&src).map_err(|e| {
@@ -675,6 +676,28 @@ fn write_model_with_kerb(
             )));
         }
         xml = xml.replace(from, r#"<geom name="wheel_geom" contype="2" conaffinity="2" "#);
+        // The nose and tail pads ride the same plate. On the heightfield a
+        // dragged pad caught every grid seam: touch, jump, touch, with 10 kN
+        // spikes under a 100 kg rider. The pads sit 0.41 m from the axle, and
+        // on a 60 m vertical curve the plate is within 1.3 mm of the road
+        // there. Cost: the pads no longer hit kerbs; --hfield-wheel-contact
+        // restores both for kerb studies.
+        for pad in ["front_bumper_geom", "rear_bumper_geom"] {
+            let from = format!(r#"<geom name="{pad}" "#);
+            if xml.matches(&from).count() != 1 {
+                return Err(HostError::Io(std::io::Error::other(format!(
+                    "sim-host: smooth contact could not find {pad} to splice"
+                ))));
+            }
+            // Pad contact time constant (`--pad-solref`): MuJoCo's default 0.02 s
+            // is a near-rigid pad, and a dragged tail then taps at about 16 Hz
+            // with 8.6 kN spikes. 0.05 s stands in for a plastic or urethane
+            // pad (spikes 4 kN). The stopping distance is the same for both.
+            xml = xml.replace(
+                &from,
+                &format!(r#"<geom name="{pad}" contype="2" conaffinity="2" solref="{pad_solref_s} 1" "#),
+            );
+        }
         let th = crate::ground::PLATE_HALF_THICKNESS_M;
         let half = crate::ground::PLATE_HALF_SIZE_M;
         let plate = format!(
@@ -1755,6 +1778,9 @@ pub struct HostConfig {
     /// [`crate::ground`]). Only for kerb studies, where the tire must hit
     /// the kerb face; the heightfield contact chatters.
     pub hfield_wheel_contact: bool,
+    /// `--pad-solref S`: contact time constant of the nose and tail pads on
+    /// the smooth plate, s (default 0.05: a plastic or urethane pad).
+    pub pad_solref_s: f64,
     /// `--tail-brake`: a tail-pad strike does not end the run. Leaning back
     /// onto the tail is a deliberate, safe way to brake; only a nose strike
     /// (the rider goes over the front) or a large tilt is a terminating event.
@@ -2009,6 +2035,7 @@ impl Default for HostConfig {
             grade_course: None,
             hfield_wheel_contact: false,
             tail_brake: false,
+            pad_solref_s: 0.05,
             tail_friction: None,
             authority_margin: MarginMode::Off,
             rider_reacts: false,
@@ -2307,6 +2334,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             cfg.max_current_a,
             variation,
             !cfg.hfield_wheel_contact,
+            cfg.pad_solref_s,
         )?)
     } else {
         None

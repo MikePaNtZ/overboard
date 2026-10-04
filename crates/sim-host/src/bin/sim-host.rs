@@ -128,6 +128,14 @@ fn main() -> ExitCode {
                 cfg.rider_reacts = true;
                 i += 1;
             }
+            "--pad-solref" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --pad-solref needs a number (seconds)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.pad_solref_s = x;
+                i += 2;
+            }
             "--tail-brake" => {
                 cfg.tail_brake = true;
                 i += 1;

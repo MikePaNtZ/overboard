@@ -344,8 +344,8 @@ def fig5(out):
     share = np.convolve(on, np.ones(100) / 100.0, mode='same')  # 0.2 s at 500 Hz
     ax2.fill_between(s, 0, share, color=TAIL, alpha=0.6, lw=0, zorder=2)
     ax2.plot(s, share, color=TAIL, lw=1.2, zorder=3)
-    ax2.text(0.03, 0.75, 'force not shown: the tail-pad contact on the road model\n'
-             'chatters (a sim artefact, not yet fixed)', transform=ax2.transAxes,
+    ax2.text(0.03, 0.75, 'force not shown: with a passive rider the tail taps the road\n'
+             '(about 16 Hz); the peak force depends on the pad model, the stop does not', transform=ax2.transAxes,
              color=MUTED, fontsize=8, ha='left', va='center')
     for ax in (ax1, ax2):
         ax.axvline(s[iw], color=WARN, lw=0.8, ls=':', zorder=1)
