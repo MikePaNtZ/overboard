@@ -47,7 +47,7 @@ RANGES = {
     'kt_scale': (0.85, 1.15),
 }
 NOMINAL = dict(rider_kg=70.0, grade_pct=0.0, v_target=3.0, v_start=0.0, amps=40.0, kt_scale=1.0)
-BOARD_KG = 13.0      # board alone: the sim's 83 kg total less the 70 kg ballast
+BOARD_KG = 13.0      # board alone in the model; --board-kg changes it (sim-host --board-mass)
 RUN_IN_M, GRADE_M = 10.0, 80.0
 S_END = RUN_IN_M + GRADE_M - 2.0   # "reached the end" (s = 90 - x)
 WINDOW = (14.0, 88.0)              # on-grade window for speed (energy: constant grade only)
@@ -124,7 +124,8 @@ def run_one(k, p, out, port, ground):
         with open(log_path, 'w') as log:
             subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False)
     keys = list(RANGES) + (['tail_mu'] if 'tail_mu' in p else [])
-    return dict(run=name, **{key: p[key] for key in keys}, **analyse(csv_path, log_path, p, ground))
+    return dict(run=name, **{key: p[key] for key in keys}, board_kg=BOARD_KG,
+                **analyse(csv_path, log_path, p, ground))
 
 
 def analyse(csv_path, log_path, p, ground='plane'):
@@ -234,10 +235,15 @@ def main():
     ap.add_argument('--ground', choices=['plane', 'hfield'], default='plane')
     ap.add_argument('--host-arg', action='append', default=[], help='extra sim-host flag; repeatable')
     ap.add_argument('--port-base', type=int, default=9000, help='UDP ports; separate parallel sweeps')
+    ap.add_argument('--board-kg', type=float, help='board mass without rider (model: 13 kg)')
     ap.add_argument('--tail-brake', action='store_true',
                     help='tail pad brakes (no handoff); samples tail friction too')
     args = ap.parse_args()
     EXTRA_ARGS.extend(args.host_arg)
+    if args.board_kg:
+        global BOARD_KG
+        BOARD_KG = args.board_kg
+        EXTRA_ARGS.extend(['--board-mass', f"{args.board_kg}"])
     out = Path(args.out).resolve()
     (out / 'runs').mkdir(parents=True, exist_ok=True)
     (out / 'passive.csv').write_text("0,300,0,0,0,passive rider\n")

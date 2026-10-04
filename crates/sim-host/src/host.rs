@@ -590,6 +590,30 @@ fn write_model_with_kerb(
         );
     }
 
+    if let Some(board) = variation.board_mass_kg {
+        let frame = 8.0 + (board - 13.0);
+        if frame <= 0.5 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --board-mass must be above 5.5 kg (wheel and carrier alone are 5 kg)",
+            )));
+        }
+        let from = r#"<inertial pos="0 0 -0.03" mass="8.0" diaginertia="0.040 0.400 0.420"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --board-mass could not find the frame inertial to splice",
+            )));
+        }
+        let k = frame / 8.0;
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<inertial pos="0 0 -0.03" mass="{frame:.3}" diaginertia="{:.4} {:.4} {:.4}"/>"#,
+                0.040 * k,
+                0.400 * k,
+                0.420 * k
+            ),
+        );
+    }
     if let Some(m) = variation.rider_mass_kg {
         // Same inertia formula as the model's 70 kg ballast (mass * 0.15, 0.15, 0.08).
         let from = r#"<inertial pos="0 0 0" mass="70.0" diaginertia="10.5000 10.5000 5.6000"/>"#;
@@ -1720,6 +1744,8 @@ pub struct HostConfig {
     /// controller keeps its nominal 70 kg and Kt = 0.7 N.m/A design.
     /// Rider (ballast) mass, kg (`--rider-mass`). `None`: the model's 70 kg.
     pub rider_mass_kg: Option<f64>,
+    /// Board mass without rider, kg (`--board-mass`). `None`: the model's 13 kg.
+    pub board_mass_kg: Option<f64>,
     /// True motor Kt as a fraction of the nominal 0.7 N.m/A (`--kt-scale`).
     pub kt_scale: Option<f64>,
     /// Forward speed set at t = 1 s, m/s (`--start-speed`). `None`: from rest.
@@ -1811,6 +1837,11 @@ const RIDER_REACTION_S: f64 = 0.5;
 /// The plant-only changes a Monte Carlo run splices into the model.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlantVariation {
+    /// Whole board without rider, kg (`--board-mass`). The model's board is
+    /// 13 kg (frame 8, wheel 4.5, carrier 0.5); the extra goes into the frame
+    /// at its own centre of mass (battery and controller in the deck), and
+    /// the frame inertia scales with it.
+    pub board_mass_kg: Option<f64>,
     pub rider_mass_kg: Option<f64>,
     pub kt_scale: Option<f64>,
     pub tail_friction: Option<f64>,
@@ -1972,6 +2003,7 @@ impl Default for HostConfig {
             max_current_a: None,
             speed_hold_m_s: None,
             rider_mass_kg: None,
+            board_mass_kg: None,
             kt_scale: None,
             start_speed_m_s: None,
             grade_course: None,
@@ -2257,6 +2289,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         None => None,
     };
     let variation = PlantVariation {
+        board_mass_kg: cfg.board_mass_kg,
         rider_mass_kg: cfg.rider_mass_kg,
         kt_scale: cfg.kt_scale,
         tail_friction: cfg.tail_friction,

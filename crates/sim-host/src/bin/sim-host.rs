@@ -156,7 +156,7 @@ fn main() -> ExitCode {
                 });
                 i += 2;
             }
-            "--rider-mass" | "--kt-scale" | "--start-speed" => {
+            "--rider-mass" | "--board-mass" | "--kt-scale" | "--start-speed" => {
                 let flag = args[i].clone();
                 let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
                     eprintln!("sim-host: {flag} needs a number");
@@ -164,6 +164,7 @@ fn main() -> ExitCode {
                 };
                 match flag.as_str() {
                     "--rider-mass" => cfg.rider_mass_kg = Some(x),
+                    "--board-mass" => cfg.board_mass_kg = Some(x),
                     "--kt-scale" => cfg.kt_scale = Some(x),
                     _ => cfg.start_speed_m_s = Some(x),
                 }

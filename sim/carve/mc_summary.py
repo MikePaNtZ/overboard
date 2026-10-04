@@ -20,10 +20,14 @@ R, STRIKE_DEG, BOARD_KG = 0.1454, 18.6, 13.0
 
 def envelope(r):
     m = float(r['rider_kg'])
+    board = float(r.get('board_kg') or BOARD_KG)
     a = np.arctan(abs(float(r['grade_pct'])) / 100)
-    L = (0.75 * m + 0.135) / (BOARD_KG + m)
+    # Centre of mass above the axle: rider + carrier at 0.75 m, frame at -0.03 m
+    # (the frame takes any board mass above the model's 13 kg).
+    frame = 8.0 + (board - BOARD_KG)
+    L = (0.75 * (m + 0.5) - 0.03 * frame) / (board + m)
     geo = STRIKE_DEG - np.degrees(a + np.arcsin(R * np.sin(a) / L))
-    i_ss = (BOARD_KG + m) * 9.81 * np.sin(a) * R / (0.7 * float(r['kt_scale']))
+    i_ss = (board + m) * 9.81 * np.sin(a) * R / (0.7 * float(r['kt_scale']))
     return geo, float(r['amps']) / max(i_ss, 1e-6)
 
 

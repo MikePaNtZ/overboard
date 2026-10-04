@@ -21,6 +21,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 COURSE = Path('/Users/mike/projects/overboard-viz/out/carve-lab/data/courses/city_hill')
 COURSE_LEN_M = 182.0
+BOARD_KG = 17.9      # the real board without rider (hardware track, X7 Long Range kit)
 
 SPAWN_X_M = 88.0     # course start (s = 2 m); s = 90 - x along the street
 END_S_M = 184.0      # tracks are trimmed here: the end of the street, plus 2 m
@@ -57,7 +58,7 @@ def run(name, spec, out, port):
     cmd = [os.environ['SIMHOST'], '--lean-steer', '--estimator-aiding', 'grade-aware',
            '--max-current', f"{amps}", '--speed-hold', f"{v}", '--rider-mass', f"{kg}",
            '--kt-scale', f"{kt}", '--spawn-x', str(SPAWN_X_M), '--terrain', str(COURSE / 'course_hfield.bin'),
-           '--tail-brake', '--tail-friction', '0.6',
+           '--tail-brake', '--tail-friction', '0.6', '--board-mass', f"{BOARD_KG}",
            '--schedule-csv', str(d / 'passive.csv'), '--duration-secs', '3600',
            '--max-sim-secs', f"{secs:.0f}", '--free-run',
            '--state-out-addr', f"127.0.0.1:{port}", '--input-in-addr', f"127.0.0.1:{port + 1}",
