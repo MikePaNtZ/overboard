@@ -21,13 +21,23 @@ R, STRIKE_DEG, BOARD_KG = 0.1454, 18.6, 13.0
 def envelope(r):
     m = float(r['rider_kg'])
     board = float(r.get('board_kg') or BOARD_KG)
-    a = np.arctan(abs(float(r['grade_pct'])) / 100)
-    # Centre of mass above the axle: rider + carrier at 0.75 m, frame at -0.03 m
-    # (the frame takes any board mass above the model's 13 kg).
-    frame = 8.0 + (board - BOARD_KG)
-    L = (0.75 * (m + 0.5) - 0.03 * frame) / (board + m)
-    geo = STRIKE_DEG - np.degrees(a + np.arcsin(R * np.sin(a) / L))
-    i_ss = (board + m) * 9.81 * np.sin(a) * R / (0.7 * float(r['kt_scale']))
+    g = float(r['grade_pct']) / 100
+    a = np.arctan(abs(g))
+    r_w = float(r.get('radius') or R)
+    if r.get('com_x'):
+        # X7 plant: frame body = board - rotating wheel - 0.5 kg carrier, with
+        # its CoM at (com_x behind, com_z up) from the axle.
+        frame = board - float(r['wheel_kg']) - 0.5
+        cx, cz = float(r['com_x']), float(r['com_z'])
+    else:
+        # Model plant: the frame takes any board mass above 13 kg, at -0.03 m.
+        frame, cx, cz = 8.0 + (board - BOARD_KG), 0.0, -0.03
+    L = (0.75 * (m + 0.5) + cz * frame) / (board + m)
+    # A CoM behind the axle needs a constant forward (nose-down) trim: it
+    # costs nose clearance on a climb and gives tail clearance on a descent.
+    trim = np.degrees(np.arcsin(np.clip(frame * cx / ((board + m) * L), -1, 1)))
+    geo = STRIKE_DEG - np.degrees(a + np.arcsin(r_w * np.sin(a) / L)) - (trim if g > 0 else -trim)
+    i_ss = (board + m) * 9.81 * np.sin(a) * r_w / (0.7 * float(r['kt_scale']))
     return geo, float(r['amps']) / max(i_ss, 1e-6)
 
 

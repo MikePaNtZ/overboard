@@ -21,7 +21,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 COURSE = Path('/Users/mike/projects/overboard-viz/out/carve-lab/data/courses/city_hill')
 COURSE_LEN_M = 182.0
-BOARD_KG = 17.9      # the real board without rider (hardware track, X7 Long Range kit)
+# Plant: the X7 build (sim-host --plant x7, 18.4 kg board). Each run still sets
+# its own --kt-scale and --max-current.
 
 SPAWN_X_M = 88.0     # course start (s = 2 m); s = 90 - x along the street
 END_S_M = 184.0      # tracks are trimmed here: the end of the street, plus 2 m
@@ -30,7 +31,7 @@ CLIMB_SPAWN_X_M = -5.0  # s = 95 m: on the flat intersection, before the 12 % cl
 # name: (rider_kg, kt_scale, max_current_a, v_target, extra sim-host flags)
 RUNS = {
     # Mike, 95 kg, on the hardware session's target motor (60 A at Kt 0.7).
-    'mike_95kg_4ms': (95.0, 1.0, 60.0, 4.0, ['--authority-margin', 'warn']),
+    'mike_95kg_4ms': (95.0, 0.658 / 0.7, 90.0, 4.0, ['--authority-margin', 'warn']),
     # The Monte Carlo hazard: heavy rider, weak motor, the 12 % climb.
     'heavy_weak_no_warning': (110.0, 0.88, 35.0, 4.0, []),
     'heavy_weak_rider_reacts': (110.0, 0.88, 35.0, 4.0,
@@ -64,7 +65,7 @@ def run(name, spec, out, port):
     cmd = [os.environ['SIMHOST'], '--lean-steer', '--estimator-aiding', 'grade-aware',
            '--max-current', f"{amps}", '--speed-hold', f"{v}", '--rider-mass', f"{kg}",
            '--kt-scale', f"{kt}", '--spawn-x', str(SPAWN_X_M), '--terrain', str(COURSE / 'course_hfield.bin'),
-           '--tail-brake', '--tail-friction', '0.6', '--board-mass', f"{BOARD_KG}",
+           '--tail-brake', '--tail-friction', '0.6', '--plant', 'x7',
            '--schedule-csv', str(d / 'passive.csv'), '--duration-secs', '3600',
            '--max-sim-secs', f"{secs:.0f}", '--free-run',
            '--state-out-addr', f"127.0.0.1:{port}", '--input-in-addr', f"127.0.0.1:{port + 1}",

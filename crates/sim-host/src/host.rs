@@ -548,7 +548,9 @@ fn write_model_with_kerb(
         //
         // The extra clearance means it settles DOWN onto the road over the
         // first few steps rather than being pushed up out of it.
-        let spawn_z = FRAME_SPAWN_Z_M + t.z_at_spawn_m + TERRAIN_SPAWN_CLEARANCE_M;
+        let spawn_z = variation.wheel_radius_m.unwrap_or(FRAME_SPAWN_Z_M)
+            + t.z_at_spawn_m
+            + TERRAIN_SPAWN_CLEARANCE_M;
         let spawn_from = format!("<body name=\"frame\" pos=\"0 0 {FRAME_SPAWN_Z_M}\">");
         if !xml.contains(&spawn_from) {
             return Err(HostError::Io(std::io::Error::other(format!(
@@ -591,29 +593,82 @@ fn write_model_with_kerb(
         );
     }
 
-    if let Some(board) = variation.board_mass_kg {
-        let frame = 8.0 + (board - 13.0);
+    if variation.touches_frame() {
+        // Board = frame body + rotating wheel + 0.5 kg shift carrier.
+        let wheel = variation.wheel_rot_kg.unwrap_or(4.5);
+        let board = variation.board_mass_kg.unwrap_or(13.0);
+        let frame = board - wheel - 0.5;
         if frame <= 0.5 {
             return Err(HostError::Io(std::io::Error::other(
-                "sim-host: --board-mass must be above 5.5 kg (wheel and carrier alone are 5 kg)",
+                "sim-host: the board mass leaves no frame mass (board - wheel - 0.5 kg <= 0.5 kg)",
             )));
         }
         let from = r#"<inertial pos="0 0 -0.03" mass="8.0" diaginertia="0.040 0.400 0.420"/>"#;
         if xml.matches(from).count() != 1 {
             return Err(HostError::Io(std::io::Error::other(
-                "sim-host: --board-mass could not find the frame inertial to splice",
+                "sim-host: --board-mass/--plant could not find the frame inertial to splice",
             )));
         }
-        let k = frame / 8.0;
+        let k = variation.frame_inertia_scale.unwrap_or(frame / 8.0);
+        let (cx, cz) = variation.frame_com_m.unwrap_or((0.0, -0.03));
         xml = xml.replace(
             from,
             &format!(
-                r#"<inertial pos="0 0 -0.03" mass="{frame:.3}" diaginertia="{:.4} {:.4} {:.4}"/>"#,
+                r#"<inertial pos="{cx:.4} 0 {cz:.4}" mass="{frame:.3}" diaginertia="{:.4} {:.4} {:.4}"/>"#,
                 0.040 * k,
                 0.400 * k,
                 0.420 * k
             ),
         );
+    }
+    if variation.wheel_rot_kg.is_some() || variation.wheel_spin_kgm2.is_some() {
+        let from = r#"<inertial pos="0 0 0" mass="4.5" diaginertia="0.0635 0.0595 0.0635"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --plant could not find the wheel inertial to splice",
+            )));
+        }
+        let m = variation.wheel_rot_kg.unwrap_or(4.5);
+        let spin = variation.wheel_spin_kgm2.unwrap_or(0.0595);
+        // Keep the model's ratio of the transverse to the spin inertia.
+        let side = spin * 0.0635 / 0.0595;
+        xml = xml.replace(
+            from,
+            &format!(r#"<inertial pos="0 0 0" mass="{m:.3}" diaginertia="{side:.5} {spin:.5} {side:.5}"/>"#),
+        );
+    }
+    if let Some(r) = variation.wheel_radius_m {
+        let mut n = 0;
+        for (from, to) in [
+            (
+                r#"<geom name="wheel_geom" type="ellipsoid" size="0.1454 0.12 0.1454""#.to_string(),
+                format!(r#"<geom name="wheel_geom" type="ellipsoid" size="{r:.4} 0.12 {r:.4}""#),
+            ),
+            (
+                r#"<geom name="wheel_geom" type="cylinder" size="0.1454 0.15""#.to_string(),
+                format!(r#"<geom name="wheel_geom" type="cylinder" size="{r:.4} 0.15""#),
+            ),
+            (
+                r#"<geom name="wheel_geom" type="sphere" size="0.1454""#.to_string(),
+                format!(r#"<geom name="wheel_geom" type="sphere" size="{r:.4}""#),
+            ),
+        ] {
+            if xml.contains(&from) {
+                xml = xml.replace(&from, &to);
+                n += 1;
+            }
+        }
+        if n != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --plant radius could not find exactly one wheel geom to splice",
+            )));
+        }
+        // Spawn on the ground, not inside it: on the plane the frame sits at
+        // the axle height. (On terrain the spawn splice above uses the radius.)
+        let plane_spawn = format!(r#"<body name="frame" pos="0 0 {FRAME_SPAWN_Z_M}">"#);
+        if xml.contains(&plane_spawn) {
+            xml = xml.replace(&plane_spawn, &format!(r#"<body name="frame" pos="0 0 {r:.4}">"#));
+        }
     }
     if let Some(m) = variation.rider_mass_kg {
         // Same inertia formula as the model's 70 kg ballast (mass * 0.15, 0.15, 0.08).
@@ -1769,6 +1824,9 @@ pub struct HostConfig {
     pub rider_mass_kg: Option<f64>,
     /// Board mass without rider, kg (`--board-mass`). `None`: the model's 13 kg.
     pub board_mass_kg: Option<f64>,
+    /// `--plant SPEC` (see [`parse_plant_spec`]); its values apply first, then
+    /// `--board-mass`, `--kt-scale` and `--rider-mass` override them.
+    pub plant: Option<PlantVariation>,
     /// True motor Kt as a fraction of the nominal 0.7 N.m/A (`--kt-scale`).
     pub kt_scale: Option<f64>,
     /// Forward speed set at t = 1 s, m/s (`--start-speed`). `None`: from rest.
@@ -1871,6 +1929,82 @@ pub struct PlantVariation {
     pub rider_mass_kg: Option<f64>,
     pub kt_scale: Option<f64>,
     pub tail_friction: Option<f64>,
+    /// `--plant`: the rotating part of the wheel (rotor can and tyre), kg.
+    pub wheel_rot_kg: Option<f64>,
+    /// `--plant`: wheel spin inertia about the axle, kg m^2.
+    pub wheel_spin_kgm2: Option<f64>,
+    /// `--plant`: frame centre of mass from the axle, m: x positive BEHIND
+    /// (board forward is -X), z positive up.
+    pub frame_com_m: Option<(f64, f64)>,
+    /// `--plant`: frame inertia, as a scale on the model's
+    /// diag(0.040, 0.400, 0.420) kg m^2. `None` scales with the frame mass.
+    pub frame_inertia_scale: Option<f64>,
+    /// `--plant`: tyre rolling radius, m (model 0.1454). The controller keeps
+    /// its 0.1454 m belief, so a different value is a plant error.
+    pub wheel_radius_m: Option<f64>,
+}
+
+impl PlantVariation {
+    /// True when the frame inertial must be rewritten.
+    fn touches_frame(&self) -> bool {
+        self.board_mass_kg.is_some()
+            || self.wheel_rot_kg.is_some()
+            || self.frame_com_m.is_some()
+            || self.frame_inertia_scale.is_some()
+    }
+}
+
+/// The Fungineers X7 / Superflux HT / Thor301 build (hardware track,
+/// 2026-10-04; V = vendor, M = measured by others, I = inferred). The board
+/// is 18.4 kg (I: 17.9 kg vendor kit + 0.5 kg of our parts). Of the 7.5 kg
+/// wheel assembly (I), the rotor can and tyre (4.5 kg, I) turn; the stator
+/// stays with the frame. Frame CoM 0.03 m behind the axle (heavier rear
+/// pack) and 0.15 m above the ground (I); with the stator at the axle that
+/// is (0.0244, 0.003) m from the axle for the 13.4 kg frame body. Frame
+/// pitch inertia 0.47 kg m^2 (I). Tyre radius 0.146 m (V). Kt 0.658 N.m/A
+/// (M, motor wizard), i.e. 0.94 of the controller's 0.7 belief.
+pub fn plant_x7() -> PlantVariation {
+    PlantVariation {
+        board_mass_kg: Some(18.4),
+        rider_mass_kg: None,
+        kt_scale: Some(0.658 / 0.7),
+        tail_friction: None,
+        wheel_rot_kg: Some(4.5),
+        wheel_spin_kgm2: Some(0.045),
+        frame_com_m: Some((0.0244, 0.003)),
+        frame_inertia_scale: Some(0.47 / 0.400),
+        wheel_radius_m: Some(0.146),
+    }
+}
+
+/// Parses `--plant SPEC`: `x7`, optionally followed by `,key=value`
+/// overrides (board_kg, wheel_kg, wheel_spin, com_x, com_z, frame_i, radius,
+/// kt). A spec without `x7` overrides the shared model's values.
+pub fn parse_plant_spec(spec: &str) -> Result<PlantVariation, String> {
+    let mut v = PlantVariation::default();
+    for (i, part) in spec.split(',').map(str::trim).filter(|p| !p.is_empty()).enumerate() {
+        if part == "x7" {
+            if i != 0 {
+                return Err("--plant: 'x7' must come first".into());
+            }
+            v = plant_x7();
+            continue;
+        }
+        let (k, val) = part.split_once('=').ok_or(format!("--plant: '{part}' is not key=value"))?;
+        let x: f64 = val.parse().map_err(|_| format!("--plant: '{val}' is not a number"))?;
+        match k {
+            "board_kg" => v.board_mass_kg = Some(x),
+            "wheel_kg" => v.wheel_rot_kg = Some(x),
+            "wheel_spin" => v.wheel_spin_kgm2 = Some(x),
+            "com_x" => v.frame_com_m = Some((x, v.frame_com_m.map_or(-0.03, |c| c.1))),
+            "com_z" => v.frame_com_m = Some((v.frame_com_m.map_or(0.0, |c| c.0), x)),
+            "frame_i" => v.frame_inertia_scale = Some(x),
+            "radius" => v.wheel_radius_m = Some(x),
+            "kt" => v.kt_scale = Some(x),
+            _ => return Err(format!("--plant: unknown key '{k}'")),
+        }
+    }
+    Ok(v)
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -2030,6 +2164,7 @@ impl Default for HostConfig {
             speed_hold_m_s: None,
             rider_mass_kg: None,
             board_mass_kg: None,
+            plant: None,
             kt_scale: None,
             start_speed_m_s: None,
             grade_course: None,
@@ -2315,11 +2450,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         Some(path) => Some(read_terrain_spec(path, cfg.spawn_x_m)?),
         None => None,
     };
+    let base = cfg.plant.unwrap_or_default();
     let variation = PlantVariation {
-        board_mass_kg: cfg.board_mass_kg,
-        rider_mass_kg: cfg.rider_mass_kg,
-        kt_scale: cfg.kt_scale,
-        tail_friction: cfg.tail_friction,
+        board_mass_kg: cfg.board_mass_kg.or(base.board_mass_kg),
+        rider_mass_kg: cfg.rider_mass_kg.or(base.rider_mass_kg),
+        kt_scale: cfg.kt_scale.or(base.kt_scale),
+        tail_friction: cfg.tail_friction.or(base.tail_friction),
+        ..base
     };
     let generated_model = if cfg.kerb.is_some()
         || terrain.is_some()

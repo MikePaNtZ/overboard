@@ -136,6 +136,20 @@ fn main() -> ExitCode {
                 cfg.pad_solref_s = x;
                 i += 2;
             }
+            "--plant" => {
+                match args.get(i + 1).map(|v| sim_host::host::parse_plant_spec(v)) {
+                    Some(Ok(p)) => cfg.plant = Some(p),
+                    Some(Err(e)) => {
+                        eprintln!("sim-host: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    None => {
+                        eprintln!("sim-host: --plant needs a spec, e.g. x7 or x7,board_kg=19");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                i += 2;
+            }
             "--tail-brake" => {
                 cfg.tail_brake = true;
                 i += 1;

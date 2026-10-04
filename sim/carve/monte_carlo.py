@@ -46,6 +46,30 @@ RANGES = {
     'amps': (30.0, 60.0),
     'kt_scale': (0.85, 1.15),
 }
+# --plant-x7: the Fungineers X7 / Superflux HT / Thor301 build (sim-host
+# --plant x7) with its mass-property uncertainty as dispersions (hardware
+# track, 2026-10-04; most values inferred, so the spreads are wide). The motor
+# limit spans the phase currents this build would be set to; climbs go to
+# +25 % for Seattle streets.
+X7_RANGES = {
+    'rider_kg': (55.0, 110.0),
+    'grade_pct': (-25.0, 25.0),
+    'v_target': (2.0, 6.0),
+    'v_start': (0.0, 6.0),
+    'amps': (60.0, 100.0),
+    'kt_scale': (0.63 / 0.7, 0.69 / 0.7),    # Kt 0.63-0.69 N.m/A
+    'board_kg': (16.9, 19.9),                 # 18.4 +- 1.5
+    'wheel_kg': (3.6, 5.4),                   # rotating part 4.5, with the assembly +- 1.5
+    'wheel_spin': (0.0315, 0.0585),           # 0.045 kg m^2 +- 30 %
+    'com_x': (0.0244 - 0.03, 0.0244 + 0.03),  # frame CoM behind the axle, m
+    'com_z': (0.003 - 0.02, 0.003 + 0.02),
+    'frame_i': (1.175 * 0.7, 1.175 * 1.3),    # frame inertia scale, +- 30 %
+    'radius': (0.142, 0.150),                 # tyre radius, m (pressure, wear)
+}
+X7_KEYS = ('board_kg', 'wheel_kg', 'wheel_spin', 'com_x', 'com_z', 'frame_i', 'radius')
+X7_R_PHASE_OHM = 0.0525   # Superflux HT, motor wizard
+X7_CELL_AH = 5.0          # Molicel P50B, 20S2P = 10 Ah
+
 NOMINAL = dict(rider_kg=70.0, grade_pct=0.0, v_target=3.0, v_start=0.0, amps=40.0, kt_scale=1.0)
 BOARD_KG = 13.0      # board alone in the model; --board-kg changes it (sim-host --board-mass)
 RUN_IN_M, GRADE_M = 10.0, 80.0
@@ -81,13 +105,14 @@ def s_end(p, ground):
     return S_END if ground == 'hfield' else grade_start(p['grade_pct']) + FLAT_GRADE_M
 
 
-def lhs(n, rng):
-    """Latin hypercube in the RANGES box: one sample per stratum per axis."""
+def lhs(n, rng, ranges=None):
+    """Latin hypercube in the box: one sample per stratum per axis."""
+    ranges = ranges or RANGES
     out = []
-    for lo, hi in RANGES.values():
+    for lo, hi in ranges.values():
         u = (rng.permutation(n) + rng.random(n)) / n
         out.append(lo + u * (hi - lo))
-    return [dict(zip(RANGES, col)) for col in np.array(out).T]
+    return [dict(zip(ranges, col)) for col in np.array(out).T]
 
 
 def course(grade_pct, cache):
@@ -120,11 +145,14 @@ def run_one(k, p, out, port, ground):
            '--stats-path', 'none', '--trace-csv', str(csv_path)] + EXTRA_ARGS
     if 'tail_mu' in p:
         cmd += ['--tail-brake', '--tail-friction', f"{p['tail_mu']:.3f}"]
+    if 'board_kg' in p and 'radius' in p:
+        cmd += ['--plant', 'x7,' + ','.join(f"{k}={p[k]:.5f}" for k in X7_KEYS)]
     if not csv_path.exists():
         with open(log_path, 'w') as log:
             subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False)
-    keys = list(RANGES) + (['tail_mu'] if 'tail_mu' in p else [])
-    return dict(run=name, **{key: p[key] for key in keys}, board_kg=BOARD_KG,
+    keys = list(RANGES) + [k for k in X7_KEYS if k in p] + (['tail_mu'] if 'tail_mu' in p else [])
+    extra = {} if 'board_kg' in p else {'board_kg': BOARD_KG}
+    return dict(run=name, **{key: p[key] for key in keys}, **extra,
                 **analyse(csv_path, log_path, p, ground))
 
 
@@ -208,9 +236,12 @@ def analyse(csv_path, log_path, p, ground='plane'):
     if status == 'PASS' and v_max > max(1.5 * v_ref_max, v_ref_max + 2.0):
         status = 'RUNAWAY'
     vg = v[on]
-    a = SimpleNamespace(kt=0.7 * p['kt_scale'], ke=0.7 * p['kt_scale'], r_phase=0.12, p_idle=15.0,
-                        regen_eff=0.8, series=20, parallel=2, cell_ah=4.0, r_cell=0.015, max_duty=0.9,
-                        mass=BOARD_KG + p['rider_kg'], crr=0.015, cda=0.5)
+    x7 = 'board_kg' in p
+    a = SimpleNamespace(kt=0.7 * p['kt_scale'], ke=0.7 * p['kt_scale'],
+                        r_phase=X7_R_PHASE_OHM if x7 else 0.12, p_idle=15.0,
+                        regen_eff=0.8, series=20, parallel=2, cell_ah=X7_CELL_AH if x7 else 4.0,
+                        r_cell=0.015, max_duty=0.9,
+                        mass=(p['board_kg'] if x7 else BOARD_KG) + p['rider_kg'], crr=0.015, cda=0.5)
     wh_km = float('nan')
     if flat_grade.sum() > 50:
         # applied_amps is the COMMANDED current; the true current is the same
@@ -242,6 +273,8 @@ def main():
     ap.add_argument('--host-arg', action='append', default=[], help='extra sim-host flag; repeatable')
     ap.add_argument('--port-base', type=int, default=9000, help='UDP ports; separate parallel sweeps')
     ap.add_argument('--board-kg', type=float, help='board mass without rider (model: 13 kg)')
+    ap.add_argument('--plant-x7', action='store_true',
+                    help='the X7 build plant, with its mass-property dispersions (X7_RANGES)')
     ap.add_argument('--tail-brake', action='store_true',
                     help='tail pad brakes (no handoff); samples tail friction too')
     args = ap.parse_args()
@@ -263,7 +296,7 @@ def main():
             plan.append(p)
     else:
         rng = np.random.default_rng(args.seed)
-        plan = lhs(args.n, rng)
+        plan = lhs(args.n, rng, X7_RANGES if args.plant_x7 else None)
         if args.tail_brake:
             # Drawn after the six RANGES columns, so those stay the runs of
             # the same seed without tail braking.
