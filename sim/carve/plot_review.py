@@ -23,7 +23,9 @@ CITY = os.path.join(HERE, '..', 'out', 'city_runs')
 BG, TITLE, MUTED, GRID = '#111D27', '#EAF1F1', '#8FA3AA', '#22333F'
 PASS, NOSE, TAIL, WARN = '#33C6AC', '#E5604D', '#F2A24A', '#9C8CF0'
 EASED = '#CFC8F8'
-STRIKE_DEG, MARGIN_LIMIT, BOARD = 18.6, 3.75, 17.9
+STRIKE_DEG, MARGIN_LIMIT, BOARD = 18.6, 3.75, 18.4
+# X7 nominal build: board 18.4 kg, wheel 4.5 kg, CoM 0.0244 m behind and 0.003 m above the axle, radius 0.146 m
+X7 = {'board_kg': BOARD, 'wheel_kg': 4.5, 'com_x': 0.0244, 'com_z': 0.003, 'radius': 0.146}
 MARK = {'PASS': 'o', 'TAIL STOP': '^', 'RUNAWAY': 'x', 'EASED STOP': 's', 'DISMOUNT': 'D', 'NOSE STRIKE': 'v'}
 COL = {'PASS': PASS, 'TAIL STOP': TAIL, 'RUNAWAY': TAIL, 'EASED STOP': WARN, 'DISMOUNT': WARN, 'NOSE STRIKE': NOSE}
 SIZE = 34
@@ -106,14 +108,14 @@ def scatter_classes(ax, rows, xf, yf, order):
 
 
 def steady_margin(m, g):
-    return envelope({'rider_kg': m, 'grade_pct': g, 'board_kg': BOARD, 'kt_scale': 1.0, 'amps': 1.0})[0]
+    return envelope({**X7, 'rider_kg': m, 'grade_pct': g, 'kt_scale': 1.0, 'amps': 1.0})[0]
 
 
-def limit_grade(m, target=MARGIN_LIMIT):
+def limit_grade(m, target=MARGIN_LIMIT, sign=1):
     lo, hi = 0.0, 100.0
     for _ in range(60):
         mid = (lo + hi) / 2
-        if steady_margin(m, mid) > target:
+        if steady_margin(m, sign * mid) > target:
             lo = mid
         else:
             hi = mid
@@ -124,33 +126,47 @@ CLASSES4 = ['PASS', 'TAIL STOP', 'RUNAWAY', 'NOSE STRIKE']
 
 
 def fig1(rows, out):
-    fig, ax = new_fig('Where a 17.9 kg board fails (no rider warning)',
+    clr = [STRIKE_DEG - f(r['peak_pitch_deg']) for r in rows]
+    bins = [(lambda c: c < 2, NOSE, 'within 2° of a deck strike'),
+            (lambda c: 2 <= c < 5, TAIL, '2–5° of clearance left'),
+            (lambda c: c >= 5, PASS, '5° or more left')]
+    npass = sum(r['status'] == 'PASS' for r in rows)
+    fig, ax = new_fig(f"Mike's build: {npass} of {len(rows)} runs ride; how close they came",
                       f'{len(rows)} sim runs · rider {min(f(r["rider_kg"]) for r in rows):.0f}–'
-                      f'{max(f(r["rider_kg"]) for r in rows):.0f} kg · motor '
-                      f'{min(f(r["amps"]) for r in rows):.0f}–{max(f(r["amps"]) for r in rows):.0f} A, '
-                      f'Kt ±{100 * max(abs(f(r["kt_scale"]) - 1) for r in rows):.0f} % · tail braking on')
+                      f'{max(f(r["rider_kg"]) for r in rows):.0f} kg · grade '
+                      f'−{abs(min(f(r["grade_pct"]) for r in rows)):.0f} to +{max(f(r["grade_pct"]) for r in rows):.0f} % · '
+                      f'motor {min(f(r["amps"]) for r in rows):.0f}–{max(f(r["amps"]) for r in rows):.0f} A · '
+                      'build mass properties dispersed')
     ax.xaxis.grid(True, color=GRID, linewidth=0.6)
     ms = np.linspace(50, 118, 100)
-    gs = np.array([limit_grade(m) for m in ms])
-    ax.plot(gs, ms, ls='--', color=MUTED, lw=1, zorder=2)
-    ax.plot(-gs, ms, ls='--', color=MUTED, lw=1, zorder=2)
-    ax.text(gs[-1] + 0.6, 112, 'deck strike limit', color=MUTED, fontsize=8, ha='left', va='center')
-    scatter_classes(ax, rows, lambda r: f(r['grade_pct']), lambda r: f(r['rider_kg']), CLASSES4)
+    gc = np.array([limit_grade(m) for m in ms])
+    gd = np.array([limit_grade(m, sign=-1) for m in ms])
+    ax.plot(gc, ms, ls='--', color=MUTED, lw=1, zorder=2)
+    ax.plot(-gd, ms, ls='--', color=MUTED, lw=1, zorder=2)
+    ax.text(gc[-1] + 0.6, 112, 'deck strike limit', color=MUTED, fontsize=8, ha='left', va='center')
     gx = [f(r['grade_pct']) for r in rows]
+    for test, col, _ in bins:
+        s = [r for r, c in zip(rows, clr) if test(c)]
+        ax.scatter([f(r['grade_pct']) for r in s], [f(r['rider_kg']) for r in s], s=SIZE, marker='o', c=col,
+                   edgecolors=BG, linewidths=0.8, zorder=3)
     ax.set_xlim(min(gx) - 6, max(gx) + 9)
     ax.set_ylim(36, 118)
-    ax.text(min(gx) - 5, 42, 'tail stops and runaways:\nbraking runs out on steep descents',
-            color=TAIL, fontsize=8.5, ha='left', va='center')
-    ax.text(max(gx) + 8, 42, 'nose strikes: steep climbs, small motors,\nmostly heavy riders',
-            color=NOSE, fontsize=8.5, ha='right', va='center')
+    close = [r for r, c in zip(rows, clr) if c < 2]
+    if close:
+        ax.text(max(gx) + 8, 42, 'steepest climbs: under 2° of clearance left', color=NOSE, fontsize=8.5,
+                ha='right', va='center')
     labels(ax, 'Grade, % (climb +)', 'Rider mass, kg')
-    legend(ax, [handle(k) for k in CLASSES4])
+    legend(ax, [Line2D([], [], ls='', marker='o', color=col, markersize=6, markeredgecolor=BG,
+                       markeredgewidth=0.8, label=lab) for _, col, lab in bins])
     save(fig, out, 'r01_outcomes_map.png')
+    print('fig1: n=%d pass=%d; bins <2: %d, 2-5: %d, >=5: %d; min clearance %.1f; static limit at 110 kg: climb %.1f %%, descent -%.1f %%' %
+          (len(rows), npass, sum(c < 2 for c in clr), sum(2 <= c < 5 for c in clr), sum(c >= 5 for c in clr),
+           min(clr), limit_grade(110), limit_grade(110, sign=-1)))
 
 
 def fig2(rows, out):
     fig, ax = new_fig('Every grade costs deck clearance',
-                      'Peak deck angle against the road · thin lines: steady lean at 55 and 110 kg · 17.9 kg board')
+                      'Peak deck angle against the road · thin lines: steady lean at 55 and 110 kg · X7 build')
     ax.xaxis.grid(True, color=GRID, linewidth=0.6)
     gx = [f(r['grade_pct']) for r in rows]
     gmax = max(abs(min(gx)), max(gx)) + 3
@@ -170,16 +186,19 @@ def fig2(rows, out):
         ax.plot(g[k], y[k], color=MUTED, lw=1, zorder=2)
         yl[m] = (g, y)
     # label each curve on the right slope at 16.5 deg; the outer curve outside, the inner one inside
-    xs = {m: float(np.interp(16.5, yl[m][1][yl[m][0] > 0], yl[m][0][yl[m][0] > 0])) for m in yl}
-    outer = max(xs, key=xs.get)
+    ylab = {}
+    outer = max(yl, key=lambda m: float(np.interp(16.5, yl[m][1][yl[m][0] > 0], yl[m][0][yl[m][0] > 0])))
+    for m in yl:
+        ylab[m] = 15.0 if m == outer else 11.0  # both labels sit inside the V, one above the other
+    xs = {m: float(np.interp(ylab[m], yl[m][1][yl[m][0] > 0], yl[m][0][yl[m][0] > 0])) for m in yl}
     for m in xs:
-        right = m == outer
-        ax.text(xs[m] + (0.7 if right else -0.7), 16.5, f'{m} kg steady lean', color=MUTED, fontsize=8,
-                ha='left' if right else 'right', va='center')
+        ax.text(xs[m] - 2.2, ylab[m], f'{m} kg steady lean', color=MUTED, fontsize=8,
+                ha='right', va='center')
     scatter_classes(ax, rows, lambda r: f(r['grade_pct']), lambda r: f(r['peak_pitch_deg']), CLASSES4)
+    present = [k for k in CLASSES4 if any(klass(r) == k for r in rows)]
     # grade at which the 110 kg steady lean leaves 3.75 deg of clearance
     labels(ax, 'Grade, % (climb +)', 'Peak deck angle against road, deg')
-    legend(ax, [handle(k) for k in CLASSES4])
+    legend(ax, [handle(k) for k in present])
     save(fig, out, 'r02_deck_angle_window.png')
     print('fig2: 110 kg grade at 3.75 deg margin: %.1f %%, 55 kg: %.1f %%' % (limit_grade(110), limit_grade(55)))
 
@@ -222,7 +241,7 @@ def fig3(out):
         style_ax(ax)
         ax.xaxis.grid(False)
     titles(fig, ax1, 'The warning comes before the nose drops',
-           '110 kg rider, weak motor (35 A, Kt 0.88×), 12 % climb, 17.9 kg board')
+           '110 kg rider, SMALL motor (35 A, Kt 0.88×), 12 % climb — an edge case; the build (90 A) climbs this')
     tb = b['sim_time_s']
     for ax in (ax1, ax2):
         for s, e in spans(tb, b['margin_level'], 1):
@@ -264,6 +283,8 @@ def fig3(out):
 
 def fig4(base, warn, noreact, out):
     order = ['PASS', 'TAIL STOP', 'EASED STOP', 'RUNAWAY', 'DISMOUNT', 'NOSE STRIKE']
+    order = [k for k in order if any(klass(r) == k for r in base + warn)]
+    nwarn = sum(bool(r['t_warn_s']) for r in noreact)
     fc = {'PASS': PASS, 'TAIL STOP': TAIL, 'EASED STOP': EASED, 'RUNAWAY': TAIL, 'DISMOUNT': WARN, 'NOSE STRIKE': NOSE}
     fig = plt.figure(figsize=(8, 5), dpi=200, facecolor=BG)
     gs = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.75)
@@ -271,8 +292,8 @@ def fig4(base, warn, noreact, out):
     ax2 = fig.add_subplot(gs[1])
     style_ax(ax)
     style_ax(ax2)
-    titles(fig, ax, 'What the rider warning changes',
-           'Same 200 runs, 17.9 kg board · lead time = warning to nose strike, no reaction')
+    titles(fig, ax, 'What the rider warning costs on the build',
+           f'Same {len(base)} runs · {nwarn} runs warned · 3 rider dismounts on 20–25 % climbs')
     ax.grid(False)
     rowsets = [('no warning', base), ('warning, rider reacts', warn)]
     for yi, (name, rows) in enumerate(rowsets):
@@ -297,25 +318,33 @@ def fig4(base, warn, noreact, out):
     plt.rcParams['hatch.linewidth'] = 0.8
     hs = [Patch(facecolor=fc[k], edgecolor=BG, hatch='//' if k == 'RUNAWAY' else None, label=k.lower())
           for k in order]
-    lg = ax.legend(handles=hs, loc='upper center', bbox_to_anchor=(0.5, -0.38), ncol=6, frameon=False,
+    lg = ax.legend(handles=hs, loc='upper center', bbox_to_anchor=(0.5, -0.38), ncol=len(order), frameon=False,
                    fontsize=8, handlelength=1.2, columnspacing=1.2)
     for t in lg.get_texts():
         t.set_color(TITLE)
-    lead = np.array([f(r['warn_lead_s']) for r in noreact if klass(r) == 'NOSE STRIKE' and r['warn_lead_s']])
+    share = np.array([f(r['peak_amps']) / f(r['amps']) for r in noreact])
+    warned = np.array([bool(r['t_warn_s']) for r in noreact])
     rng = np.random.default_rng(3)
-    ax2.scatter(lead, rng.uniform(-0.25, 0.25, len(lead)), s=SIZE, marker='o', c=NOSE,
-                edgecolors=BG, linewidths=0.8, zorder=3)
-    med = float(np.median(lead))
-    ax2.axvline(med, color=TITLE, lw=1, ls='--', zorder=2)
-    ax2.text(med + 0.15, 0.62, f'median {med:.1f} s', color=TITLE, fontsize=8.5, ha='left', va='top')
+    yj = rng.uniform(-0.25, 0.25, len(share))
+    ax2.scatter(share[~warned], yj[~warned], s=SIZE, marker='o', c=PASS, edgecolors=BG, linewidths=0.8, zorder=3)
+    ax2.scatter(share[warned], yj[warned], s=SIZE, marker='o', c=WARN, edgecolors=BG, linewidths=0.8, zorder=4)
+    for x, lab in ((0.70, 'pulsed buzz'), (0.85, 'solid buzz')):
+        ax2.axvline(x, color=TITLE, lw=1, ls='--', zorder=2)
+        ax2.text(x + 0.008, 0.62, lab, color=TITLE, fontsize=8.5, ha='left', va='top')
     ax2.set_ylim(-0.7, 0.7)
     ax2.set_yticks([])
     ax2.spines['left'].set_visible(False)
     ax2.yaxis.grid(False)
-    ax2.set_xlim(0, lead.max() * 1.08)
-    labels(ax2, 'Warning lead time before nose strike, s')
+    ax2.set_xlim(0, max(share.max(), 0.95) * 1.05)
+    labels(ax2, 'Peak current, share of the motor limit')
+    ax2.legend(handles=[Line2D([], [], ls='', marker='o', color=PASS, markersize=6, label='no warning'),
+                        Line2D([], [], ls='', marker='o', color=WARN, markersize=6, label='warned')],
+               loc='upper center', bbox_to_anchor=(0.5, -0.38), ncol=2, frameon=False, fontsize=8,
+               labelcolor=TITLE)
     save(fig, out, 'r04_outcome_shift.png')
-    print('fig4: lead n=%d median %.2f min %.2f max %.2f' % (len(lead), med, lead.min(), lead.max()))
+    print('fig4: share n=%d median %.2f max %.2f; warned %d, their share min %.2f max %.2f; >=0.70: %d, >=0.85: %d' %
+          (len(share), np.median(share), share.max(), warned.sum(), share[warned].min(), share[warned].max(),
+           (share >= 0.7).sum(), (share >= 0.85).sum()))
     for name, rows in rowsets:
         print('  ', name, {k: sum(klass(r) == k for r in rows) for k in order})
 
@@ -335,7 +364,7 @@ def fig5(out):
         style_ax(ax)
         ax.xaxis.grid(False)
     titles(fig, ax1, 'At the braking limit the tail taps the road, and the board stops',
-           '100 kg rider, 32 A motor, 15 % descent, 17.9 kg board')
+           '100 kg rider, SMALL motor (32 A), 15 % descent — an edge case')
     ax1.plot(s, v, color=PASS, lw=1.8, zorder=3)
     # Contact on/off only: the tail pad still touches the heightfield directly,
     # and that contact chatters (force spikes to 10 kN on a 100 kg rider), so
@@ -397,9 +426,9 @@ def fig6(rows, out):
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
-    base = load('b18_tail_brake.csv')
-    warn = load('b18_warn_rider_reacts.csv')
-    noreact = load('b18_warn_no_reaction.csv')
+    base = load('x7_tail_brake.csv')
+    warn = load('x7_warn_rider_reacts.csv')
+    noreact = load('x7_warn_no_reaction.csv')
     fig1(base, out)
     fig2(base, out)
     fig3(out)
