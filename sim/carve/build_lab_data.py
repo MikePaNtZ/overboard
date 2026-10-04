@@ -41,6 +41,7 @@ RUNS = {
     "a02": {"clip": [3.0, 21.0], "tmax": None},
     "a03": {"clip": [3.0, 21.0], "tmax": None},
     "a04": {"clip": [3.0, 21.0], "tmax": None},
+    "a05": {"clip": [3.0, 23.0], "tmax": 25.0},
 }
 
 RATE_HZ = 40.0          # output sample rate
