@@ -16,7 +16,7 @@
 //!          [--estimator-aiding command-feedforward|wheel-odometry]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--damping-scale SCALE] [--kerb [Y[,HEIGHT]]]
-//!          [--terrain HFIELD.bin]
+//!          [--terrain HFIELD.bin] [--lean-steer] [--spawn-x M] [--schedule-csv PATH]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -83,6 +83,18 @@ fn main() -> ExitCode {
                 };
                 cfg.scripted_scenario = Some(sched);
                 i += 2;
+            }
+            "--spawn-x" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --spawn-x needs a number (metres)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.spawn_x_m = x;
+                i += 2;
+            }
+            "--lean-steer" => {
+                cfg.lean_steer = true;
+                i += 1;
             }
             "--schedule-csv" => {
                 let Some(v) = args.get(i + 1) else {

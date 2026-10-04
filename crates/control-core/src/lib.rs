@@ -294,6 +294,139 @@ impl Estimator for ComplementaryFilter {
 /// error may be small enough that an integrator only adds windup risk. That is
 /// an open question to settle with data, not on a whiteboard — and adding one
 /// requires the anti-windup path (ICD §7.6) to be wired to `Saturation` first.
+/// Pitch AND roll, for a board that leans to steer.
+///
+/// [`ComplementaryFilter`] integrates the pitch-axis gyro alone. That is right
+/// while the board stays level in roll, and wrong in a banked turn: the body
+/// pitch gyro then reads `q = theta_dot * cos(phi) + psi_dot * sin(phi) *
+/// cos(theta)`, so the yaw rate of the turn leaks into the pitch estimate.
+/// Measured in sim: with lean-to-steer the leak drives the board nose-down
+/// until the motor saturates and it falls in the first turn.
+///
+/// This filter runs the same complementary structure on both tilt angles with
+/// ZYX Euler kinematics, in the ICD's forward-right-down body frame
+/// (`f = [g sin(theta), -g sin(phi) cos(theta), -g cos(phi) cos(theta)]` at rest):
+///
+/// ```text
+/// phi_dot   = p + (q sin(phi) + r cos(phi)) tan(theta)
+/// theta_dot = q cos(phi) - r sin(phi)
+/// ```
+///
+/// The accelerometer is aided for the two accelerations the board knows from
+/// its wheel: longitudinal (`forward_accel_m_s2`, as before) and centripetal,
+/// `v * psi_dot` towards the turn, with `v` from [`TiltFilter::set_speed`].
+/// Without the centripetal term a balanced (coordinated) turn reads as zero
+/// roll.
+///
+/// With `phi = 0` and no yaw rate this reduces to [`ComplementaryFilter`].
+#[derive(Debug, Clone, Copy)]
+pub struct TiltFilter {
+    tau_s: f32,
+    pitch_rad: f32,
+    roll_rad: f32,
+    pitch_rate_rad_s: f32,
+    speed_m_s: f32,
+    last_t_ns: Option<u64>,
+    initialised: bool,
+}
+
+impl TiltFilter {
+    pub const fn new(tau_s: f32) -> Self {
+        TiltFilter {
+            tau_s,
+            pitch_rad: 0.0,
+            roll_rad: 0.0,
+            pitch_rate_rad_s: 0.0,
+            speed_m_s: 0.0,
+            last_t_ns: None,
+            initialised: false,
+        }
+    }
+
+    /// Forward ground speed from wheel odometry, m/s. Call before `update`.
+    pub fn set_speed(&mut self, speed_m_s: f32) {
+        self.speed_m_s = speed_m_s;
+    }
+
+    /// Roll estimate, rad, positive = right side down (ICD body frame).
+    pub fn roll_rad(&self) -> f32 {
+        self.roll_rad
+    }
+
+    /// Tilt implied by one accelerometer sample after removing the known
+    /// accelerations. `None` if what is left is too small to have a direction.
+    fn accel_tilt(&self, s: &ImuSample, forward_accel_m_s2: f32, yaw_rate: f32) -> Option<(f32, f32)> {
+        let (sp, cp) = (libm::sinf(self.roll_rad), libm::cosf(self.roll_rad));
+        let a_c = self.speed_m_s * yaw_rate; // centripetal, + towards the right
+        let fx = s.accel_m_s2[0] - forward_accel_m_s2;
+        let fy = s.accel_m_s2[1] - a_c * cp;
+        let fz = s.accel_m_s2[2] - a_c * sp;
+        let mag = libm::sqrtf(fx * fx + fy * fy + fz * fz);
+        if mag < MIN_TRUSTED_ACCEL_MAG_M_S2 {
+            return None;
+        }
+        let roll = libm::atan2f(-fy, -fz);
+        let pitch = libm::atan2f(fx, libm::sqrtf(fy * fy + fz * fz));
+        Some((pitch, roll))
+    }
+}
+
+impl Estimator for TiltFilter {
+    fn update(&mut self, samples: &[ImuSample], forward_accel_m_s2: f32) -> Attitude {
+        for s in samples {
+            let [p, q, r] = s.gyro_rad_s;
+            let (sp, cp) = (libm::sinf(self.roll_rad), libm::cosf(self.roll_rad));
+            let ct = libm::cosf(self.pitch_rad).max(0.2);
+            let tt = libm::tanf(self.pitch_rad).clamp(-5.0, 5.0);
+            let theta_dot = q * cp - r * sp;
+            let phi_dot = p + (q * sp + r * cp) * tt;
+            let yaw_rate = (q * sp + r * cp) / ct;
+            self.pitch_rate_rad_s = theta_dot;
+
+            let acc = self.accel_tilt(s, forward_accel_m_s2, yaw_rate);
+            if !self.initialised {
+                if let Some((pitch, roll)) = acc {
+                    self.pitch_rad = pitch;
+                    self.roll_rad = roll;
+                    self.initialised = true;
+                    self.last_t_ns = Some(s.t_sample_ns);
+                }
+                continue;
+            }
+            let dt = match self.last_t_ns {
+                Some(prev) => s.t_sample_ns.saturating_sub(prev) as f32 * 1e-9,
+                None => 0.0,
+            };
+            self.last_t_ns = Some(s.t_sample_ns);
+            if dt <= 0.0 {
+                continue;
+            }
+            let pitch_pred = self.pitch_rad + theta_dot * dt;
+            let roll_pred = self.roll_rad + phi_dot * dt;
+            match acc {
+                Some((pitch_acc, roll_acc)) => {
+                    let alpha = self.tau_s / (self.tau_s + dt);
+                    self.pitch_rad = alpha * pitch_pred + (1.0 - alpha) * pitch_acc;
+                    self.roll_rad = alpha * roll_pred + (1.0 - alpha) * roll_acc;
+                }
+                None => {
+                    self.pitch_rad = pitch_pred;
+                    self.roll_rad = roll_pred;
+                }
+            }
+        }
+        Attitude {
+            pitch_rad: self.pitch_rad,
+            pitch_rate_rad_s: self.pitch_rate_rad_s,
+        }
+    }
+
+    fn reset(&mut self) {
+        let tau = self.tau_s;
+        *self = TiltFilter::new(tau);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PitchRegulator {
     kp_nm_per_rad: f32,
@@ -1115,5 +1248,79 @@ mod tests {
         // just large enough to be clearly outside any plausible torque ceiling.
         let r = PitchRegulator::new(KP, KD);
         assert!(r.update(-1.0, 0.0, 0.0) > 40.0);
+    }
+}
+
+#[cfg(test)]
+mod tilt_filter_tests {
+    use super::*;
+    const G: f32 = 9.81;
+
+    fn sample(t_ns: u64, gyro: [f32; 3], accel: [f32; 3]) -> ImuSample {
+        ImuSample { gyro_rad_s: gyro, accel_m_s2: accel, t_sample_ns: t_ns }
+    }
+
+    /// Specific force and body rates of a board in a steady, balanced turn at
+    /// speed `v`, yaw rate `psi_dot`, bank `phi`, pitch `theta` (FRD).
+    fn banked(v: f32, psi_dot: f32, phi: f32, theta: f32) -> ([f32; 3], [f32; 3]) {
+        let (sp, cp, st, ct) = (libm::sinf(phi), libm::cosf(phi), libm::sinf(theta), libm::cosf(theta));
+        // Body rates of a constant yaw rate about the world down axis.
+        let gyro = [-psi_dot * st, psi_dot * sp * ct, psi_dot * cp * ct];
+        // Gravity part, plus the centripetal acceleration v*psi_dot rotated in.
+        let a_c = v * psi_dot;
+        let accel = [
+            G * st,
+            -G * sp * ct + a_c * cp,
+            -G * cp * ct + a_c * sp,
+        ];
+        (gyro, accel)
+    }
+
+    #[test]
+    fn level_and_still_reads_zero() {
+        let mut f = TiltFilter::new(0.5);
+        let mut a = Attitude::default();
+        for k in 0..1000 {
+            a = f.update(&[sample(k * 2_000_000, [0.0; 3], [0.0, 0.0, -G])], 0.0);
+        }
+        assert!(a.pitch_rad.abs() < 1e-5 && f.roll_rad().abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_banked_turn_does_not_leak_into_pitch() {
+        let (v, psi_dot, phi) = (5.0, 0.5, 0.25);
+        let (gyro, accel) = banked(v, psi_dot, phi, 0.0);
+        let mut f = TiltFilter::new(0.5);
+        f.set_speed(v);
+        let mut a = Attitude::default();
+        for k in 0..5000 {
+            a = f.update(&[sample(k * 2_000_000, gyro, accel)], 0.0);
+        }
+        assert!(a.pitch_rad.abs() < 0.01, "pitch {}", a.pitch_rad);
+        assert!(a.pitch_rate_rad_s.abs() < 1e-3, "rate {}", a.pitch_rate_rad_s);
+        assert!((f.roll_rad() - phi).abs() < 0.01, "roll {}", f.roll_rad());
+
+        // The single-axis filter, given the same turn, drifts nose-up: q > 0.
+        let mut c = ComplementaryFilter::new(0.5);
+        let mut b = Attitude::default();
+        for k in 0..5000 {
+            b = c.update(&[sample(k * 2_000_000, gyro, accel)], 0.0);
+        }
+        assert!(b.pitch_rad > 0.05, "single-axis pitch {}", b.pitch_rad);
+    }
+
+    #[test]
+    fn it_matches_the_complementary_filter_with_no_roll() {
+        let mut f = TiltFilter::new(0.5);
+        let mut c = ComplementaryFilter::new(0.5);
+        let (mut a, mut b) = (Attitude::default(), Attitude::default());
+        for k in 0..2000u64 {
+            let th = 0.05 * libm::sinf(k as f32 * 0.01);
+            let s = sample(k * 2_000_000, [0.0, 0.05 * 0.01 / 0.002 * libm::cosf(k as f32 * 0.01), 0.0],
+                [G * libm::sinf(th), 0.0, -G * libm::cosf(th)]);
+            a = f.update(&[s], 0.0);
+            b = c.update(&[s], 0.0);
+        }
+        assert!((a.pitch_rad - b.pitch_rad).abs() < 1e-3, "{} vs {}", a.pitch_rad, b.pitch_rad);
     }
 }

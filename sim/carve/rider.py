@@ -7,7 +7,7 @@ The rider only moves sticks. MuJoCo (inside sim-host) computes all motion.
 
     python rider.py OUT.npz [v_ref] [amp_m] [wavelength_m]
 """
-import json, socket, struct, sys, time
+import json, os, socket, struct, sys, time
 import numpy as np
 
 STATE_PORT, INPUT_PORT = 9711, 9712
@@ -16,7 +16,7 @@ V_REF = float(sys.argv[2]) if len(sys.argv) > 2 else 4.0
 LOOKAHEAD = 4.0       # long enough for smooth arcs, short enough to reach the line
 YAW_K_TOP = 1 / 6.67  # rad/m per unit steer at top speed (host.rs)
 V_TOP = 9.34
-RAMP_S = 4.0          # target speed rises over this many seconds
+RAMP_S = 8.0          # target speed rises over this many seconds
 BRAKE_X = -46.0       # brake to a stop past this x (weak brake on this grade: ~0.7 m/s^2)
 LEAN_RATIO = 0.8      # lateral weight shift per unit steer: lean into the turn
 
@@ -34,7 +34,7 @@ lhalf = ((lane[:, 2] - lane[:, 1]) / 2 - 1.0)[::-1]  # usable half-width, 1 m cl
 # Enter wide, three long linked carves, apex the inside of the bend, run out.
 LINE = [(0, 0.0), (4, -0.1), (14, -0.95), (27, 0.95), (40, -0.8), (51, 0.7), (60, 0.3), (80, 0.3)]
 _ls = np.array([p[0] for p in LINE], float)
-_lo = np.array([p[1] for p in LINE], float)
+_lo = np.array([p[1] for p in LINE], float) * float(os.environ.get("LINE_SCALE", "1.0"))
 
 
 def _smooth_offset(s):
@@ -53,8 +53,16 @@ def y_ref(x):
     return np.interp(x, lx, lmid) + f * np.interp(x, lx, lhalf)
 
 
+LEAN_KMAX = float(os.environ.get("LEAN_KMAX", "0"))  # set for sim-host --lean-steer
+LOOK_TIME_S = float(os.environ.get("LOOK_TIME_S", "2.0"))
+
+
 def kmax(v):
-    """Curvature at full steer: 1x at top speed, 2x at standstill (host.rs)."""
+    """Curvature at full steer. With --lean-steer, `steer` is the rider's
+    curvature intent scaled by LEAN_KMAX (lean_steer.rs kappa_max_per_m).
+    Otherwise the commanded-yaw law: 1x at top speed, 2x at standstill."""
+    if LEAN_KMAX > 0:
+        return LEAN_KMAX
     return YAW_K_TOP * (2.0 - min(abs(v), V_TOP) / V_TOP)
 
 
@@ -107,12 +115,20 @@ while True:
             err = vr - v
             integ = np.clip(integ + err * period, -3, 3)
             kp, ki = (0.18, 0.05) if vr > 0 else (0.35, 0.12)
-            fa = float(np.clip(kp * err + ki * integ - 0.45, -0.85, 0.25))
+            # The -0.45 brake bias holds speed on the 6.5 % grade. It fades in
+            # with speed so the rider pushes off forward from a flat start.
+            bias = -0.45 * min(1.0, max(v, 0.0) / 2.0)
+            # Push off gently: forward lean past ~0.1 saturates the motor at low
+            # speed (the full-stick flip). On the hill gravity supplies the speed.
+            fa = float(np.clip(kp * err + ki * integ + bias, -0.85, 0.10))
             # steer: pure pursuit to the reference path
-            tx_ = px - LOOKAHEAD
+            # Look further ahead at speed: a lean-steered board takes ~0.5 s to
+            # build a turn, and a short look-ahead then weaves (measured).
+            look = max(LOOKAHEAD, LOOK_TIME_S * abs(v)) if LEAN_KMAX > 0 else LOOKAHEAD
+            tx_ = px - look
             tgt = np.array([tx_, y_ref(tx_)]) - np.array([px, py])
             ang = np.arctan2(fwd[0] * tgt[1] - fwd[1] * tgt[0], fwd @ tgt)  # +ve = target to the left
-            k = 2 * np.sin(ang) / LOOKAHEAD
+            k = 2 * np.sin(ang) / look
             steer = float(np.clip(-k / kmax(max(v, 0.5)), -1, 1))  # +ve steer turns right
             lat = LEAN_RATIO * steer
     tx.sendto(IN.pack(0x4F424931, 1, 0, seq, fa, lat, steer), ('127.0.0.1', INPUT_PORT))

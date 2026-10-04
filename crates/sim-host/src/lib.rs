@@ -19,6 +19,7 @@
 //! client of this library.
 
 pub mod host;
+pub mod lean_steer;
 pub mod pacer;
 pub mod scenario;
 pub mod wire;

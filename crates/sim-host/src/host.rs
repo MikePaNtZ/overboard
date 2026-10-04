@@ -261,6 +261,10 @@ pub struct TerrainSpec {
     /// on real terrain the board has to be lifted onto the surface or it
     /// starts the run embedded in the road.
     pub z_at_origin_m: f64,
+    /// Where the board spawns along MuJoCo X, metres (`--spawn-x`), and the
+    /// terrain height there. The frame (and so the map to Unreal) does not move.
+    pub spawn_x_m: f64,
+    pub z_at_spawn_m: f64,
 }
 
 /// Reads `metadata.json` from the same directory as the hfield binary, and
@@ -270,7 +274,7 @@ pub struct TerrainSpec {
 /// the rasteriser's parameters while the `.bin` carries its own `nrow`/`ncol`,
 /// and a stale metadata file beside a fresh binary would otherwise place the
 /// terrain at the wrong scale with nothing to say so.
-fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
+fn read_terrain_spec(hfield_path: &Path, spawn_x_m: f64) -> Result<TerrainSpec, HostError> {
     let dir = hfield_path.parent().unwrap_or(Path::new("."));
     let meta_path = dir.join("metadata.json");
     let meta_raw = std::fs::read_to_string(&meta_path).map_err(|e| {
@@ -360,6 +364,17 @@ fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
     let z_at_origin_m =
         f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f64;
 
+    let spacing_m = 2.0 * half_extent_m / (ncol as f64 - 1.0);
+    let col = (ncol / 2) as i64 + (spawn_x_m / spacing_m).round() as i64;
+    if col < 0 || col >= ncol as i64 {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: --spawn-x {spawn_x_m} m is outside the terrain (half-extent {half_extent_m} m)"
+        ))));
+    }
+    let off = 8 + ((nrow / 2) * ncol + col as usize) * 4;
+    let z_at_spawn_m =
+        f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f64;
+
     Ok(TerrainSpec {
         hfield_path: hfield_path.to_path_buf(),
         nrow,
@@ -368,6 +383,8 @@ fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
         z_min_m,
         z_max_m,
         z_at_origin_m,
+        spawn_x_m,
+        z_at_spawn_m,
     })
 }
 
@@ -401,12 +418,64 @@ const KERB_CENTRE_X_M: f64 = (CORRIDOR_X_MAX_M + CORRIDOR_X_MIN_M) / 2.0;
 /// touched; the depth exists so the board cannot clip through the far side.
 const KERB_HALF_DEPTH_M: f64 = 0.6;
 
+/// Lean-to-steer model changes (see [`crate::lean_steer`]), applied to the
+/// shared rider model text. Each replacement must match exactly once, so a
+/// change to the shared model fails loudly here rather than silently.
+///
+/// - Tire: the flat 0.30 m cylinder becomes an ellipsoid with semi-axes
+///   0.1454 / 0.12 / 0.1454 m. The rolling radius is unchanged; the tread
+///   crown radius is 0.12^2 / 0.1454 = 0.099 m, so the board can roll.
+/// - Rider: lateral reach +-0.25 m (knee, hip and body lean),
+///   and a faster lateral servo (kp 12000 N/m, 0.05 s lag): a rider balances
+///   roll with ~0.2 s reactions, which the 1 Hz fore/aft servo cannot.
+fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
+    let swaps = [
+        (
+            r#"<geom name="wheel_geom" type="cylinder" size="0.1454 0.15" euler="90 0 0""#,
+            r#"<geom name="wheel_geom" type="ellipsoid" size="0.1454 0.12 0.1454""#,
+        ),
+        (
+            r#"<joint name="ballast_lat" type="slide" axis="0 1 0" pos="0 0 0"
+                 range="-0.05 0.05""#,
+            r#"<joint name="ballast_lat" type="slide" axis="0 1 0" pos="0 0 0"
+                 range="-0.25 0.25""#,
+        ),
+        (
+            r#"<position name="ballast_lat" joint="ballast_lat" kp="3000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.15"/>"#,
+            r#"<position name="ballast_lat" joint="ballast_lat" kp="12000" ctrlrange="-0.25 0.25"
+              ctrllimited="true" timeconst="0.05"/>"#,
+        ),
+    ];
+    let mut out = xml.to_string();
+    let keep_cylinder = std::env::var("OVERBOARD_TIRE").as_deref() == Ok("cyl");
+    for (from, to) in swaps {
+        if keep_cylinder && from.contains("wheel_geom") {
+            continue;
+        }
+        if std::env::var("OVERBOARD_TIRE").as_deref() == Ok("sphere") && from.contains("wheel_geom") {
+            out = out.replace(from, r#"<geom name="wheel_geom" type="sphere" size="0.1454""#);
+            continue;
+        }
+        if out.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(format!(
+                "sim-host: --lean-steer could not find exactly one '{}' in the rider model -- \
+                 the shared model has changed and this splice needs updating",
+                from.lines().next().unwrap_or(from)
+            ))));
+        }
+        out = out.replace(from, to);
+    }
+    Ok(out)
+}
+
 /// Writes `overboard_rider.xml` with `kerb` spliced into its `<worldbody>` to
 /// a temporary file, and returns that path. The original file is never
 /// modified.
 fn write_model_with_kerb(
     kerb: Option<&KerbSpec>,
     terrain: Option<&TerrainSpec>,
+    lean_steer: bool,
 ) -> Result<PathBuf, HostError> {
     let src = rider_model_path();
     let xml = std::fs::read_to_string(&src).map_err(|e| {
@@ -469,7 +538,7 @@ fn write_model_with_kerb(
         //
         // The extra clearance means it settles DOWN onto the road over the
         // first few steps rather than being pushed up out of it.
-        let spawn_z = FRAME_SPAWN_Z_M + t.z_at_origin_m + TERRAIN_SPAWN_CLEARANCE_M;
+        let spawn_z = FRAME_SPAWN_Z_M + t.z_at_spawn_m + TERRAIN_SPAWN_CLEARANCE_M;
         let spawn_from = format!("<body name=\"frame\" pos=\"0 0 {FRAME_SPAWN_Z_M}\">");
         if !xml.contains(&spawn_from) {
             return Err(HostError::Io(std::io::Error::other(format!(
@@ -479,7 +548,7 @@ fn write_model_with_kerb(
         }
         xml = xml.replace(
             &spawn_from,
-            &format!("<body name=\"frame\" pos=\"0 0 {spawn_z:.6}\">"),
+            &format!("<body name=\"frame\" pos=\"{:.6} 0 {spawn_z:.6}\">", t.spawn_x_m),
         );
 
         xml = xml.replace(
@@ -494,6 +563,10 @@ fn write_model_with_kerb(
     }
 
     // --- Kerb: an authored box, for runs without the real terrain ----------
+    if lean_steer {
+        xml = splice_lean_steer(&xml)?;
+    }
+
     if let Some(kerb) = kerb {
         let hz = kerb.height_m / 2.0;
         let mut geom = String::from(
@@ -1510,6 +1583,17 @@ pub struct HostConfig {
     /// flat ground plane with the real City Park surface; `None` (the default)
     /// leaves the shared model untouched. See [`TerrainSpec`].
     pub terrain: Option<PathBuf>,
+
+    /// Lean-to-steer (see [`crate::lean_steer`]). `true` swaps the flat
+    /// cylinder tire for a rounded-crown one, gives the rider a +-0.25 m
+    /// lateral reach, and replaces the commanded-yaw law with camber steer:
+    /// the board turns because it rolls. `steer` becomes the rider's
+    /// curvature intent, and a rider model balances the roll.
+    pub lean_steer: bool,
+
+    /// Spawn point along MuJoCo X, metres, on the `--terrain` heightmap. Lets a
+    /// run start on flatter road uphill of the origin without moving the frame.
+    pub spawn_x_m: f64,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1658,6 +1742,8 @@ impl Default for HostConfig {
             trace_path: None,
             kerb: None,
             terrain: None,
+            lean_steer: false,
+            spawn_x_m: 0.0,
         }
     }
 }
@@ -1925,11 +2011,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // ADR-0012: a kerb run opens a spliced copy; every other run opens the
     // shared model itself, unchanged.
     let terrain = match &cfg.terrain {
-        Some(path) => Some(read_terrain_spec(path)?),
+        Some(path) => Some(read_terrain_spec(path, cfg.spawn_x_m)?),
         None => None,
     };
-    let generated_model = if cfg.kerb.is_some() || terrain.is_some() {
-        Some(write_model_with_kerb(cfg.kerb.as_ref(), terrain.as_ref())?)
+    let generated_model = if cfg.kerb.is_some() || terrain.is_some() || cfg.lean_steer {
+        Some(write_model_with_kerb(cfg.kerb.as_ref(), terrain.as_ref(), cfg.lean_steer)?)
     } else {
         None
     };
@@ -1977,6 +2063,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
 
     let regulator = PitchRegulator::new(KP_NM_PER_RAD, KD_NM_PER_RAD_S);
     let mut estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
+    // Lean-to-steer banks the board, and a single-axis pitch filter then
+    // reads the turn's yaw rate as pitch (see `control_core::TiltFilter`).
+    let mut tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
     let accel_ff = CommandFeedforward::new(ACCEL_FF_GAIN_M_S2_PER_A);
     // Only advanced when `cfg.estimator_aiding` selects it (issue #227) --
     // built unconditionally anyway, since a `WheelAccelEstimator` is cheap
@@ -2066,6 +2155,15 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // yaw is currently baked into MuJoCo's own quaternion before it can read
     // body pitch and roll back out of it.
     let mut yaw_rad: f32 = 0.0;
+    // Lean-to-steer state (only used with `cfg.lean_steer`). Roll and roll
+    // rate are last tick's: the rider reacts one 2 ms cycle late.
+    let lean_params = crate::lean_steer::LeanSteerParams::from_env();
+    let mut tire_yaw = crate::lean_steer::TireYaw::default();
+    let mut lean_roll_rad: f32 = 0.0;
+    let mut lean_roll_rate_rad_s: f32 = 0.0;
+    let mut rider = crate::lean_steer::Rider::default();
+    let mut lean_prev_offset_m: f32 = 0.0;
+    let mut lean_yaw_torque_nm: f64 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
     // Previous tick's ground speed, m/s, signed (positive = forward) -- used
     // to gate THIS tick's `weight_shift_fore_aft` against MAX_GROUND_SPEED_M_S
@@ -2269,7 +2367,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             handoff_latched = false;
             handoff_state = None;
             yaw_rad = 0.0;
+            tire_yaw = crate::lean_steer::TireYaw::default();
+            lean_roll_rad = 0.0;
+            lean_roll_rate_rad_s = 0.0;
+            lean_yaw_torque_nm = 0.0;
+            rider = crate::lean_steer::Rider::default();
+            lean_prev_offset_m = 0.0;
             estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
+            tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
             last_amps = 0.0;
             last_forward_speed_m_s = 0.0;
             utilisation_filtered = 0.0;
@@ -2352,9 +2457,32 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // PHYSICALLY (see this file's header). Set every cycle, mirroring
         // apply_external_force's own "call every cycle or a stale value
         // persists" convention.
+        // With lean-to-steer the rider model owns the lateral mass: it
+        // balances the roll that gives the curvature `steer` asks for.
+        let lateral_target_m = if cfg.lean_steer {
+            let (_, offset_m) = backend.truth_ballast_positions();
+            let offset_rate_m_s = (offset_m - lean_prev_offset_m) / DT_S as f32;
+            lean_prev_offset_m = offset_m;
+            let v = backend.truth_frame_linvel();
+            let (hs, hc) = yaw_rad.sin_cos();
+            // The body +Y axis (RIGHT) at heading h is (-sin h, cos h).
+            let lateral_velocity_m_s = -hs * v[0] as f32 + hc * v[1] as f32;
+            let obs = crate::lean_steer::RiderObs {
+                roll_rad: lean_roll_rad,
+                roll_rate_rad_s: lean_roll_rate_rad_s,
+                offset_m,
+                offset_rate_m_s,
+                lateral_velocity_m_s,
+                yaw_rate_rad_s: backend.truth_frame_angvel()[2] as f32,
+                tire_yaw_target_rad_s: tire_yaw.yaw_rate_target_rad_s,
+            };
+            rider.command(&lean_params, steer, last_forward_speed_m_s, &obs, DT_S as f32)
+        } else {
+            weight_shift_lateral * BALLAST_RANGE_M
+        };
         backend.set_ballast_targets(
             corridor_enforced_fore_aft * BALLAST_RANGE_M,
-            weight_shift_lateral * BALLAST_RANGE_M,
+            lateral_target_m,
         );
 
         // One-time startup kick, only when explicitly enabled (issue #169)
@@ -2394,6 +2522,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             in_kick_window,
             in_fall_kick_window,
         );
+        let mut torque = torque;
+        if cfg.lean_steer {
+            // Tire turn-slip moment (see `crate::lean_steer`), about world +Z.
+            torque[2] += lean_yaw_torque_nm;
+        }
         backend.apply_external_force(force, torque);
 
         let obs = backend.wait_observe().map_err(HostError::Backend)?;
@@ -2427,7 +2560,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // it -- it is the only signal path a real board has, and an
         // acceptance trace that stopped recording it would stop being able to
         // show how big the bias criterion (f) is neutralising actually is.
-        let attitude = estimator.update(std::slice::from_ref(&sample), aiding);
+        let attitude = if cfg.lean_steer && std::env::var("OVERBOARD_TILT").as_deref() != Ok("0") {
+            tilt_estimator.set_speed(last_forward_speed_m_s);
+            tilt_estimator.update(std::slice::from_ref(&sample), aiding)
+        } else {
+            estimator.update(std::slice::from_ref(&sample), aiding)
+        };
 
         // Ground truth, never fed to the controller on a DEPLOYED run
         // (DR-OBS-1) -- reported because "the board is actually up" is what
@@ -2444,6 +2582,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // -- `backend.apply` only buffers a current for the next step -- so
         // the values are bit-identical to the ones the old ordering read.
         let xmat = backend.truth_frame_xmat();
+        if cfg.lean_steer {
+            // The plant turns itself: read the heading back, kept continuous.
+            let h = crate::lean_steer::heading_from_xmat(&xmat);
+            let d = (h - yaw_rad + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI)
+                - std::f32::consts::PI;
+            yaw_rad += d;
+        }
         // ATTITUDE MUST BE DE-YAWED BEFORE PITCH/ROLL COME OUT OF IT (issue
         // #163). Both readings below are `atan2` on the frame's world z-axis,
         // and that derivation assumes the world x/y axes still line up with
@@ -2794,7 +2939,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // re-checks the same condition; the gate is repeated here so that
         // `yaw_rad` and the plant can never disagree about whether a tick's
         // increment was applied.
-        if dyaw_rad != 0.0 {
+        if cfg.lean_steer {
+            lean_roll_rate_rad_s = (roll_rad - lean_roll_rad) / DT_S as f32;
+            lean_roll_rad = roll_rad;
+            let yaw_rate_meas = backend.truth_frame_angvel()[2] as f32;
+            lean_yaw_torque_nm = tire_yaw.step(
+                &lean_params,
+                forward_speed_m_s,
+                roll_rad,
+                yaw_rate_meas,
+                DT_S as f32,
+            ) as f64;
+        } else if dyaw_rad != 0.0 {
             yaw_rad += dyaw_rad;
             backend.inject_kinematic_yaw(dyaw_rad as f64);
         }
