@@ -3,13 +3,14 @@
 One CSV row per run, written by `sim/carve/monte_carlo.py`; summarise with
 `sim/carve/mc_summary.py`.
 
-**Current baseline (sim-host c28e529 or later):** the X7 build plant
-(`--plant-x7`), tail braking on, 200 runs, seed 1.
+**Current baseline (sim-host 46f07b5 or later):** the X7 build plant
+(`--plant-x7`) with the build's meshes and pads, the deck strike angle spread
+over 18-21 deg (pad_z), tail braking on, 200 runs, seed 1.
 
 | File | Set |
 |---|---|
-| `x7_tail_brake.csv` | No rider warning: 200 PASS |
-| `x7_warn_no_reaction.csv` | Warning on, rider does not react: 200 PASS, 12 runs warned |
+| `x7_tail_brake.csv` | No rider warning: 200 PASS (closest: 2.1 deg from a deck strike) |
+| `x7_warn_no_reaction.csv` | Warning on, rider does not react: 200 PASS, 11 runs warned |
 | `x7_warn_rider_reacts.csv` | Warning on, rider reacts: 197 PASS, 3 DISMOUNT (20-25 % climbs) |
 
 **Superseded.** Before c28e529 the backend capped the motor at 40 A
