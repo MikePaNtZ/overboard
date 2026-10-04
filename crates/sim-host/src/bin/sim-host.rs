@@ -112,6 +112,22 @@ fn main() -> ExitCode {
                 cfg.hfield_wheel_contact = true;
                 i += 1;
             }
+            "--authority-margin" => {
+                cfg.authority_margin = match args.get(i + 1).map(String::as_str) {
+                    Some("off") => sim_host::host::MarginMode::Off,
+                    Some("warn") => sim_host::host::MarginMode::Warn,
+                    Some("limit") => sim_host::host::MarginMode::Limit,
+                    _ => {
+                        eprintln!("sim-host: --authority-margin needs off|warn|limit");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                i += 2;
+            }
+            "--rider-reacts" => {
+                cfg.rider_reacts = true;
+                i += 1;
+            }
             "--tail-brake" => {
                 cfg.tail_brake = true;
                 i += 1;

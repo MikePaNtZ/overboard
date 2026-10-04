@@ -163,6 +163,16 @@ def analyse(csv_path, log_path, p, ground='plane'):
             cause = 'saturation (' + cause + ')'
     reached = s.max()
     status = 'PASS' if not cause and reached >= end_m else ('FALL' if cause else 'STALL')
+    # Rider warning (sim-host --authority-margin, --rider-reacts).
+    first = lambda pat: (lambda mm: float(mm.group(1)) if mm else None)(re.search(pat, log))
+    t_warn = first(r"rider warning (?:Pulse|Solid) at sim_t=([\d.]+)s")
+    t_dismount = first(r"rider dismount at sim_t=([\d.]+)s")
+    t_eased = first(r"rider eases off at sim_t=([\d.]+)s")
+    if t_dismount is not None and status != 'PASS' and not (cause and t[-1] < t_dismount):
+        status, cause = 'DISMOUNT', ''
+    elif t_eased is not None and status == 'STALL' and abs(v[-1]) < 0.3:
+        status = 'EASED STOP'
+    warn_lead_s = round(t[-1] - t_warn, 2) if (cause and t_warn is not None and t_warn <= t[-1]) else ''
     # Tail braking (sim-host --tail-brake): the tail pad on the road is a
     # brake, not a fall. A run that ends at rest with the tail down stopped
     # on purpose, the way a rider stops with the tail.
@@ -210,6 +220,7 @@ def analyse(csv_path, log_path, p, ground='plane'):
         peak_pitch_deg=round(float(np.abs(pitch).max()), 1),
         wh_per_km=round(wh_km, 1),
         tail_pct=tail_pct, tail_first_s=tail_first_s,
+        t_warn_s=t_warn if t_warn is not None else '', warn_lead_s=warn_lead_s,
     )
 
 

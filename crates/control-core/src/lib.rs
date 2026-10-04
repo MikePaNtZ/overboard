@@ -829,6 +829,7 @@ pub struct SpeedHoldLqr {
     integral: f32,
     v_ref: Option<f32>,
     a_ref: f32,
+    drive_scale: f32,
 }
 
 impl SpeedHoldLqr {
@@ -846,6 +847,7 @@ impl SpeedHoldLqr {
             integral: 0.0,
             v_ref: None,
             a_ref: 0.0,
+            drive_scale: 1.0,
         }
     }
 
@@ -866,6 +868,13 @@ impl SpeedHoldLqr {
     #[cfg(test)]
     fn reset_integral_for_test(&mut self) {
         self.integral = 0.0;
+    }
+
+    /// Scale on forward (speed-increasing) reference acceleration, 0..1:
+    /// [`AuthorityMargin::drive_scale`] for the optional D2 limit. Braking
+    /// is never scaled, so tail braking stays free.
+    pub fn set_drive_scale(&mut self, scale: f32) {
+        self.drive_scale = scale.clamp(0.0, 1.0);
     }
 
     /// The slewed speed reference of the last update.
@@ -963,7 +972,9 @@ impl SpeedHoldLqr {
                     r += (v_m_s - r) * (dt_s / SPEED_HOLD_SATURATED_LEAK_S).min(1.0);
                     0.0
                 } else {
-                    (SPEED_HOLD_APPROACH_PER_S * (v_target_m_s - r)).clamp(-a_lim, a_lim)
+                    let a = (SPEED_HOLD_APPROACH_PER_S * (v_target_m_s - r)).clamp(-a_lim, a_lim);
+                    // Speed-increasing (away from zero) is scaled; braking is not.
+                    if a * r > 0.0 || (r == 0.0 && a != 0.0) { a * self.drive_scale } else { a }
                 };
                 let da = SPEED_HOLD_JERK_M_S3 * dt_s;
                 self.a_ref += (a_des - self.a_ref).clamp(-da, da);
@@ -985,6 +996,109 @@ impl SpeedHoldLqr {
                 (self.integral + err * dt_s).clamp(-self.integral_limit_m, self.integral_limit_m);
         }
         balance + self.k_speed * err + self.k_int * self.integral
+    }
+}
+
+/// Rider warning level from [`AuthorityMargin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MarginLevel {
+    None,
+    /// Pulsed buzz: the board is near its limit.
+    Pulse,
+    /// Solid buzz: the board is at its limit; the rider must ease off now.
+    Solid,
+}
+
+/// How close the drive is to the end of its authority, as one number:
+///
+/// m = max(|I_filt| / I_max, duty / DUTY_LIMIT, (|load| / k) / I_max)
+///
+/// - |I_filt|: the applied current, low-passed; the climb case.
+/// - duty: the voltage the motor needs over the pack voltage; the speed
+///   case (back-EMF headroom).
+/// - |load| / k: the steady grade current that [`GradeAwareAiding`]
+///   predicts. It sees a climb before the current peak arrives.
+///
+/// The level drives a rider warning (haptic buzz on the motor; D1 in
+/// `docs/research/pushback-and-authority-margins.md`) and, optionally, the
+/// drive scale that limits forward acceleration (D2). Nothing here limits
+/// braking: tail braking stays free.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthorityMargin {
+    i_filt_a: f32,
+    margin: f32,
+    level: MarginLevel,
+}
+
+impl AuthorityMargin {
+    /// Current filter time constant, s.
+    pub const CURRENT_TAU_S: f32 = 0.1;
+    /// Duty at which the duty term reaches 1.0.
+    pub const DUTY_LIMIT: f32 = 0.95;
+    /// Pulsed warning above this margin.
+    pub const PULSE_ON: f32 = 0.70;
+    /// Solid warning above this margin.
+    pub const SOLID_ON: f32 = 0.85;
+    /// Each level clears this far below its threshold.
+    pub const HYSTERESIS: f32 = 0.05;
+    /// Drive scale: full forward acceleration at or below this margin...
+    pub const DRIVE_FULL: f32 = 0.70;
+    /// ...and none at or above this margin.
+    pub const DRIVE_ZERO: f32 = 0.90;
+
+    pub const fn new() -> Self {
+        AuthorityMargin { i_filt_a: 0.0, margin: 0.0, level: MarginLevel::None }
+    }
+
+    /// One cycle. `duty` is |V_motor| / V_pack, estimated by the caller.
+    /// `load_m_s2` is [`GradeAwareAiding::load_m_s2`]; `k` its scale.
+    pub fn update(
+        &mut self,
+        applied_amps: f32,
+        duty: f32,
+        load_m_s2: f32,
+        k_m_s2_per_a: f32,
+        i_max_a: f32,
+        dt_s: f32,
+    ) -> MarginLevel {
+        let alpha = dt_s / (Self::CURRENT_TAU_S + dt_s);
+        self.i_filt_a += alpha * (libm::fabsf(applied_amps) - self.i_filt_a);
+        let i_max = i_max_a.max(1e-3);
+        let grade_a = if k_m_s2_per_a > 0.0 { libm::fabsf(load_m_s2) / k_m_s2_per_a } else { 0.0 };
+        self.margin = (self.i_filt_a / i_max)
+            .max(libm::fabsf(duty) / Self::DUTY_LIMIT)
+            .max(grade_a / i_max);
+        let m = self.margin;
+        self.level = match self.level {
+            MarginLevel::Solid if m > Self::SOLID_ON - Self::HYSTERESIS => MarginLevel::Solid,
+            _ if m > Self::SOLID_ON => MarginLevel::Solid,
+            MarginLevel::Solid | MarginLevel::Pulse if m > Self::PULSE_ON - Self::HYSTERESIS => {
+                MarginLevel::Pulse
+            }
+            _ if m > Self::PULSE_ON => MarginLevel::Pulse,
+            _ => MarginLevel::None,
+        };
+        self.level
+    }
+
+    pub fn margin(&self) -> f32 {
+        self.margin
+    }
+
+    pub fn level(&self) -> MarginLevel {
+        self.level
+    }
+
+    /// Forward-acceleration scale for D2: 1 at or below `DRIVE_FULL`, 0 at
+    /// or above `DRIVE_ZERO`, linear between.
+    pub fn drive_scale(&self) -> f32 {
+        ((Self::DRIVE_ZERO - self.margin) / (Self::DRIVE_ZERO - Self::DRIVE_FULL)).clamp(0.0, 1.0)
+    }
+}
+
+impl Default for AuthorityMargin {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1055,6 +1169,51 @@ mod speed_hold_tests {
         let a = c.integral;
         c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
         assert!((a - c.integral).abs() < 1e-6, "integral wound while saturated: {a} -> {}", c.integral);
+    }
+
+    #[test]
+    fn margin_levels_rise_with_hysteresis_and_take_the_largest_term() {
+        let mut m = AuthorityMargin::new();
+        let run = |m: &mut AuthorityMargin, amps: f32, duty: f32, load: f32| {
+            for _ in 0..500 {
+                m.update(amps, duty, load, 0.0584, 40.0, 0.002);
+            }
+            m.level()
+        };
+        assert_eq!(run(&mut m, 20.0, 0.1, 0.0), MarginLevel::None);
+        assert_eq!(run(&mut m, 30.0, 0.1, 0.0), MarginLevel::Pulse); // 0.75
+        assert_eq!(run(&mut m, 36.0, 0.1, 0.0), MarginLevel::Solid); // 0.90
+        assert_eq!(run(&mut m, 33.0, 0.1, 0.0), MarginLevel::Solid); // 0.825, hysteresis
+        assert_eq!(run(&mut m, 27.0, 0.1, 0.0), MarginLevel::Pulse); // 0.675, hysteresis
+        assert_eq!(run(&mut m, 5.0, 0.1, 0.0), MarginLevel::None);
+        // Duty alone (high speed) and the predicted grade current alone.
+        assert_eq!(run(&mut m, 5.0, 0.80, 0.0), MarginLevel::Pulse); // 0.84
+        let load = 0.0584 * 36.0; // predicts 36 A of 40 A
+        assert_eq!(run(&mut AuthorityMargin::new(), 5.0, 0.1, load), MarginLevel::Solid);
+    }
+
+    #[test]
+    fn drive_scale_ramps_from_full_to_zero() {
+        let mut m = AuthorityMargin::new();
+        for _ in 0..1000 {
+            m.update(32.0, 0.0, 0.0, 0.0584, 40.0, 0.002); // margin 0.80
+        }
+        assert!((m.drive_scale() - 0.5).abs() < 0.02, "{}", m.drive_scale());
+    }
+
+    #[test]
+    fn drive_scale_limits_acceleration_but_never_braking() {
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        c.set_drive_scale(0.0);
+        c.update(0.0, 0.0, 3.0, 3.0, 0.002, false);
+        for _ in 0..500 {
+            c.update(0.0, 0.0, 3.0, 5.0, 0.002, false);
+        }
+        assert!(c.a_ref.abs() < 1e-6, "accelerated at scale 0: {}", c.a_ref);
+        for _ in 0..500 {
+            c.update(0.0, 0.0, 3.0, 1.0, 0.002, false);
+        }
+        assert!(c.a_ref < -0.4, "braking was limited: {}", c.a_ref);
     }
 
     #[test]

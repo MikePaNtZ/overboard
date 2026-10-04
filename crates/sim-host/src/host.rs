@@ -1737,6 +1737,15 @@ pub struct HostConfig {
     /// contact (MuJoCo geom priority). Without it the larger of the pad (0.6)
     /// and the road (0.8 heightfield, 1.0 plane) is used.
     pub tail_friction: Option<f64>,
+    /// `--authority-margin warn|limit`: the rider warning (D1) and, with
+    /// `limit`, the forward-acceleration limit (D2). See
+    /// `control_core::AuthorityMargin`.
+    pub authority_margin: MarginMode,
+    /// `--rider-reacts` (speed-hold harness only): a rider model that answers
+    /// the warning. Pulsed for 0.5 s: the rider eases off (target 0). Solid
+    /// for 0.5 s while driving: the rider steps off and the run ends (DISMOUNT).
+    /// Solid while braking: the rider stays on and leans onto the tail.
+    pub rider_reacts: bool,
     /// A grade profile on the flat plane, by gravity (`--grade-course`).
     /// Replaces a `--terrain` heightfield for grade studies: MuJoCo's
     /// sphere-on-heightfield contact chatters at every grid edge (measured:
@@ -1780,6 +1789,24 @@ impl GradeCourse {
         (g * frac).atan().to_degrees()
     }
 }
+
+/// `--authority-margin`: off, warn only (D1), or warn and limit (D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginMode {
+    Off,
+    Warn,
+    Limit,
+}
+
+/// Pack voltage for the duty estimate, V: 20S at 3.6 V nominal. The sim has
+/// no pack in the loop, so sag is not in the estimate.
+const MARGIN_PACK_V: f32 = 72.0;
+/// Motor back-EMF constant and phase resistance for the duty estimate
+/// (`sim/carve/battery.py` defaults).
+const MARGIN_KE_V_S: f32 = 0.7;
+const MARGIN_R_PHASE_OHM: f32 = 0.12;
+/// `--rider-reacts`: the rider's reaction time to a warning, s.
+const RIDER_REACTION_S: f64 = 0.5;
 
 /// The plant-only changes a Monte Carlo run splices into the model.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -1951,6 +1978,8 @@ impl Default for HostConfig {
             hfield_wheel_contact: false,
             tail_brake: false,
             tail_friction: None,
+            authority_margin: MarginMode::Off,
+            rider_reacts: false,
         }
     }
 }
@@ -1997,6 +2026,9 @@ struct TraceRow {
     /// Bumper contact forces, N (ADR-0012 touch sensors).
     nose_strike_n: f32,
     tail_strike_n: f32,
+    /// `--authority-margin`: margin and level (0 none, 1 pulse, 2 solid).
+    margin: f32,
+    margin_level: u8,
     /// `|proposed_amps| / MAX_CURRENT_A`, unfiltered.
     utilisation: f32,
     /// ... and low-passed at [`AUTHORITY_UTILISATION_TAU_S`].
@@ -2359,6 +2391,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // terrain the spawn drop makes that worse. A real board also starts its
     // estimator at rest.
     let mut start_speed_pending = cfg.start_speed_m_s;
+    let mut margin = control_core::AuthorityMargin::new();
+    let mut margin_level = control_core::MarginLevel::None;
+    let mut margin_level_since_s = 0.0f64;
+    let mut rider_eased = false;
+    let mut dismount_at_s: Option<f64> = None;
     // `--grade-course`: last cycle's grade and its rate (see the gyro fix-up).
     let mut grade_rad_prev: Option<f32> = None;
     let mut grade_rate_rad_s: f32 = 0.0;
@@ -2537,6 +2574,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             if t_known_s > limit {
                 break;
             }
+        }
+        // `--rider-reacts`: the rider has stepped off; the run is over.
+        if dismount_at_s.is_some_and(|t| t_known_s > t + 0.2) {
+            break;
         }
 
         // Drain every pending datagram; only the most recent VALID one
@@ -2972,6 +3013,47 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Optional outer speed loop (`--speed-hold`): sets the pitch
         // reference from the speed error, as a Segway does. Off by default:
         // the deployed board leaves speed to the rider.
+        // Rider warning (D1) and drive limit (D2), from LAST cycle's applied
+        // current, the wheel speed and the learned grade load.
+        if cfg.authority_margin != MarginMode::Off {
+            let duty = (MARGIN_KE_V_S * wheel_rate_rad_s.abs() + MARGIN_R_PHASE_OHM * last_amps.abs())
+                / MARGIN_PACK_V;
+            let i_max = cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
+            let level = margin.update(
+                last_amps,
+                duty,
+                grade_aid.load_m_s2(),
+                ACCEL_FF_GAIN_M_S2_PER_A,
+                i_max,
+                DT_S as f32,
+            );
+            if level != margin_level {
+                eprintln!(
+                    "sim-host: rider warning {level:?} at sim_t={t_known_s:.3}s (margin {:.2}, \
+                     {last_amps:+.1} A, duty {duty:.2}, grade load {:+.2} m/s^2)",
+                    margin.margin(),
+                    grade_aid.load_m_s2(),
+                );
+                margin_level = level;
+                margin_level_since_s = t_known_s;
+            }
+            if cfg.authority_margin == MarginMode::Limit {
+                speed_lqr.set_drive_scale(margin.drive_scale());
+            }
+            if cfg.rider_reacts {
+                let held = t_known_s - margin_level_since_s >= RIDER_REACTION_S;
+                if !rider_eased && level >= control_core::MarginLevel::Pulse && held {
+                    rider_eased = true;
+                    eprintln!("sim-host: rider eases off at sim_t={t_known_s:.3}s (target 0 m/s)");
+                }
+                // Braking at the limit (negative current) is not a reason to step off:
+                // the rider leans back onto the tail, which is a safe brake.
+                if dismount_at_s.is_none() && level == control_core::MarginLevel::Solid && held && last_amps > 0.0 {
+                    dismount_at_s = Some(t_known_s);
+                    eprintln!("sim-host: rider dismount at sim_t={t_known_s:.3}s");
+                }
+            }
+        }
         let pitch_ref_rad = match cfg.speed_hold_m_s {
             Some(v_ref) => speed_loop.update(forward_speed_m_s, v_ref, DT_S as f32, last_saturated),
             None => 0.0,
@@ -2986,7 +3068,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if let Some(v_ref) = cfg.speed_hold_m_s {
             if std::env::var_os("OVERBOARD_SPEED_LOOP").is_none() {
                 // Stand still until `--start-speed` is applied.
-                let target = if start_speed_pending.is_some() { 0.0 } else { v_ref };
+                let target = if start_speed_pending.is_some() || rider_eased { 0.0 } else { v_ref };
                 proposed_amps = if speed_hold_baseline {
                     speed_lqr.update(
                         regulated_pitch_rad,
@@ -3132,6 +3214,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if fallen {
             flags |= wire::STATE_FLAG_FALLEN;
         }
+        match margin_level {
+            control_core::MarginLevel::Pulse => flags |= wire::STATE_FLAG_MARGIN_PULSE,
+            control_core::MarginLevel::Solid => flags |= wire::STATE_FLAG_MARGIN_SOLID,
+            control_core::MarginLevel::None => {}
+        }
 
         // --- ADR-0012 PHYSICS-AUTHORITY HANDOFF -------------------------
         //
@@ -3222,6 +3309,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 pos_y_m: truth_pos_y_m as f32,
                 nose_strike_n: nose_n,
                 tail_strike_n: tail_n,
+                margin: margin.margin(),
+                margin_level: margin_level as u8,
                 utilisation,
                 utilisation_filtered,
                 authority_warning,
@@ -3454,12 +3543,12 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
         "seq,sim_time_s,stick_fore_aft,shaped_fore_aft,applied_fore_aft,truth_pitch_deg,\
          est_pitch_deg,est_pitch_rate_deg_s,truth_pitch_rate_deg_s,forward_speed_m_s,proposed_amps,applied_amps,\
          saturated,utilisation,utilisation_filtered,authority_warning,fallen,pos_x_m,pos_y_m,\
-         nose_strike_n,tail_strike_n\n",
+         nose_strike_n,tail_strike_n,margin,margin_level\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?},{:?},{:?}",
+            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?},{:?},{:?},{:?},{}",
             r.seq,
             r.sim_time_s,
             r.stick_fore_aft,
@@ -3481,6 +3570,8 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
             r.pos_y_m,
             r.nose_strike_n,
             r.tail_strike_n,
+            r.margin,
+            r.margin_level,
         );
     }
     std::fs::write(path, out).map_err(HostError::Io)
