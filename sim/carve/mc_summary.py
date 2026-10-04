@@ -22,7 +22,7 @@ def strike_deg(r):
     """Deck strike angle, deg. X7 pads: the box's bottom outer edge, 0.3463 m
     from the axle and (0.040 - pad_z) m below it, meets the ground (one tyre
     radius below the axle). Older runs: the model's 18.6 deg."""
-    if not r.get('pad_z'):
+    if r.get('pad_z') in (None, ''):
         return STRIKE_DEG
     x, z, rw = 0.3463, 0.040 - float(r['pad_z']), float(r.get('radius') or R)
     th = np.linspace(0.1, 0.6, 5001)
