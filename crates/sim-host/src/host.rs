@@ -483,6 +483,7 @@ fn write_model_with_kerb(
     terrain: Option<&TerrainSpec>,
     lean_steer: bool,
     max_current_a: Option<f32>,
+    variation: PlantVariation,
 ) -> Result<PathBuf, HostError> {
     let src = rider_model_path();
     let xml = std::fs::read_to_string(&src).map_err(|e| {
@@ -585,6 +586,39 @@ fn write_model_with_kerb(
         xml = xml.replace(
             from,
             &format!(r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-{nm} {nm}""#),
+        );
+    }
+
+    if let Some(m) = variation.rider_mass_kg {
+        // Same inertia formula as the model's 70 kg ballast (mass * 0.15, 0.15, 0.08).
+        let from = r#"<inertial pos="0 0 0" mass="70.0" diaginertia="10.5000 10.5000 5.6000"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --rider-mass could not find the ballast inertial to splice",
+            )));
+        }
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<inertial pos="0 0 0" mass="{m:.3}" diaginertia="{:.4} {:.4} {:.4}"/>"#,
+                m * 0.15,
+                m * 0.15,
+                m * 0.08
+            ),
+        );
+    }
+    if let Some(k) = variation.kt_scale {
+        // The true torque per commanded amp. ctrl stays the commanded current
+        // times the NOMINAL Kt, so the current limit is unchanged.
+        let from = r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" "#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --kt-scale could not find the wheel motor gear to splice",
+            )));
+        }
+        xml = xml.replace(
+            from,
+            &format!(r#"<motor name="wheel_motor" joint="wheel_hinge" gear="{k:.4}" "#),
         );
     }
 
@@ -1233,6 +1267,8 @@ pub const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
 /// Rust binding to that geometry query, so this is a fixed proxy near that
 /// value, not the real contact test -- good enough to prove "the board is
 /// clearly down", not precise enough to gate a published claim.
+/// Sim time at which `--start-speed` is applied, s (see `start_speed_pending`).
+const START_SPEED_AT_S: f64 = 1.0;
 const FALLEN_PITCH_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
 
 /// Soft, host-side drivable-corridor bounds, checked against **MuJoCo's own
@@ -1629,6 +1665,22 @@ pub struct HostConfig {
 
     /// Outer speed loop target, m/s (`--speed-hold`). `None`: no outer loop.
     pub speed_hold_m_s: Option<f32>,
+
+    /// Monte Carlo study inputs. Each one changes the PLANT only; the
+    /// controller keeps its nominal 70 kg and Kt = 0.7 N.m/A design.
+    /// Rider (ballast) mass, kg (`--rider-mass`). `None`: the model's 70 kg.
+    pub rider_mass_kg: Option<f64>,
+    /// True motor Kt as a fraction of the nominal 0.7 N.m/A (`--kt-scale`).
+    pub kt_scale: Option<f64>,
+    /// Forward speed set at t = 1 s, m/s (`--start-speed`). `None`: from rest.
+    pub start_speed_m_s: Option<f64>,
+}
+
+/// The plant-only changes a Monte Carlo run splices into the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlantVariation {
+    pub rider_mass_kg: Option<f64>,
+    pub kt_scale: Option<f64>,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1786,6 +1838,9 @@ impl Default for HostConfig {
             grade_feedforward: false,
             max_current_a: None,
             speed_hold_m_s: None,
+            rider_mass_kg: None,
+            kt_scale: None,
+            start_speed_m_s: None,
         }
     }
 }
@@ -2056,8 +2111,20 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         Some(path) => Some(read_terrain_spec(path, cfg.spawn_x_m)?),
         None => None,
     };
-    let generated_model = if cfg.kerb.is_some() || terrain.is_some() || cfg.lean_steer || cfg.max_current_a.is_some() {
-        Some(write_model_with_kerb(cfg.kerb.as_ref(), terrain.as_ref(), cfg.lean_steer, cfg.max_current_a)?)
+    let variation = PlantVariation { rider_mass_kg: cfg.rider_mass_kg, kt_scale: cfg.kt_scale };
+    let generated_model = if cfg.kerb.is_some()
+        || terrain.is_some()
+        || cfg.lean_steer
+        || cfg.max_current_a.is_some()
+        || variation != PlantVariation::default()
+    {
+        Some(write_model_with_kerb(
+            cfg.kerb.as_ref(),
+            terrain.as_ref(),
+            cfg.lean_steer,
+            cfg.max_current_a,
+            variation,
+        )?)
     } else {
         None
     };
@@ -2144,11 +2211,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             (f.len() == 5).then(|| (f[0], f[1], f[2], f[3], f[4]))
         })
         .unwrap_or((376.8, 88.4, 28.35, 8.06, 0.5));
-    let mut speed_lqr = control_core::SpeedHoldLqr::new(
-        lqr_gains.0, lqr_gains.1, lqr_gains.2, lqr_gains.3, lqr_gains.4,
-    )
-    // Steady lean and current per m/s^2, from lqr_design.py's linear model.
-    .with_feedforward(-0.1261, 17.82);
+    let new_speed_lqr = || {
+        control_core::SpeedHoldLqr::new(lqr_gains.0, lqr_gains.1, lqr_gains.2, lqr_gains.3, lqr_gains.4)
+            // Steady lean and current per m/s^2, from lqr_design.py's linear model.
+            .with_feedforward(-0.1261, 17.82)
+    };
+    let mut speed_lqr = new_speed_lqr();
+    // `--start-speed`: applied once the board has settled, not at t = 0. A
+    // board that is moving on its first IMU sample has its estimator start
+    // from a deceleration it reads as tilt (measured: -4.2 deg, 27 A), and on
+    // terrain the spawn drop makes that worse. A real board also starts its
+    // estimator at rest.
+    let mut start_speed_pending = cfg.start_speed_m_s;
     let mut last_saturated = false;
 
     let out_socket = UdpSocket::bind("127.0.0.1:0")?;
@@ -2624,6 +2698,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         }
         backend.apply_external_force(force, torque);
 
+        if let Some(v) = start_speed_pending.filter(|_| t_known_s >= START_SPEED_AT_S) {
+            backend.set_forward_speed(v, DEFAULT_R_EFF_M as f64);
+            // The reference and the grade aid restart from the new speed.
+            speed_lqr = new_speed_lqr();
+            grade_aid.reset();
+            start_speed_pending = None;
+        }
         let obs = backend.wait_observe().map_err(HostError::Backend)?;
         t_known_s = obs.t_recv_ns as f64 * 1e-9;
 
@@ -2754,7 +2835,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                     regulated_pitch_rad,
                     regulated_pitch_rate_rad_s,
                     forward_speed_m_s,
-                    v_ref,
+                    // Stand still until `--start-speed` is applied.
+                    if start_speed_pending.is_some() { 0.0 } else { v_ref },
                     DT_S as f32,
                     last_saturated,
                 );
@@ -2932,10 +3014,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 });
                 eprintln!(
                     "sim-host: ADR-0012 handoff at t={:.3}s -- {} \
-                     (bumper {strike_n:.0} N, tilt {:.1} deg); \
+                     (bumper {strike_n:.0} N: nose {:.0} N, tail {:.0} N, tilt {:.1} deg); \
                      MuJoCo has stopped propagating, Unreal owns the board",
                     t_known_s,
                     if by_strike { "bumper strike" } else { "tilt" },
+                    backend.truth_nose_strike_n(),
+                    backend.truth_tail_strike_n(),
                     tilt_rad.to_degrees(),
                 );
             }

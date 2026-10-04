@@ -727,6 +727,26 @@ impl SimBackend {
     /// IMMEDIATELY on the state vector rather than being buffered, so it is
     /// applied ONCE per call and must not be re-issued for the same tick.
     ///
+    /// Starts the board rolling forward (-X) at `v_m_s`: the frame's world
+    /// velocity and a matching wheel rate, so the wheel does not skid on the
+    /// first step. For Monte Carlo start-speed variation, on a settled board.
+    /// A no-op on a model without `frame_free` or `wheel_hinge`.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn set_forward_speed(&mut self, v_m_s: f64, r_wheel_m: f64) {
+        let plant = self.plant.as_mut().expect("set_forward_speed: backend is not open");
+        let (Some(vadr), Some(wadr)) = (self.frame_free_dofadr, plant.joint_dofadr("wheel_hinge"))
+        else {
+            return;
+        };
+        plant.set_qvel_range(vadr, &[-v_m_s, 0.0, 0.0]);
+        // No `forward()`: the plant allows it only at t = 0, and the next
+        // step recomputes everything from the new velocity.
+        plant.set_qvel_range(wadr, &[v_m_s / r_wheel_m]);
+        self.last_wheel_rate_rad_s = v_m_s / r_wheel_m;
+    }
+
     /// A no-op on a model that declares no `frame_free` joint, the same
     /// tolerance [`SimBackend::set_ballast_targets`] has.
     ///

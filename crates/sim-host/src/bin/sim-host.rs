@@ -108,6 +108,19 @@ fn main() -> ExitCode {
                 cfg.max_current_a = Some(a);
                 i += 2;
             }
+            "--rider-mass" | "--kt-scale" | "--start-speed" => {
+                let flag = args[i].clone();
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: {flag} needs a number");
+                    return ExitCode::FAILURE;
+                };
+                match flag.as_str() {
+                    "--rider-mass" => cfg.rider_mass_kg = Some(x),
+                    "--kt-scale" => cfg.kt_scale = Some(x),
+                    _ => cfg.start_speed_m_s = Some(x),
+                }
+                i += 2;
+            }
             "--grade-ff" => {
                 cfg.grade_feedforward = true;
                 i += 1;
