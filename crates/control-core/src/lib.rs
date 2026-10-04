@@ -115,6 +115,10 @@ pub trait Estimator {
 /// below the ~9.5 m/s² floor of grounded, in-envelope operation.
 pub const MIN_TRUSTED_ACCEL_MAG_M_S2: f32 = 9.81 / 2.0;
 
+/// [`TiltFilter`] ignores an accelerometer sample whose magnitude is further
+/// than this from g, m/s^2.
+pub const MAX_ACCEL_DEVIATION_M_S2: f32 = 2.5;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ComplementaryFilter {
     tau_s: f32,
@@ -294,6 +298,83 @@ impl Estimator for ComplementaryFilter {
 /// error may be small enough that an integrator only adds windup risk. That is
 /// an open question to settle with data, not on a whiteboard — and adding one
 /// requires the anti-windup path (ICD §7.6) to be wired to `Saturation` first.
+/// Longitudinal-acceleration aiding that stays unbiased on a grade.
+///
+/// [`CommandFeedforward`] predicts `a = K i`. That is the flat-ground model:
+/// on a grade the motor also holds the board against gravity, so
+/// `K i = a - g sin(alpha)` and an estimator aided by it is biased by about
+/// the grade angle (measured: +4.3 deg on a 12 % descent). Wheel odometry
+/// measures `a` without that bias, but `dv/dt` of the wheel spikes when the
+/// wheel unloads on rough ground under a saturated brake.
+///
+/// So: the command supplies the fast part and wheel odometry the slow part.
+///
+/// ```text
+/// load  <- LPF_tau_b(K i - dv/dt)       only while the sample is trusted
+/// a_aid  = K i - load
+/// ```
+///
+/// `load` is the grade load (`-g sin(alpha)` + rolling loss + model error),
+/// in m/s^2: negative going downhill, positive climbing. It is also the
+/// current needed to hold the grade (`load / K`), which the regulator can use
+/// as a feedforward so the board does not droop nose-up on a descent.
+#[derive(Debug, Clone, Copy)]
+pub struct GradeAwareAiding {
+    k_m_s2_per_a: f32,
+    tau_b_s: f32,
+    load_m_s2: f32,
+    last_v: Option<f32>,
+}
+
+impl GradeAwareAiding {
+    /// Largest |load| believed, m/s^2 (about g sin 20 deg plus rolling loss).
+    pub const LOAD_LIMIT_M_S2: f32 = 3.5;
+    /// A wheel acceleration beyond this is a slip or bounce, not the board.
+    pub const MAX_ODOMETRY_ACCEL_M_S2: f32 = 6.0;
+
+    pub const fn new(k_m_s2_per_a: f32, tau_b_s: f32) -> Self {
+        GradeAwareAiding { k_m_s2_per_a, tau_b_s, load_m_s2: 0.0, last_v: None }
+    }
+
+    /// Grade load, m/s^2 (negative downhill).
+    pub fn load_m_s2(&self) -> f32 {
+        self.load_m_s2
+    }
+
+    /// Grade estimate, rad (positive = downhill ahead).
+    pub fn grade_rad(&self) -> f32 {
+        libm::asinf((-self.load_m_s2 / 9.81).clamp(-1.0, 1.0))
+    }
+
+    /// One step. `amps` is the current applied last cycle, `v_m_s` the wheel
+    /// speed, `accel_mag_m_s2` the IMU specific-force magnitude (for the
+    /// impact gate). Returns the aiding acceleration, m/s^2.
+    pub fn update(&mut self, amps: f32, v_m_s: f32, accel_mag_m_s2: f32, dt_s: f32) -> f32 {
+        let a_cmd = self.k_m_s2_per_a * amps;
+        let prev = self.last_v.replace(v_m_s);
+        if let Some(prev) = prev {
+            if dt_s > 0.0 {
+                let a_odo = (v_m_s - prev) / dt_s;
+                let trusted = libm::fabsf(accel_mag_m_s2 - 9.81) < MAX_ACCEL_DEVIATION_M_S2
+                    && libm::fabsf(a_odo) < Self::MAX_ODOMETRY_ACCEL_M_S2;
+                if trusted {
+                    let alpha = dt_s / (self.tau_b_s + dt_s);
+                    self.load_m_s2 += alpha * ((a_cmd - a_odo) - self.load_m_s2);
+                    self.load_m_s2 = self
+                        .load_m_s2
+                        .clamp(-Self::LOAD_LIMIT_M_S2, Self::LOAD_LIMIT_M_S2);
+                }
+            }
+        }
+        a_cmd - self.load_m_s2
+    }
+
+    pub fn reset(&mut self) {
+        self.load_m_s2 = 0.0;
+        self.last_v = None;
+    }
+}
+
 /// Pitch AND roll, for a board that leans to steer.
 ///
 /// [`ComplementaryFilter`] integrates the pitch-axis gyro alone. That is right
@@ -363,6 +444,12 @@ impl TiltFilter {
         let fz = s.accel_m_s2[2] - a_c * sp;
         let mag = libm::sqrtf(fx * fx + fy * fy + fz * fz);
         if mag < MIN_TRUSTED_ACCEL_MAG_M_S2 {
+            return None;
+        }
+        // Impacts (a wheel bouncing on rough ground) are not "which way is
+        // down": take the gyro alone through them. Measured on the authored
+        // courses: f_z spikes to -16..-20 m/s^2.
+        if libm::fabsf(mag - 9.81) > MAX_ACCEL_DEVIATION_M_S2 {
             return None;
         }
         let roll = libm::atan2f(-fy, -fz);
@@ -1322,5 +1409,46 @@ mod tilt_filter_tests {
             b = c.update(&[s], 0.0);
         }
         assert!((a.pitch_rad - b.pitch_rad).abs() < 1e-3, "{} vs {}", a.pitch_rad, b.pitch_rad);
+    }
+}
+
+#[cfg(test)]
+mod grade_aware_tests {
+    use super::*;
+    const K: f32 = 0.0584;
+
+    #[test]
+    fn holding_speed_on_a_descent_learns_the_grade_and_reports_zero_acceleration() {
+        let mut g = GradeAwareAiding::new(K, 0.3);
+        // 12 % descent: holding speed takes i = -g sin(6.84 deg) / K of brake.
+        let i = -9.81 * 6.84_f32.to_radians().sin() / K;
+        let mut a = 1.0;
+        for _ in 0..2000 {
+            a = g.update(i, 3.0, 9.81, 0.002);
+        }
+        assert!(a.abs() < 0.02, "aid {a}");
+        assert!((g.grade_rad().to_degrees() - 6.84).abs() < 0.1, "grade {}", g.grade_rad().to_degrees());
+    }
+
+    #[test]
+    fn an_impact_sample_does_not_move_the_load() {
+        let mut g = GradeAwareAiding::new(K, 0.3);
+        g.update(0.0, 3.0, 9.81, 0.002);
+        // a 20 m/s^2 impact with a wheel spike: gated
+        g.update(0.0, 2.9, 20.0, 0.002);
+        assert_eq!(g.load_m_s2(), 0.0);
+    }
+
+    #[test]
+    fn on_the_flat_the_aid_is_the_command_prediction() {
+        let mut g = GradeAwareAiding::new(K, 0.3);
+        let mut v = 0.0;
+        let mut a = 0.0;
+        for _ in 0..1000 {
+            let acc = K * 10.0;
+            v += acc * 0.002;
+            a = g.update(10.0, v, 9.81, 0.002);
+        }
+        assert!((a - K * 10.0).abs() < 0.02, "aid {a}");
     }
 }

@@ -61,6 +61,7 @@ def y_ref(x):
 
 LEAN_KMAX = float(os.environ.get("LEAN_KMAX", "0"))  # set for sim-host --lean-steer
 LOOK_TIME_S = float(os.environ.get("LOOK_TIME_S", "2.0"))
+LEAN_BOUND = float(os.environ.get("LEAN_BOUND", "0.6"))
 
 
 def kmax(v):
@@ -151,7 +152,13 @@ while True:
                 # No fixed brake bias here: it assumed the 6.5 % City Park grade
                 # and stalled the board on a 2 % run-in (measured). The integral
                 # finds the lean any grade needs.
-                fa = float(np.clip(0.30 * err + 0.10 * integ - 0.45 * acc_f, -0.85, fwd_cap))
+                # Lean bounded to 3 cm (0.6 of the 5 cm range): the motor can
+                # hold the rider's centre of mass at most ~3.7 cm off the
+                # axle (28 N*m / (78 kg g)); asking for more tips the board.
+                raw = 0.30 * err + 0.10 * integ - 0.45 * acc_f
+                fa = float(np.clip(raw, -LEAN_BOUND, min(fwd_cap, LEAN_BOUND)))
+                if fa != raw:  # anti-windup: do not integrate into a stop
+                    integ -= err * period
             else:
                 fa = float(np.clip(kp * err + ki * integ + bias, -0.85, 0.10))
             v_prev = v

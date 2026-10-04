@@ -92,6 +92,10 @@ fn main() -> ExitCode {
                 cfg.spawn_x_m = x;
                 i += 2;
             }
+            "--grade-ff" => {
+                cfg.grade_feedforward = true;
+                i += 1;
+            }
             "--lean-steer" => {
                 cfg.lean_steer = true;
                 i += 1;
@@ -173,10 +177,11 @@ fn main() -> ExitCode {
                 cfg.estimator_aiding = match v.as_str() {
                     "command-feedforward" => sim_host::host::EstimatorAiding::CommandFeedforward,
                     "wheel-odometry" => sim_host::host::EstimatorAiding::WheelOdometry,
+                    "grade-aware" => sim_host::host::EstimatorAiding::GradeAware,
                     other => {
                         eprintln!(
                             "sim-host: unknown --estimator-aiding '{other}' \
-                             (want: command-feedforward, wheel-odometry)"
+                             (want: command-feedforward, wheel-odometry, grade-aware)"
                         );
                         return ExitCode::FAILURE;
                     }

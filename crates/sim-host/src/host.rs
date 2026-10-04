@@ -632,6 +632,8 @@ const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
 /// Duplicated here for the same reason `ACCEL_FF_GAIN_M_S2_PER_A` above is:
 /// this host does not link `control-ffi`.
 const WHEEL_ACCEL_TAU_S: f32 = 0.05;
+/// Time constant of the grade load learned by [`control_core::GradeAwareAiding`], s.
+const GRADE_LOAD_TAU_S: f32 = 0.3;
 
 /// `weight_shift_fore_aft` / `weight_shift_lateral`, both clamped to
 /// `[-1, 1]` on the wire, map linearly onto this range -- the SAME +/-0.05 m
@@ -1594,6 +1596,10 @@ pub struct HostConfig {
     /// Spawn point along MuJoCo X, metres, on the `--terrain` heightmap. Lets a
     /// run start on flatter road uphill of the origin without moving the frame.
     pub spawn_x_m: f64,
+
+    /// Add the learned grade current (`--grade-ff`) to the regulator output.
+    /// Needs `EstimatorAiding::GradeAware`, which learns the grade.
+    pub grade_feedforward: bool,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1652,6 +1658,10 @@ pub enum EstimatorAiding {
     /// Not pinned before issue #227; see
     /// `tests/test_cmd_envelope_reserve.py` for the coverage this adds.
     WheelOdometry,
+    /// [`control_core::GradeAwareAiding`]: the command prediction, corrected
+    /// by a slow grade load learned from wheel odometry. Unbiased on grades,
+    /// and robust to wheel spikes on rough ground.
+    GradeAware,
 }
 
 /// A scheduled external force/torque disturbance, world frame, applied to the
@@ -1744,6 +1754,7 @@ impl Default for HostConfig {
             terrain: None,
             lean_steer: false,
             spawn_x_m: 0.0,
+            grade_feedforward: false,
         }
     }
 }
@@ -2077,6 +2088,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // `control-ffi`'s doc recommends for hardware). One cycle old by
     // construction, same as `control-ffi::ObController::last_amps`.
     let mut last_amps: f32 = 0.0;
+    let mut grade_aid = control_core::GradeAwareAiding::new(ACCEL_FF_GAIN_M_S2_PER_A, GRADE_LOAD_TAU_S);
 
     let out_socket = UdpSocket::bind("127.0.0.1:0")?;
     let in_socket = UdpSocket::bind(cfg.input_in_addr)?;
@@ -2378,6 +2390,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
             tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
             last_amps = 0.0;
+            grade_aid.reset();
             last_forward_speed_m_s = 0.0;
             utilisation_filtered = 0.0;
             prev_outside_corridor = false;
@@ -2572,6 +2585,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // never reads it.
         let aiding = match cfg.estimator_aiding {
             EstimatorAiding::CommandFeedforward => accel_ff.predict(last_amps),
+            EstimatorAiding::GradeAware => {
+                let f = sample.accel_m_s2;
+                let mag = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+                grade_aid.update(last_amps, forward_speed_m_s, mag, DT_S as f32)
+            }
             EstimatorAiding::WheelOdometry => wheel_accel.update(forward_speed_m_s, DT_S as f32),
         };
         // The estimator runs on EVERY run, including a `PitchSource::
@@ -2656,7 +2674,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let proposed_torque_nm =
             regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, 0.0);
         // The single kt division -- the actuation boundary (issue #137).
-        let proposed_amps = proposed_torque_nm / KT_NM_PER_A;
+        let mut proposed_amps = proposed_torque_nm / KT_NM_PER_A;
+        // Grade feedforward: the current that holds the board on the learned
+        // grade, so the proportional regulator does not have to droop
+        // nose-up to make it (3.8 deg on an 8 % descent, measured). The same
+        // idea as the VESC Float package's adaptive torque response.
+        if cfg.grade_feedforward {
+            proposed_amps += grade_aid.load_m_s2() / ACCEL_FF_GAIN_M_S2_PER_A;
+        }
+        // WARNING (measured 2026-10-04): `--grade-ff` is physically wrong for
+        // a balancing board and runs away (7-14 m/s on 6-12 % descents). A
+        // sustained torque needs a matching centre-of-mass offset (rider
+        // lean or board tilt); added current only makes the pitch loop fight
+        // it. Kept only so the result can be reproduced; do not use it.
         // --- ADR-0011 criterion (c): the saturation bit STOPS being thrown
         // --- away here ---------------------------------------------------
         //
