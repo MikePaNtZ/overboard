@@ -84,6 +84,20 @@ fn main() -> ExitCode {
                 cfg.scripted_scenario = Some(sched);
                 i += 2;
             }
+            "--schedule-csv" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --schedule-csv needs a path");
+                    return ExitCode::FAILURE;
+                };
+                match sim_host::scenario::from_csv_file(std::path::Path::new(v)) {
+                    Ok(sched) => cfg.scripted_scenario = Some(sched),
+                    Err(e) => {
+                        eprintln!("sim-host: --schedule-csv {v}: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                i += 2;
+            }
             "--state-out-addr" => {
                 let Some(v) = args.get(i + 1) else {
                     eprintln!("sim-host: --state-out-addr needs a value");
