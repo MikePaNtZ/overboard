@@ -40,11 +40,17 @@ RUNS = {
     # A quick descent for the hero shot.
     'fast_descent_70kg': (70.0, 1.0, 60.0, 7.0, ['--authority-margin', 'warn']),
     # The climb alone, from the flat intersection: the nose-strike case.
-    'climb_heavy_no_warning': (110.0, 0.88, 35.0, 4.0, ['--spawn-x', str(CLIMB_SPAWN_X_M)]),
+    # They start rolling at 4 m/s: from rest, the start-up current of a 128 kg
+    # board on a 35 A motor already passes the 70 % warning threshold.
+    'climb_heavy_no_warning': (110.0, 0.88, 35.0, 4.0,
+                               ['--spawn-x', str(CLIMB_SPAWN_X_M), '--start-speed', '4']),
     'climb_heavy_rider_reacts': (110.0, 0.88, 35.0, 4.0,
-                                 ['--spawn-x', str(CLIMB_SPAWN_X_M), '--authority-margin', 'warn',
-                                  '--rider-reacts']),
+                                 ['--spawn-x', str(CLIMB_SPAWN_X_M), '--start-speed', '4',
+                                  '--authority-margin', 'warn', '--rider-reacts']),
 }
+# Render tracks start here, s: sim-host sets --start-speed at t = 1 s, and the
+# render must not show the board standing and then jumping to speed.
+TRIM_START_S = {'climb_heavy_no_warning': 1.05, 'climb_heavy_rider_reacts': 1.05}
 
 
 def run(name, spec, out, port):
@@ -71,9 +77,11 @@ def run(name, spec, out, port):
     full = dict(np.load(d / 'track.npz'))
     np.savez(d / 'track_full.npz', **full)
     past = np.nonzero(90.0 - full['px'] > END_S_M)[0]
-    if len(past):
-        np.savez(d / 'track.npz', **{k: v[:past[0]] for k, v in full.items()})
-        msg += f"; trimmed at s = {END_S_M:.0f} m (t = {full['t'][past[0]]:.1f} s)"
+    i1 = past[0] if len(past) else len(full['t'])
+    i0 = int(np.searchsorted(full['t'], TRIM_START_S.get(name, 0.0)))
+    if i0 > 0 or i1 < len(full['t']):
+        np.savez(d / 'track.npz', **{k: v[i0:i1] for k, v in full.items()})
+        msg += f"; render track t = {full['t'][i0]:.2f}..{full['t'][i1 - 1]:.1f} s"
     events = [l.split('sim-host: ', 1)[1] for l in open(d / 'host.txt')
               if any(k in l for k in ('rider warning', 'rider eases', 'rider dismount', 'handoff at'))]
     return name, msg, events
