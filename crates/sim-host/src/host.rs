@@ -3308,7 +3308,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             let cmd = rider.command(&lean_params, steer, last_forward_speed_m_s, &obs, DT_S as f32);
             lean_balance_torque_nm = cmd.roll_torque_nm;
             lean_balance_peak_nm = lean_balance_peak_nm.max(cmd.roll_torque_nm.abs());
-            if lean_debug && ticks % 125 == 0 {
+            if lean_debug && ticks.is_multiple_of(125) {
                 eprintln!(
                     "LEAN t={t_known_s:6.2} v={last_forward_speed_m_s:5.2} steer={steer:+.2} \
                      kappa={:+.3} phi_ref={:+5.1} phi={:+5.1} d={:+.3} tau={:+6.1}",
@@ -3442,7 +3442,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // it -- it is the only signal path a real board has, and an
         // acceptance trace that stopped recording it would stop being able to
         // show how big the bias criterion (f) is neutralising actually is.
-        if lean_debug && ticks % 250 == 0 {
+        if lean_debug && ticks.is_multiple_of(250) {
             let f = sample.accel_m_s2;
             eprintln!(
                 "IMU t={t_known_s:6.2} f=({:+.3},{:+.3},{:+.3}) aid={aiding:+.3} \
@@ -3564,7 +3564,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             battery.step(last_amps as f64, wheel_rate_rad_s as f64, hud_kt, hud_mass, DT_S);
         }
         if let Some(addr) = cfg.hud_out_addr {
-            if ticks % 10 == 0 {
+            if ticks.is_multiple_of(10) {
                 let pkt = crate::hud::HudOut {
                     flags: margin_level as u16,
                     seq: hud_seq,
