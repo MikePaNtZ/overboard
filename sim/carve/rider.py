@@ -132,7 +132,11 @@ while True:
             # across it, as a carving rider's does. Firm braking only at the end.
             vr = V_REF * min(1.0, t / RAMP_S) if px > BRAKE_X else 0.0
             err = vr - v
-            integ = np.clip(integ + err * period, -3, 3)
+            # Leaky in lean mode (1/s): the grade lean carries the slope, the
+            # integral only trims speed. A plain integral stored the slope's
+            # forward lean and dumped it at the foot of the hill (measured).
+            leak = 1.0 * period if LEAN_KMAX > 0 else 0.0
+            integ = np.clip(integ * (1.0 - leak) + err * period, -3, 3)
             # Lean-to-steer needs a firmer speed hold: a soft one let the speed
             # run to 6.6 m/s on the 6.5 % grade (measured).
             kp, ki = (0.35, 0.12) if (vr == 0 or LEAN_KMAX > 0) else (0.18, 0.05)

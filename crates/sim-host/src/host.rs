@@ -441,6 +441,12 @@ fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
                  range="-0.25 0.25""#,
         ),
         (
+            r#"<position name="ballast_fa" joint="ballast_fa" kp="3000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.15"/>"#,
+            r#"<position name="ballast_fa" joint="ballast_fa" kp="12000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.05"/>"#,
+        ),
+        (
             r#"<position name="ballast_lat" joint="ballast_lat" kp="3000" ctrlrange="-0.05 0.05"
               ctrllimited="true" timeconst="0.15"/>"#,
             r#"<position name="ballast_lat" joint="ballast_lat" kp="12000" ctrlrange="-0.25 0.25"
