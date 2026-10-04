@@ -19,12 +19,13 @@ R, STRIKE_DEG, BOARD_KG = 0.1454, 18.6, 13.0
 
 
 def strike_deg(r):
-    """Deck strike angle, deg. X7 pads: the box's bottom outer edge, 0.3463 m
-    from the axle and (0.040 - pad_z) m below it, meets the ground (one tyre
-    radius below the axle). Older runs: the model's 18.6 deg."""
+    """Deck strike angle, deg. X7 pads: the kicked box's bottom outer corner,
+    0.3463 m from the axle and (0.027 - pad_z) m below it, meets the ground
+    (one tyre radius below the axle). Older runs: the model's 18.6 deg.
+    Results before commit 2026-10-04 'kicked pads' used flat boxes (0.040 m)."""
     if r.get('pad_z') in (None, ''):
         return STRIKE_DEG
-    x, z, rw = 0.3463, 0.040 - float(r['pad_z']), float(r.get('radius') or R)
+    x, z, rw = 0.3463, 0.027 - float(r['pad_z']), float(r.get('radius') or R)
     th = np.linspace(0.1, 0.6, 5001)
     return float(np.degrees(th[np.argmin(np.abs(x * np.sin(th) + z * np.cos(th) - rw))]))
 

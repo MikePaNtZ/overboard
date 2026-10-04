@@ -483,9 +483,9 @@ fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
 ///   ground under the axle with +X = nose, so they sit at (0, 0, -0.146)
 ///   and turn 180 deg (the model's forward is -X).
 /// - Collision: a box and a bumper at each end replace the bumper meshes.
-///   The lowest point is the box's bottom outer edge, 0.346 m from the axle
-///   and 0.040 m below it: the deck strikes at about 18.2 deg. `pad_z`
-///   raises or lowers all four.
+///   The boxes are kicked 4.2 deg with the deck; the outer bottom corner,
+///   0.346 m from the axle and 0.027 m below it, strikes first, at 20.4 deg.
+///   `pad_z` raises or lowers all four.
 /// - The nose and tail strike sensors grow to cover the new contact points.
 fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -> Result<String, HostError> {
     let fail = |what: &str| {
@@ -494,14 +494,26 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
         )))
     };
     // Assets.
+    // The look: materials and per-material meshes, generated from the hardware
+    // track's look.json by sim/carve/x7_look.py.
+    let frag_path = rider_model_path().with_file_name("meshes/openwheel/x7/x7_visual.xml");
+    let frag = std::fs::read_to_string(&frag_path).map_err(|e| {
+        HostError::Io(std::io::Error::new(
+            e.kind(),
+            format!("sim-host: --plant x7 needs {} (run sim/carve/x7_look.py): {e}", frag_path.display()),
+        ))
+    })?;
+    let part = |tag: &str| -> Result<String, HostError> {
+        let a = frag.find(tag).ok_or_else(|| fail(tag))? + tag.len();
+        let b = frag[a..].find("<!-- X7 ").map_or(frag.len(), |i| a + i);
+        Ok(frag[a..b].trim().to_string())
+    };
+    let (assets, frame_geoms, wheel_geoms) =
+        (part("<!-- X7 ASSETS -->")?, part("<!-- X7 FRAME -->")?, part("<!-- X7 WHEEL -->")?);
     if xml.matches("</asset>").count() != 1 {
         return Err(fail("</asset>"));
     }
-    xml = xml.replace(
-        "</asset>",
-        "  <mesh name=\"x7_frame\" file=\"x7/frame.stl\"/>\n    \
-         <mesh name=\"x7_wheel\" file=\"x7/wheel.stl\"/>\n  </asset>",
-    );
+    xml = xml.replace("</asset>", &format!("  {assets}\n  </asset>"));
     // Hide the old visuals (render group 5 is off by default).
     for name in [
         "front_enclosure_geom",
@@ -525,19 +537,11 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
     let from = r#"<geom name="electronics_platform_geom""#;
     let at = xml.find(from).ok_or_else(|| fail("electronics_platform_geom"))?;
     let end = at + xml[at..].find("/>").ok_or_else(|| fail("electronics_platform_geom end"))? + 2;
-    xml.insert_str(
-        end,
-        "\n      <geom name=\"x7_frame_vis\" class=\"visual\" type=\"mesh\" mesh=\"x7_frame\" \
-         pos=\"0 0 -0.146\" euler=\"0 0 180\" rgba=\"0.20 0.21 0.23 1\"/>",
-    );
+    xml.insert_str(end, &format!("\n      {frame_geoms}"));
     let from = r#"<joint name="wheel_hinge""#;
     let at = xml.find(from).ok_or_else(|| fail("wheel_hinge"))?;
     let end = at + xml[at..].find("/>").ok_or_else(|| fail("wheel_hinge end"))? + 2;
-    xml.insert_str(
-        end,
-        "\n        <geom name=\"x7_wheel_vis\" class=\"visual\" type=\"mesh\" mesh=\"x7_wheel\" \
-         pos=\"0 0 -0.146\" euler=\"0 0 180\" rgba=\"0.09 0.09 0.10 1\"/>",
-    );
+    xml.insert_str(end, &format!("\n        {wheel_geoms}"));
     // Pads: replace each bumper mesh geom with a box and a bumper bar.
     // Proxy boxes (ground frame, +X = nose): box x 0.1658-0.3463, y +-0.120,
     // z 0.106-0.1885; bumper x 0.3463-0.3719, y +-0.145, z 0.146-0.200.
@@ -552,14 +556,19 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
         let tag = format!(r#"<geom name="{end_name}_bumper_geom""#);
         let at = xml.find(&tag).ok_or_else(|| fail(&tag))?;
         let stop = at + xml[at..].find("/>").ok_or_else(|| fail(&tag))? + 2;
-        let bx = sign * 0.25605;
+        // Each end box is kicked 4.2 deg up with the deck: its bottom runs
+        // from 0.040 m below the axle at the inner end (0.166 m out) to 0.027 m
+        // below at the outer end (0.346 m out), and the outer corner strikes
+        // first, at 20.4 deg (hardware track). Box 0.180 x 0.240 x 0.0695 m.
+        let bx = sign * 0.2535;
         let bb = sign * 0.3591;
+        let tilt = -sign * 4.2; // the outer end up
         let boxes = format!(
             "<geom name=\"{end_name}_box_geom\" type=\"box\" pos=\"{bx:.5} 0 {:.5}\" \
-             size=\"0.09025 0.120 0.04125\" condim=\"3\" {mu} group=\"5\"/>\n      \
+             euler=\"0 {tilt:.1} 0\" size=\"0.0900 0.120 0.03475\" condim=\"3\" {mu} group=\"5\"/>\n      \
              <geom name=\"{end_name}_bumper_geom\" type=\"box\" pos=\"{bb:.5} 0 {:.5}\" \
              size=\"0.0128 0.145 0.027\" condim=\"3\" {mu} group=\"5\"/>",
-            0.00125 + pad_z,
+            0.0012 + pad_z,
             0.027 + pad_z
         );
         xml.replace_range(at..stop, &boxes);
@@ -2060,7 +2069,7 @@ pub struct PlantVariation {
     /// Onewheel-style meshes.
     pub x7_geometry: bool,
     /// `--plant`: raise (+) or lower (-) the nose and tail pads, m. 1 cm is
-    /// about 1.6 deg of strike angle. The proxy pads give about 18.2 deg.
+    /// about 1.6 deg of strike angle. The proxy pads give 20.4 deg.
     pub pad_z_m: Option<f64>,
 }
 

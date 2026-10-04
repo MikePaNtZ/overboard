@@ -65,9 +65,10 @@ X7_RANGES = {
     'com_z': (0.003 - 0.02, 0.003 + 0.02),
     'frame_i': (1.175 * 0.7, 1.175 * 1.3),    # frame inertia scale, +- 30 %
     'radius': (0.142, 0.150),                 # tyre radius, m (pressure, wear)
-    # Nose/tail pad height: -0.001..+0.0164 m spans a deck strike angle of
-    # about 18-21 deg (proxy pads strike at 18.2 deg; hardware track 18-21).
-    'pad_z': (-0.001, 0.0164),
+    # Nose/tail pad height: -0.0140..+0.0034 m spans a deck strike angle of
+    # 18-21 deg (proxy pads strike at 20.4 deg; the real bumper probably
+    # wraps lower, so the hardware track's honest range is 18-21 deg).
+    'pad_z': (-0.0140, 0.0034),
 }
 X7_KEYS = ('board_kg', 'wheel_kg', 'wheel_spin', 'com_x', 'com_z', 'frame_i', 'radius', 'pad_z')
 X7_R_PHASE_OHM = 0.0525   # Superflux HT, motor wizard
