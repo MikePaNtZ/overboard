@@ -475,6 +475,113 @@ fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
     Ok(out)
 }
 
+/// The X7 build's look and pads (`--plant x7`), from the hardware track's
+/// proxy geometry (`sim/models/meshes/openwheel/x7/README.md`).
+///
+/// - Visual: the frame and wheel meshes replace the Onewheel-style visuals,
+///   which move to the hidden render group 5. The meshes' origin is the
+///   ground under the axle with +X = nose, so they sit at (0, 0, -0.146)
+///   and turn 180 deg (the model's forward is -X).
+/// - Collision: a box and a bumper at each end replace the bumper meshes.
+///   The lowest point is the box's bottom outer edge, 0.346 m from the axle
+///   and 0.040 m below it: the deck strikes at about 18.2 deg. `pad_z`
+///   raises or lowers all four.
+/// - The nose and tail strike sensors grow to cover the new contact points.
+fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -> Result<String, HostError> {
+    let fail = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --plant x7 could not find {what} to splice -- the shared model has changed"
+        )))
+    };
+    // Assets.
+    if xml.matches("</asset>").count() != 1 {
+        return Err(fail("</asset>"));
+    }
+    xml = xml.replace(
+        "</asset>",
+        "  <mesh name=\"x7_frame\" file=\"x7/frame.stl\"/>\n    \
+         <mesh name=\"x7_wheel\" file=\"x7/wheel.stl\"/>\n  </asset>",
+    );
+    // Hide the old visuals (render group 5 is off by default).
+    for name in [
+        "front_enclosure_geom",
+        "rear_enclosure_geom",
+        "front_footpad_geom",
+        "rear_footpad_geom",
+        "electronics_platform_geom",
+    ] {
+        let from = format!(r#"<geom name="{name}" class="visual""#);
+        if xml.matches(&from).count() != 1 {
+            return Err(fail(name));
+        }
+        xml = xml.replace(&from, &format!(r#"<geom name="{name}" class="visual" group="5""#));
+    }
+    let from = r#"<geom name="wheel_geom" "#;
+    if xml.matches(from).count() != 1 {
+        return Err(fail("wheel_geom"));
+    }
+    xml = xml.replace(from, r#"<geom name="wheel_geom" group="5" "#);
+    // The new visuals.
+    let from = r#"<geom name="electronics_platform_geom""#;
+    let at = xml.find(from).ok_or_else(|| fail("electronics_platform_geom"))?;
+    let end = at + xml[at..].find("/>").ok_or_else(|| fail("electronics_platform_geom end"))? + 2;
+    xml.insert_str(
+        end,
+        "\n      <geom name=\"x7_frame_vis\" class=\"visual\" type=\"mesh\" mesh=\"x7_frame\" \
+         pos=\"0 0 -0.146\" euler=\"0 0 180\" rgba=\"0.20 0.21 0.23 1\"/>",
+    );
+    let from = r#"<joint name="wheel_hinge""#;
+    let at = xml.find(from).ok_or_else(|| fail("wheel_hinge"))?;
+    let end = at + xml[at..].find("/>").ok_or_else(|| fail("wheel_hinge end"))? + 2;
+    xml.insert_str(
+        end,
+        "\n        <geom name=\"x7_wheel_vis\" class=\"visual\" type=\"mesh\" mesh=\"x7_wheel\" \
+         pos=\"0 0 -0.146\" euler=\"0 0 180\" rgba=\"0.09 0.09 0.10 1\"/>",
+    );
+    // Pads: replace each bumper mesh geom with a box and a bumper bar.
+    // Proxy boxes (ground frame, +X = nose): box x 0.1658-0.3463, y +-0.120,
+    // z 0.106-0.1885; bumper x 0.3463-0.3719, y +-0.145, z 0.146-0.200.
+    // Here: forward is -X, and z is from the axle (0.146 above the ground).
+    let mu_rear = tail_friction
+        .map(|m| format!(r#"priority="1" friction="{m:.3} 0.005 0.0001""#))
+        .unwrap_or_else(|| r#"friction="0.6 0.005 0.0001""#.to_string());
+    for (end_name, sign, mu) in [
+        ("front", -1.0f64, r#"friction="0.6 0.005 0.0001""#.to_string()),
+        ("rear", 1.0, mu_rear),
+    ] {
+        let tag = format!(r#"<geom name="{end_name}_bumper_geom""#);
+        let at = xml.find(&tag).ok_or_else(|| fail(&tag))?;
+        let stop = at + xml[at..].find("/>").ok_or_else(|| fail(&tag))? + 2;
+        let bx = sign * 0.25605;
+        let bb = sign * 0.3591;
+        let boxes = format!(
+            "<geom name=\"{end_name}_box_geom\" type=\"box\" pos=\"{bx:.5} 0 {:.5}\" \
+             size=\"0.09025 0.120 0.04125\" condim=\"3\" {mu} group=\"5\"/>\n      \
+             <geom name=\"{end_name}_bumper_geom\" type=\"box\" pos=\"{bb:.5} 0 {:.5}\" \
+             size=\"0.0128 0.145 0.027\" condim=\"3\" {mu} group=\"5\"/>",
+            0.00125 + pad_z,
+            0.027 + pad_z
+        );
+        xml.replace_range(at..stop, &boxes);
+    }
+    // Strike sensors: cover the box edge (0.346 m, -0.040 m) and the bumper.
+    for (site, x) in [("nose_strike", -0.30f64), ("tail_strike", 0.30)] {
+        let from = if x < 0.0 {
+            r#"<site name="nose_strike" pos="-0.4072 0 0.0122" size="0.075 0.125 0.050""#
+        } else {
+            r#"<site name="tail_strike" pos="+0.4072 0 0.0122" size="0.075 0.125 0.050""#
+        };
+        if xml.matches(from).count() != 1 {
+            return Err(fail(site));
+        }
+        xml = xml.replace(
+            from,
+            &format!(r#"<site name="{site}" pos="{x:.3} 0 {:.4}" size="0.095 0.165 0.075""#, 0.005 + pad_z),
+        );
+    }
+    Ok(xml)
+}
+
 /// Writes `overboard_rider.xml` with `kerb` spliced into its `<worldbody>` to
 /// a temporary file, and returns that path. The original file is never
 /// modified.
@@ -705,6 +812,9 @@ fn write_model_with_kerb(
             ),
         );
     }
+    if variation.x7_geometry {
+        xml = splice_x7_geometry(xml, variation.pad_z_m.unwrap_or(0.0), variation.tail_friction)?;
+    }
     if let Some(k) = variation.kt_scale {
         // The true torque per commanded amp. ctrl stays the commanded current
         // times the NOMINAL Kt, so the current limit is unchanged.
@@ -737,8 +847,11 @@ fn write_model_with_kerb(
         // on a 60 m vertical curve the plate is within 1.3 mm of the road
         // there. Cost: the pads no longer hit kerbs; --hfield-wheel-contact
         // restores both for kerb studies.
-        for pad in ["front_bumper_geom", "rear_bumper_geom"] {
+        for pad in ["front_bumper_geom", "rear_bumper_geom", "front_box_geom", "rear_box_geom"] {
             let from = format!(r#"<geom name="{pad}" "#);
+            if pad.ends_with("_box_geom") && !xml.contains(&from) {
+                continue; // only the X7 pads have boxes
+            }
             if xml.matches(&from).count() != 1 {
                 return Err(HostError::Io(std::io::Error::other(format!(
                     "sim-host: smooth contact could not find {pad} to splice"
@@ -1942,6 +2055,13 @@ pub struct PlantVariation {
     /// `--plant`: tyre rolling radius, m (model 0.1454). The controller keeps
     /// its 0.1454 m belief, so a different value is a plant error.
     pub wheel_radius_m: Option<f64>,
+    /// `--plant x7`: the build's look (proxy meshes) and its nose and tail
+    /// collision pads (a box and a bumper at each end) in place of the
+    /// Onewheel-style meshes.
+    pub x7_geometry: bool,
+    /// `--plant`: raise (+) or lower (-) the nose and tail pads, m. 1 cm is
+    /// about 1.6 deg of strike angle. The proxy pads give about 18.2 deg.
+    pub pad_z_m: Option<f64>,
 }
 
 impl PlantVariation {
@@ -1974,6 +2094,8 @@ pub fn plant_x7() -> PlantVariation {
         frame_com_m: Some((0.0244, 0.003)),
         frame_inertia_scale: Some(0.47 / 0.400),
         wheel_radius_m: Some(0.146),
+        x7_geometry: true,
+        pad_z_m: None,
     }
 }
 
@@ -2001,6 +2123,7 @@ pub fn parse_plant_spec(spec: &str) -> Result<PlantVariation, String> {
             "frame_i" => v.frame_inertia_scale = Some(x),
             "radius" => v.wheel_radius_m = Some(x),
             "kt" => v.kt_scale = Some(x),
+            "pad_z" => v.pad_z_m = Some(x),
             _ => return Err(format!("--plant: unknown key '{k}'")),
         }
     }

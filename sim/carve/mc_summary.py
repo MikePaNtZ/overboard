@@ -18,6 +18,17 @@ import numpy as np
 R, STRIKE_DEG, BOARD_KG = 0.1454, 18.6, 13.0
 
 
+def strike_deg(r):
+    """Deck strike angle, deg. X7 pads: the box's bottom outer edge, 0.3463 m
+    from the axle and (0.040 - pad_z) m below it, meets the ground (one tyre
+    radius below the axle). Older runs: the model's 18.6 deg."""
+    if not r.get('pad_z'):
+        return STRIKE_DEG
+    x, z, rw = 0.3463, 0.040 - float(r['pad_z']), float(r.get('radius') or R)
+    th = np.linspace(0.1, 0.6, 5001)
+    return float(np.degrees(th[np.argmin(np.abs(x * np.sin(th) + z * np.cos(th) - rw))]))
+
+
 def envelope(r):
     m = float(r['rider_kg'])
     board = float(r.get('board_kg') or BOARD_KG)
@@ -36,7 +47,7 @@ def envelope(r):
     # A CoM behind the axle needs a constant forward (nose-down) trim: it
     # costs nose clearance on a climb and gives tail clearance on a descent.
     trim = np.degrees(np.arcsin(np.clip(frame * cx / ((board + m) * L), -1, 1)))
-    geo = STRIKE_DEG - np.degrees(a + np.arcsin(r_w * np.sin(a) / L)) - (trim if g > 0 else -trim)
+    geo = strike_deg(r) - np.degrees(a + np.arcsin(r_w * np.sin(a) / L)) - (trim if g > 0 else -trim)
     i_ss = (board + m) * 9.81 * np.sin(a) * r_w / (0.7 * float(r['kt_scale']))
     return geo, float(r['amps']) / max(i_ss, 1e-6)
 
