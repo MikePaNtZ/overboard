@@ -24,7 +24,11 @@ ST = struct.Struct('<IHHQd3f4f5f2f3f3f')
 IN = struct.Struct('<IHHQfff')
 COLS = 'flags seq t px py pz qw qx qy qz wheel_angle wheel_rate pitch yaw current rider_fa rider_lat vx vy vz wx wy wz'.split()
 
-lane = np.array(json.load(open('/tmp/carve/lane.json')))  # x, ymin, ymax (x descending)
+# Course inputs (defaults: the City Park carve road). LANE_JSON is the clean lane,
+# COURSE_X0 the x where the path starts (s = X0 - x), LINE_JSON an optional line
+# as [[s, offset fraction], ...].
+lane = np.array(json.load(open(os.environ.get('LANE_JSON', '/tmp/carve/lane.json'))))  # x, ymin, ymax (x descending)
+COURSE_X0 = float(os.environ.get('COURSE_X0', '0'))
 lx = lane[::-1, 0]
 lmid = ((lane[:, 1] + lane[:, 2]) / 2)[::-1]
 lhalf = ((lane[:, 2] - lane[:, 1]) / 2 - 1.0)[::-1]  # usable half-width, 1 m clear of each edge
@@ -33,6 +37,8 @@ lhalf = ((lane[:, 2] - lane[:, 1]) / 2 - 1.0)[::-1]  # usable half-width, 1 m cl
 # The road bends left (+y), so +y is the inside of the bend.
 # Enter wide, three long linked carves, apex the inside of the bend, run out.
 LINE = [(0, 0.0), (4, -0.1), (14, -0.95), (27, 0.95), (40, -0.8), (51, 0.7), (60, 0.3), (80, 0.3)]
+if os.environ.get('LINE_JSON'):
+    LINE = [tuple(p) for p in json.loads(os.environ['LINE_JSON'])]
 _ls = np.array([p[0] for p in LINE], float)
 _lo = np.array([p[1] for p in LINE], float) * float(os.environ.get("LINE_SCALE", "1.0"))
 
@@ -43,12 +49,12 @@ def _smooth_offset(s):
     return PchipInterpolator(_ls, _lo)(np.clip(s, _ls[0], _ls[-1]))
 
 
-_grid = np.linspace(0, 80, 801)
+_grid = np.linspace(0, max(80.0, _ls[-1]), 1601)
 _off = _smooth_offset(_grid)
 
 
 def y_ref(x):
-    s = -x
+    s = COURSE_X0 - x
     f = np.interp(s, _grid, _off)
     return np.interp(x, lx, lmid) + f * np.interp(x, lx, lhalf)
 
@@ -131,8 +137,21 @@ while True:
                 # integral small, and never push forward once rolling.
                 acc = (v - v_prev) / period if v_prev is not None else 0.0
                 acc_f = acc_f + 0.1 * (acc - acc_f)
-                fwd_cap = 0.10 if v < 1.5 else 0.0
-                fa = float(np.clip(0.30 * err + 0.03 * integ - 0.45 * acc_f + bias, -0.85, fwd_cap))
+                # Forward lean is how a rider drives on the flat and up a climb;
+                # a 0.1 cap stalled the board on a 2 % run-in (measured). The
+                # acceleration damping keeps the push-off from surging.
+                fwd_cap = float(os.environ.get("FWD_CAP", "0.6"))
+                # Feel the motor working: as the current passes ~20 A the rider
+                # stops asking for more forward lean, and past ~32 A leans back.
+                # Without this, forward lean in the sag at the foot of the 12 %
+                # descent drove the motor to 40 A and the nose into the ground
+                # (measured) -- the onewheel "overpower nosedive".
+                i_abs = abs(last[14])
+                fwd_cap = min(fwd_cap, max(-0.3, fwd_cap * (1.0 - (i_abs - 20.0) / 12.0)))
+                # No fixed brake bias here: it assumed the 6.5 % City Park grade
+                # and stalled the board on a 2 % run-in (measured). The integral
+                # finds the lean any grade needs.
+                fa = float(np.clip(0.30 * err + 0.10 * integ - 0.45 * acc_f, -0.85, fwd_cap))
             else:
                 fa = float(np.clip(kp * err + ki * integ + bias, -0.85, 0.10))
             v_prev = v

@@ -2426,8 +2426,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // as of the END of the PREVIOUS tick (issue #163: this used to read
         // the dead-reckoned path, which no longer exists) -- the same
         // one-cycle lag the speed cap above uses, and for the same reason.
-        let outside_corridor = !(corridor_x_min_m..=corridor_x_max_m).contains(&truth_pos_x_m)
-            || truth_pos_y_m.abs() > corridor_half_width_m;
+        // The corridor bounds the flat game plane. On a `--terrain` heightmap
+        // the terrain itself bounds the run (and a course may sit anywhere in
+        // the frame -- an authored course starting at x = +88 m was braked by
+        // the corridor the whole way), so the corridor is off there.
+        let outside_corridor = cfg.terrain.is_none()
+            && (!(corridor_x_min_m..=corridor_x_max_m).contains(&truth_pos_x_m)
+                || truth_pos_y_m.abs() > corridor_half_width_m);
         if outside_corridor && !prev_outside_corridor {
             eprintln!(
                 "sim-host: LEFT THE DRIVABLE CORRIDOR at ({truth_pos_x_m:.1}, \
