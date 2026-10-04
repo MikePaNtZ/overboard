@@ -112,6 +112,18 @@ fn main() -> ExitCode {
                 cfg.hfield_wheel_contact = true;
                 i += 1;
             }
+            "--tail-brake" => {
+                cfg.tail_brake = true;
+                i += 1;
+            }
+            "--tail-friction" => {
+                let Some(Ok(mu)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --tail-friction needs a number");
+                    return ExitCode::FAILURE;
+                };
+                cfg.tail_friction = Some(mu);
+                i += 2;
+            }
             "--grade-course" => {
                 let f: Vec<f64> = args
                     .get(i + 1)

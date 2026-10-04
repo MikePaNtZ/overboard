@@ -608,6 +608,23 @@ fn write_model_with_kerb(
             ),
         );
     }
+    if let Some(mu) = variation.tail_friction {
+        // priority 1: this geom's friction wins over the road's.
+        let from = r#"<geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" material="bumper_mat"
+            group="2" condim="3" friction="0.6 0.005 0.0001"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --tail-friction could not find the rear bumper geom to splice",
+            )));
+        }
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" material="bumper_mat"
+            group="2" condim="3" priority="1" friction="{mu:.3} 0.005 0.0001"/>"#
+            ),
+        );
+    }
     if let Some(k) = variation.kt_scale {
         // The true torque per commanded amp. ctrl stays the commanded current
         // times the NOMINAL Kt, so the current limit is unchanged.
@@ -1712,6 +1729,14 @@ pub struct HostConfig {
     /// [`crate::ground`]). Only for kerb studies, where the tire must hit
     /// the kerb face; the heightfield contact chatters.
     pub hfield_wheel_contact: bool,
+    /// `--tail-brake`: a tail-pad strike does not end the run. Leaning back
+    /// onto the tail is a deliberate, safe way to brake; only a nose strike
+    /// (the rider goes over the front) or a large tilt is a terminating event.
+    pub tail_brake: bool,
+    /// `--tail-friction MU`: the tail pad's own friction sets the pad-road
+    /// contact (MuJoCo geom priority). Without it the larger of the pad (0.6)
+    /// and the road (0.8 heightfield, 1.0 plane) is used.
+    pub tail_friction: Option<f64>,
     /// A grade profile on the flat plane, by gravity (`--grade-course`).
     /// Replaces a `--terrain` heightfield for grade studies: MuJoCo's
     /// sphere-on-heightfield contact chatters at every grid edge (measured:
@@ -1761,6 +1786,7 @@ impl GradeCourse {
 pub struct PlantVariation {
     pub rider_mass_kg: Option<f64>,
     pub kt_scale: Option<f64>,
+    pub tail_friction: Option<f64>,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1923,6 +1949,8 @@ impl Default for HostConfig {
             start_speed_m_s: None,
             grade_course: None,
             hfield_wheel_contact: false,
+            tail_brake: false,
+            tail_friction: None,
         }
     }
 }
@@ -1966,6 +1994,9 @@ struct TraceRow {
     /// carry elsewhere in this file -- see [`write_stats`].
     pos_x_m: f32,
     pos_y_m: f32,
+    /// Bumper contact forces, N (ADR-0012 touch sensors).
+    nose_strike_n: f32,
+    tail_strike_n: f32,
     /// `|proposed_amps| / MAX_CURRENT_A`, unfiltered.
     utilisation: f32,
     /// ... and low-passed at [`AUTHORITY_UTILISATION_TAU_S`].
@@ -2193,7 +2224,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         Some(path) => Some(read_terrain_spec(path, cfg.spawn_x_m)?),
         None => None,
     };
-    let variation = PlantVariation { rider_mass_kg: cfg.rider_mass_kg, kt_scale: cfg.kt_scale };
+    let variation = PlantVariation {
+        rider_mass_kg: cfg.rider_mass_kg,
+        kt_scale: cfg.kt_scale,
+        tail_friction: cfg.tail_friction,
+    };
     let generated_model = if cfg.kerb.is_some()
         || terrain.is_some()
         || cfg.lean_steer
@@ -3114,7 +3149,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // having it on non-kerb runs too is what let the threshold be set from
         // a measured carve envelope instead of a guess.
         let tilt_rad = (xmat[8].clamp(-1.0, 1.0) as f32).acos();
-        let strike_n = backend.truth_nose_strike_n() + backend.truth_tail_strike_n();
+        let nose_n = backend.truth_nose_strike_n();
+        let tail_n = backend.truth_tail_strike_n();
+        // `--tail-brake`: the tail pad is a brake, not a terminating event.
+        let strike_n = nose_n + if cfg.tail_brake { 0.0 } else { tail_n };
         // OB_HANDOFF_DEBUG=1 prints every 250 ticks (2 Hz); OB_HANDOFF_DEBUG=<n>
         // prints every n ticks, which is what makes a sub-second event like a
         // post-reset transient actually observable.
@@ -3182,6 +3220,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 saturated,
                 pos_x_m: truth_pos_x_m as f32,
                 pos_y_m: truth_pos_y_m as f32,
+                nose_strike_n: nose_n,
+                tail_strike_n: tail_n,
                 utilisation,
                 utilisation_filtered,
                 authority_warning,
@@ -3413,12 +3453,13 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
     out.push_str(
         "seq,sim_time_s,stick_fore_aft,shaped_fore_aft,applied_fore_aft,truth_pitch_deg,\
          est_pitch_deg,est_pitch_rate_deg_s,truth_pitch_rate_deg_s,forward_speed_m_s,proposed_amps,applied_amps,\
-         saturated,utilisation,utilisation_filtered,authority_warning,fallen,pos_x_m,pos_y_m\n",
+         saturated,utilisation,utilisation_filtered,authority_warning,fallen,pos_x_m,pos_y_m,\
+         nose_strike_n,tail_strike_n\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?}",
+            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?},{:?},{:?}",
             r.seq,
             r.sim_time_s,
             r.stick_fore_aft,
@@ -3438,6 +3479,8 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
             r.fallen as u8,
             r.pos_x_m,
             r.pos_y_m,
+            r.nose_strike_n,
+            r.tail_strike_n,
         );
     }
     std::fs::write(path, out).map_err(HostError::Io)

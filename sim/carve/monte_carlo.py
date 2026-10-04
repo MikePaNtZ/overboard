@@ -56,6 +56,12 @@ WINDOW = (14.0, 88.0)              # on-grade window for speed (energy: constant
 # curve asks the motor for torque a real road does not (13 A measured at
 # R = 100 m, 4 m/s, 104 kg). At 400 m that term is < 0.4 N.m.
 R_CURVE = 400.0
+EXTRA_ARGS = []                    # extra sim-host flags (--host-arg)
+# --tail-brake: tail pad friction on the road. Hard plastic about 0.3,
+# rubber or urethane skid pads up to about 0.8 (typical, not measured).
+TAIL_MU_RANGE = (0.3, 0.8)
+TAIL_MU_NOMINAL = 0.6
+TAIL_CONTACT_N = 50.0              # the host's own strike threshold
 FLAT_GRADE_M = 60.0                # constant grade after the curve, plane ground
 
 
@@ -111,11 +117,14 @@ def run_one(k, p, out, port, ground):
            '--schedule-csv', str(out / 'passive.csv'),
            '--duration-secs', '3600', '--max-sim-secs', f"{min(secs, 200):.0f}", '--free-run',
            '--state-out-addr', f"127.0.0.1:{port}", '--input-in-addr', f"127.0.0.1:{port + 1}",
-           '--stats-path', 'none', '--trace-csv', str(csv_path)]
+           '--stats-path', 'none', '--trace-csv', str(csv_path)] + EXTRA_ARGS
+    if 'tail_mu' in p:
+        cmd += ['--tail-brake', '--tail-friction', f"{p['tail_mu']:.3f}"]
     if not csv_path.exists():
         with open(log_path, 'w') as log:
             subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False)
-    return dict(run=name, **{key: p[key] for key in RANGES}, **analyse(csv_path, log_path, p, ground))
+    keys = list(RANGES) + (['tail_mu'] if 'tail_mu' in p else [])
+    return dict(run=name, **{key: p[key] for key in keys}, **analyse(csv_path, log_path, p, ground))
 
 
 def analyse(csv_path, log_path, p, ground='plane'):
@@ -154,6 +163,17 @@ def analyse(csv_path, log_path, p, ground='plane'):
             cause = 'saturation (' + cause + ')'
     reached = s.max()
     status = 'PASS' if not cause and reached >= end_m else ('FALL' if cause else 'STALL')
+    # Tail braking (sim-host --tail-brake): the tail pad on the road is a
+    # brake, not a fall. A run that ends at rest with the tail down stopped
+    # on purpose, the way a rider stops with the tail.
+    tail_pct, tail_first_s = 0.0, ''
+    if 'tail_strike_n' in rows[0]:
+        tail_on = (g('tail_strike_n')[:end] > TAIL_CONTACT_N)
+        tail_pct = round(100.0 * float(tail_on.mean()), 1)
+        if tail_on.any():
+            tail_first_s = round(float(s[np.argmax(tail_on)]), 1)
+            if status == 'STALL' and tail_on[-250:].any() and abs(v[-1]) < 0.3:
+                status = 'TAIL STOP'
     on = (s >= WINDOW[0]) & (s <= end_m)
     flat_grade = (s >= grade_start(p['grade_pct']) + 2.0) & (s <= end_m)
     vt, v0 = p['v_target'], p['v_start']
@@ -189,6 +209,7 @@ def analyse(csv_path, log_path, p, ground='plane'):
         sat_pct=round(100.0 * float(sat.mean()), 1),
         peak_pitch_deg=round(float(np.abs(pitch).max()), 1),
         wh_per_km=round(wh_km, 1),
+        tail_pct=tail_pct, tail_first_s=tail_first_s,
     )
 
 
@@ -200,8 +221,12 @@ def main():
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--probe', action='append', help="k=v,... over NOMINAL; repeatable")
     ap.add_argument('--ground', choices=['plane', 'hfield'], default='plane')
+    ap.add_argument('--host-arg', action='append', default=[], help='extra sim-host flag; repeatable')
     ap.add_argument('--port-base', type=int, default=9000, help='UDP ports; separate parallel sweeps')
+    ap.add_argument('--tail-brake', action='store_true',
+                    help='tail pad brakes (no handoff); samples tail friction too')
     args = ap.parse_args()
+    EXTRA_ARGS.extend(args.host_arg)
     out = Path(args.out).resolve()
     (out / 'runs').mkdir(parents=True, exist_ok=True)
     (out / 'passive.csv').write_text("0,300,0,0,0,passive rider\n")
@@ -214,7 +239,18 @@ def main():
                 p[key] = float(val)
             plan.append(p)
     else:
-        plan = lhs(args.n, np.random.default_rng(args.seed))
+        rng = np.random.default_rng(args.seed)
+        plan = lhs(args.n, rng)
+        if args.tail_brake:
+            # Drawn after the six RANGES columns, so those stay the runs of
+            # the same seed without tail braking.
+            lo, hi = TAIL_MU_RANGE
+            u = (rng.permutation(args.n) + rng.random(args.n)) / args.n
+            for p, ui in zip(plan, u):
+                p['tail_mu'] = lo + ui * (hi - lo)
+    if args.tail_brake and args.probe:
+        for p in plan:
+            p.setdefault('tail_mu', TAIL_MU_NOMINAL)
     if args.ground == 'hfield':
         for p in plan:
             p['grade_pct'], p['course'] = course(p['grade_pct'], out / 'courses')
