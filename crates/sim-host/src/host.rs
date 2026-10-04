@@ -2143,10 +2143,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             (f.len() == 5).then(|| (f[0], f[1], f[2], f[3], f[4]))
         })
-        .unwrap_or((376.8, 88.4, 28.35, 8.06, 1.0));
+        .unwrap_or((376.8, 88.4, 28.35, 8.06, 0.5));
     let mut speed_lqr = control_core::SpeedHoldLqr::new(
         lqr_gains.0, lqr_gains.1, lqr_gains.2, lqr_gains.3, lqr_gains.4,
-    );
+    )
+    // Steady lean and current per m/s^2, from lqr_design.py's linear model.
+    .with_feedforward(-0.1261, 17.82);
     let mut last_saturated = false;
 
     let out_socket = UdpSocket::bind("127.0.0.1:0")?;

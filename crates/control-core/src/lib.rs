@@ -805,7 +805,17 @@ impl VelocityLoop {
 /// vehicle: to slow down it first drives forward, so the body tips back.
 ///
 /// The reference slews at `accel_limit_m_s2`, so a step in target speed does
-/// not ask for a lean the motor cannot recover from.
+/// not ask for a lean the motor cannot recover from. While it slews, the law
+/// adds the steady lean and current of that acceleration (feedforward). If
+/// it does not, the integral winds up during every ramp and the board
+/// overshoots by about 1.4 m/s when the ramp ends -- measured on a 20 %
+/// climb, where the overshoot saturated the motor.
+/// Jerk limit of the [`SpeedHoldLqr`] reference, m/s³.
+pub const SPEED_HOLD_JERK_M_S3: f32 = 1.0;
+/// Reference approach gain, 1/s: the reference acceleration is this times
+/// the remaining speed error, before the acceleration limit.
+pub const SPEED_HOLD_APPROACH_PER_S: f32 = 1.0;
+
 #[derive(Debug, Clone, Copy)]
 pub struct SpeedHoldLqr {
     k_pitch: f32,
@@ -814,8 +824,11 @@ pub struct SpeedHoldLqr {
     k_int: f32,
     accel_limit_m_s2: f32,
     integral_limit_m: f32,
+    ff_pitch_rad_per_m_s2: f32,
+    ff_amps_per_m_s2: f32,
     integral: f32,
     v_ref: Option<f32>,
+    a_ref: f32,
 }
 
 impl SpeedHoldLqr {
@@ -828,14 +841,31 @@ impl SpeedHoldLqr {
             k_int,
             accel_limit_m_s2,
             integral_limit_m: 10.0,
+            ff_pitch_rad_per_m_s2: 0.0,
+            ff_amps_per_m_s2: 0.0,
             integral: 0.0,
             v_ref: None,
+            a_ref: 0.0,
         }
+    }
+
+    /// Steady lean (rad, nose-up positive) and current (A) per m/s² of
+    /// reference acceleration, from the same linear model as the gains.
+    pub const fn with_feedforward(mut self, pitch_rad_per_m_s2: f32, amps_per_m_s2: f32) -> Self {
+        self.ff_pitch_rad_per_m_s2 = pitch_rad_per_m_s2;
+        self.ff_amps_per_m_s2 = amps_per_m_s2;
+        self
     }
 
     pub fn reset(&mut self) {
         self.integral = 0.0;
         self.v_ref = None;
+        self.a_ref = 0.0;
+    }
+
+    #[cfg(test)]
+    fn reset_integral_for_test(&mut self) {
+        self.integral = 0.0;
     }
 
     /// The slewed speed reference of the last update.
@@ -858,14 +888,27 @@ impl SpeedHoldLqr {
         dt_s: f32,
         saturated: bool,
     ) -> f32 {
-        let step = self.accel_limit_m_s2 * dt_s;
+        // Reference trajectory: acceleration limited, and jerk limited so
+        // the feedforward lean never steps. A lean step makes the board
+        // first drive backward (non-minimum phase), and the accelerometer
+        // then misreads the pitch: that combination fell at start-up.
         let v_ref = match self.v_ref {
             None => v_m_s,
-            Some(r) => r + (v_target_m_s - r).clamp(-step, step),
+            Some(r) => {
+                let a_lim = self.accel_limit_m_s2;
+                let a_des = (SPEED_HOLD_APPROACH_PER_S * (v_target_m_s - r)).clamp(-a_lim, a_lim);
+                let da = SPEED_HOLD_JERK_M_S3 * dt_s;
+                self.a_ref += (a_des - self.a_ref).clamp(-da, da);
+                r + self.a_ref * dt_s
+            }
         };
+        let a_ref = self.a_ref;
         self.v_ref = Some(v_ref);
         let err = v_m_s - v_ref;
-        let balance = -self.k_pitch * pitch_rad - self.k_rate * pitch_rate_rad_s;
+        let pitch_ff = self.ff_pitch_rad_per_m_s2 * a_ref;
+        let balance = self.ff_amps_per_m_s2 * a_ref
+            - self.k_pitch * (pitch_rad - pitch_ff)
+            - self.k_rate * pitch_rate_rad_s;
         let demand = balance + self.k_speed * err + self.k_int * self.integral;
         let pushing_further = saturated && demand.is_sign_positive() == err.is_sign_positive();
         if dt_s > 0.0 && !pushing_further {
@@ -899,12 +942,22 @@ mod speed_hold_tests {
     }
 
     #[test]
-    fn reference_slews_from_measured_speed() {
+    fn reference_starts_at_measured_speed_and_never_steps_acceleration() {
         let mut c = lqr();
-        c.update(0.0, 0.0, 1.0, 5.0, 0.5, false);
+        c.update(0.0, 0.0, 1.0, 5.0, 0.002, false);
         assert_eq!(c.v_ref(), Some(1.0));
-        c.update(0.0, 0.0, 1.0, 5.0, 0.5, false);
-        assert!((c.v_ref().unwrap() - 1.5).abs() < 1e-6);
+        let mut prev = 1.0;
+        let mut prev_a = 0.0f32;
+        for _ in 0..5000 {
+            c.update(0.0, 0.0, 1.0, 5.0, 0.002, false);
+            let r = c.v_ref().unwrap();
+            let a = (r - prev) / 0.002;
+            assert!((a - prev_a).abs() <= SPEED_HOLD_JERK_M_S3 * 0.002 + 1e-3);
+            assert!(a <= 1.0 + 1e-3 && r <= 5.0 + 0.05, "a {a} r {r}");
+            prev = r;
+            prev_a = a;
+        }
+        assert!((prev - 5.0).abs() < 0.1, "reference did not arrive: {prev}");
     }
 
     #[test]
@@ -914,6 +967,23 @@ mod speed_hold_tests {
         let a = c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
         let b = c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
         assert!((a - b).abs() < 1e-3, "integral wound while saturated: {a} -> {b}");
+    }
+
+    #[test]
+    fn feedforward_holds_a_level_board_at_the_ramp_lean() {
+        // While the reference ramps, a board already at the feedforward lean
+        // and on the reference gets exactly the feedforward current.
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        c.update(0.0, 0.0, 1.0, 9.0, 0.002, false);
+        // Let the reference reach its 1 m/s^2 limit (1 s at 1 m/s^3).
+        for _ in 0..600 {
+            let v = c.v_ref().unwrap();
+            c.update(-0.1261, 0.0, v, 9.0, 0.002, false);
+        }
+        c.reset_integral_for_test();
+        let r = c.v_ref().unwrap();
+        let i = c.update(-0.1261, 0.0, r + 0.002, 9.0, 0.002, false);
+        assert!((i - 17.82).abs() < 0.1, "{i}");
     }
 }
 
