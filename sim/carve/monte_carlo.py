@@ -201,6 +201,12 @@ def analyse(csv_path, log_path, p, ground='plane'):
         overshoot = 100.0 * max(over, 0.0) / vt
     else:
         overshoot = float('nan')
+    # A run that reaches the end far too fast survived, but it is not a pass:
+    # on a steep descent the braking saturated and the board ran away.
+    v_max = float(np.abs(v[live]).max()) if live.any() else 0.0
+    v_ref_max = max(vt, v0)  # a run may start above its target
+    if status == 'PASS' and v_max > max(1.5 * v_ref_max, v_ref_max + 2.0):
+        status = 'RUNAWAY'
     vg = v[on]
     a = SimpleNamespace(kt=0.7 * p['kt_scale'], ke=0.7 * p['kt_scale'], r_phase=0.12, p_idle=15.0,
                         regen_eff=0.8, series=20, parallel=2, cell_ah=4.0, r_cell=0.015, max_duty=0.9,
@@ -215,7 +221,7 @@ def analyse(csv_path, log_path, p, ground='plane'):
         status=status, cause=cause, reached_m=round(float(reached), 1),
         t_event_s=round(float(t[-1]), 2) if cause else '',
         v_mean=round(float(vg.mean()), 3) if len(vg) else '',
-        overshoot_pct=round(overshoot, 1),
+        overshoot_pct=round(overshoot, 1), v_max=round(v_max, 2),
         peak_amps=round(float(np.abs(amps).max()), 1),
         sat_pct=round(100.0 * float(sat.mean()), 1),
         peak_pitch_deg=round(float(np.abs(pitch).max()), 1),
