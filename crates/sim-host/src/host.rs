@@ -482,6 +482,7 @@ fn write_model_with_kerb(
     kerb: Option<&KerbSpec>,
     terrain: Option<&TerrainSpec>,
     lean_steer: bool,
+    max_current_a: Option<f32>,
 ) -> Result<PathBuf, HostError> {
     let src = rider_model_path();
     let xml = std::fs::read_to_string(&src).map_err(|e| {
@@ -571,6 +572,20 @@ fn write_model_with_kerb(
     // --- Kerb: an authored box, for runs without the real terrain ----------
     if lean_steer {
         xml = splice_lean_steer(&xml)?;
+    }
+    if let Some(amps) = max_current_a {
+        // Sizing studies: the motor torque limit follows the current limit.
+        let from = r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-28 28""#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --max-current could not find the wheel motor ctrlrange to splice",
+            )));
+        }
+        let nm = amps * KT_NM_PER_A;
+        xml = xml.replace(
+            from,
+            &format!(r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-{nm} {nm}""#),
+        );
     }
 
     if let Some(kerb) = kerb {
@@ -1606,6 +1621,14 @@ pub struct HostConfig {
     /// Add the learned grade current (`--grade-ff`) to the regulator output.
     /// Needs `EstimatorAiding::GradeAware`, which learns the grade.
     pub grade_feedforward: bool,
+
+    /// Motor current limit for sizing studies (`--max-current A`). Sets the
+    /// safety envelope, the utilisation reference and the model's motor
+    /// torque limit together. `None` is the stock 40 A.
+    pub max_current_a: Option<f32>,
+
+    /// Outer speed loop target, m/s (`--speed-hold`). `None`: no outer loop.
+    pub speed_hold_m_s: Option<f32>,
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1761,6 +1784,8 @@ impl Default for HostConfig {
             lean_steer: false,
             spawn_x_m: 0.0,
             grade_feedforward: false,
+            max_current_a: None,
+            speed_hold_m_s: None,
         }
     }
 }
@@ -2021,7 +2046,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         kp_nm_per_rad: KP_NM_PER_RAD,
         kd_nm_per_rad_s: KD_NM_PER_RAD_S,
         kt_nm_per_a: KT_NM_PER_A,
-        max_current_a: MAX_CURRENT_A,
+        max_current_a: cfg.max_current_a.unwrap_or(MAX_CURRENT_A),
         ..Params::default()
     };
 
@@ -2031,8 +2056,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         Some(path) => Some(read_terrain_spec(path, cfg.spawn_x_m)?),
         None => None,
     };
-    let generated_model = if cfg.kerb.is_some() || terrain.is_some() || cfg.lean_steer {
-        Some(write_model_with_kerb(cfg.kerb.as_ref(), terrain.as_ref(), cfg.lean_steer)?)
+    let generated_model = if cfg.kerb.is_some() || terrain.is_some() || cfg.lean_steer || cfg.max_current_a.is_some() {
+        Some(write_model_with_kerb(cfg.kerb.as_ref(), terrain.as_ref(), cfg.lean_steer, cfg.max_current_a)?)
     } else {
         None
     };
@@ -2095,6 +2120,22 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // construction, same as `control-ffi::ObController::last_amps`.
     let mut last_amps: f32 = 0.0;
     let mut grade_aid = control_core::GradeAwareAiding::new(ACCEL_FF_GAIN_M_S2_PER_A, GRADE_LOAD_TAU_S);
+    // Same gains as hill.py / shuttle_run.py's outer loop.
+    // Tuning only: OVERBOARD_SPEED_LOOP="kp,ki,max_ref_deg".
+    let (sl_kp, sl_ki, sl_max_deg) = std::env::var("OVERBOARD_SPEED_LOOP")
+        .ok()
+        .and_then(|v| {
+            let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (f.len() == 3).then(|| (f[0], f[1], f[2]))
+        })
+        .unwrap_or((0.05, 0.02, 5.0));
+    let mut speed_loop = control_core::VelocityLoop::new(
+        sl_kp,
+        sl_ki,
+        sl_max_deg.to_radians(),
+        control_core::PlantCoupling::ComAboveAxle,
+    );
+    let mut last_saturated = false;
 
     let out_socket = UdpSocket::bind("127.0.0.1:0")?;
     let in_socket = UdpSocket::bind(cfg.input_in_addr)?;
@@ -2397,6 +2438,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
             last_amps = 0.0;
             grade_aid.reset();
+            speed_loop.reset();
             last_forward_speed_m_s = 0.0;
             utilisation_filtered = 0.0;
             prev_outside_corridor = false;
@@ -2677,8 +2719,15 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Zero on any deployed run, so this whole line is a no-op there --
         // see HostConfig::pitch_bias_deg.
         let regulated_pitch_rad = source_pitch_rad + pitch_bias_rad;
+        // Optional outer speed loop (`--speed-hold`): sets the pitch
+        // reference from the speed error, as a Segway does. Off by default:
+        // the deployed board leaves speed to the rider.
+        let pitch_ref_rad = match cfg.speed_hold_m_s {
+            Some(v_ref) => speed_loop.update(forward_speed_m_s, v_ref, DT_S as f32, last_saturated),
+            None => 0.0,
+        };
         let proposed_torque_nm =
-            regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, 0.0);
+            regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, pitch_ref_rad);
         // The single kt division -- the actuation boundary (issue #137).
         let mut proposed_amps = proposed_torque_nm / KT_NM_PER_A;
         // Grade feedforward: the current that holds the board on the learned
@@ -2708,6 +2757,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             Faults::NONE,
         );
         let saturated = saturation == Saturation::Yes;
+        last_saturated = saturated;
         backend.apply(&bounded_cmd).map_err(HostError::Backend)?;
         // POST-envelope current, not the proposal -- the plant only ever
         // sees the clamped value (same reasoning `control-ffi`'s own
@@ -2722,7 +2772,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // the post-envelope command -- the clamped value can never exceed
         // 1.0 and so can never warn about anything. Low-passed at
         // AUTHORITY_UTILISATION_TAU_S.
-        let utilisation = proposed_amps.abs() / MAX_CURRENT_A;
+        let utilisation = proposed_amps.abs() / cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
         utilisation_filtered += (utilisation - utilisation_filtered) * utilisation_alpha;
         // The discriminator is the SPEED (see AUTHORITY_UTILISATION_WARN):
         // saturation above the speed cap's onset is survivable, because the

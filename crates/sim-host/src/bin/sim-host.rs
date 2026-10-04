@@ -92,6 +92,22 @@ fn main() -> ExitCode {
                 cfg.spawn_x_m = x;
                 i += 2;
             }
+            "--speed-hold" => {
+                let Some(Ok(v)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: --speed-hold needs a number (m/s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.speed_hold_m_s = Some(v);
+                i += 2;
+            }
+            "--max-current" => {
+                let Some(Ok(a)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: --max-current needs a number (amps)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.max_current_a = Some(a);
+                i += 2;
+            }
             "--grade-ff" => {
                 cfg.grade_feedforward = true;
                 i += 1;

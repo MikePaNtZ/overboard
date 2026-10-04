@@ -29,6 +29,10 @@ PRESETS = {
         ("climb", 40.0, -8.0),
         ("crest", 18.0, 0.0),
     ],
+    # Authority sweep: one constant grade after a flat run-in.
+    # Override the grade with --descent / --climb.
+    "steady_down": [("run-in", 10.0, 0.0), ("descent", 80.0, 8.0)],
+    "steady_up": [("run-in", 10.0, 0.0), ("climb", 80.0, -8.0)],
 }
 R_SAG = 30.0      # m, concave transitions (grade decreases along travel)
 R_CREST = 40.0    # m, convex transitions
