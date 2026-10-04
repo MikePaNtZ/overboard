@@ -1973,6 +1973,22 @@ pub struct HostConfig {
     /// `limit`, the forward-acceleration limit (D2). See
     /// `control_core::AuthorityMargin`.
     pub authority_margin: MarginMode,
+    /// `--hold-until-arm`: hold the board still at its spawn pose until the
+    /// first input arm bit, as a rider's foot holds it on a hill. For live
+    /// play: without it the board rolls away on a slope before the player
+    /// moves. Off by default (scripted and Monte Carlo runs have no arm bit).
+    pub hold_until_arm: bool,
+    /// `--hud-out-addr ADDR`: also send a HUD packet (crate::hud::HudOut,
+    /// 56 B) at 50 Hz: speed, torque and its limit, battery, rider warning.
+    pub hud_out_addr: Option<SocketAddr>,
+    /// `--batt-soc0`: the pack's starting charge for the HUD, 0..1 (0.9).
+    pub batt_soc0: f64,
+    /// `--rider-speed V`: a rider model (test harness, not firmware) that sets
+    /// the fore/aft lean to ride at V m/s, while the DEPLOYED balance law (the
+    /// pitch regulator) balances: the path a person takes in the game. The
+    /// law is sim/carve/rider.py's lean mode (leaky PI on speed, acceleration
+    /// damping, a grade lean the rider sees). Without `--speed-hold`.
+    pub rider_speed_m_s: Option<f32>,
     /// `--rider-reacts` (speed-hold harness only): a rider model that answers
     /// the warning. Pulsed for 0.5 s: the rider eases off (target 0). Solid
     /// for 0.5 s while driving: the rider steps off and the run ends (DISMOUNT).
@@ -2019,6 +2035,52 @@ impl GradeCourse {
             0.5 - 0.5 * (std::f64::consts::PI * u).cos()
         };
         (g * frac).atan().to_degrees()
+    }
+}
+
+/// `--rider-speed`: a rider who rides at a target speed by leaning, the way
+/// sim/carve/rider.py's lean mode does (its gains, at 500 Hz instead of
+/// 50 Hz). Output is the fore/aft stick, -1..1 (full stick = 5 cm of lean).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RiderSpeedModel {
+    v_ref: Option<f32>,
+    integral: f32,
+    acc_f: f32,
+    v_prev: Option<f32>,
+}
+
+impl RiderSpeedModel {
+    /// The rider eases the target in at this rate, m/s^2.
+    pub const TARGET_RATE_M_S2: f32 = 0.5;
+    /// Lean bound, stick units: 0.6 = 3 cm.
+    pub const LEAN_BOUND: f32 = 0.6;
+    /// Grade lean per unit sin(downhill grade), stick units (rider.py).
+    pub const GRADE_LEAN: f32 = 3.08;
+
+    /// One cycle. `grade_down_rad` is the slope the rider sees, downhill
+    /// positive (0 when the course is unknown).
+    pub fn update(&mut self, v: f32, target: f32, grade_down_rad: f32, dt: f32) -> f32 {
+        let r = self.v_ref.get_or_insert(v);
+        let step = Self::TARGET_RATE_M_S2 * dt;
+        *r += (target - *r).clamp(-step, step);
+        let err = *r - v;
+        // Leaky (1/s): the grade lean carries the slope; the integral trims.
+        self.integral = (self.integral * (1.0 - dt) + err * dt).clamp(-3.0, 3.0);
+        let acc = self.v_prev.map_or(0.0, |p| (v - p) / dt);
+        self.v_prev = Some(v);
+        // rider.py filters acceleration by 0.1 per 20 ms: tau about 0.19 s.
+        self.acc_f += dt / (0.19 + dt) * (acc - self.acc_f);
+        let raw = -Self::GRADE_LEAN * grade_down_rad.sin() + 0.30 * err + 0.10 * self.integral
+            - 0.45 * self.acc_f;
+        let fa = raw.clamp(-Self::LEAN_BOUND, Self::LEAN_BOUND);
+        if fa != raw {
+            self.integral -= err * dt; // do not integrate into a bound
+        }
+        fa
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -2306,6 +2368,10 @@ impl Default for HostConfig {
             tail_friction: None,
             authority_margin: MarginMode::Off,
             rider_reacts: false,
+            rider_speed_m_s: None,
+            hud_out_addr: None,
+            batt_soc0: 0.9,
+            hold_until_arm: false,
         }
     }
 }
@@ -2648,6 +2714,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         }
     };
     place_wheel_ground(&mut backend);
+    // `--hold-until-arm`: the spawn pose to hold, and whether a player has armed.
+    let spawn_qpos = backend.truth_qpos();
+    let mut armed_seen = !cfg.hold_until_arm;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
     // tests): there is no synthetic Unreal client during a verification run,
@@ -2727,6 +2796,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // estimator at rest.
     let mut start_speed_pending = cfg.start_speed_m_s;
     let mut margin = control_core::AuthorityMargin::new();
+    let mut rider_model = RiderSpeedModel::default();
+    let mut battery = crate::hud::BatteryModel::new(cfg.batt_soc0);
+    let mut hud_seq: u64 = 0;
+    let hud_kt = KT_NM_PER_A as f64 * variation.kt_scale.unwrap_or(1.0);
+    let hud_mass = variation.board_mass_kg.unwrap_or(13.0) + variation.rider_mass_kg.unwrap_or(70.0);
+    let hud_i_limit = cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
     let mut margin_level = control_core::MarginLevel::None;
     let mut margin_level_since_s = 0.0f64;
     let mut rider_eased = false;
@@ -2974,6 +3049,23 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 latest_input.weight_shift_lateral,
             ),
         };
+        // `--rider-speed`: the rider model leans; the deployed law balances.
+        let stick_fore_aft = match cfg.rider_speed_m_s {
+            Some(v_target) => {
+                if start_speed_pending.is_some() {
+                    rider_model.reset();
+                    0.0
+                } else {
+                    let grade_down_rad = cfg
+                        .grade_course
+                        .as_ref()
+                        .map_or(0.0, |c| -(c.grade_deg(-truth_pos_x_m) as f32).to_radians());
+                    let target = if rider_eased { 0.0 } else { v_target };
+                    rider_model.update(last_forward_speed_m_s, target, grade_down_rad, DT_S as f32)
+                }
+            }
+            None => stick_fore_aft,
+        };
 
         // --- COMMAND-ENVELOPE RESERVE (ADR-0011 exit criterion (b)) ------
         //
@@ -3008,6 +3100,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // there is no reset implementation to wire `reset` into. `stale`
         // zeroes both the same way it zeroes weight_shift/steer.
         let input_armed_bit = !stale && latest_input.armed_bit;
+        if !armed_seen && input_armed_bit {
+            armed_seen = true;
+            eprintln!("sim-host: armed at sim_t={t_known_s:.3}s -- the board is released");
+        }
         let input_reset_bit = !stale && latest_input.reset_bit;
         if input_reset_bit && !prev_reset_bit {
             // ADR-0012 gave this bit its first real job: it is the ONLY way
@@ -3214,6 +3310,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         backend.apply_external_force(force, torque);
 
         place_wheel_ground(&mut backend);
+        if !armed_seen {
+            backend.hold_pose(&spawn_qpos);
+        }
         if let Some(course) = &cfg.grade_course {
             let grade_deg = course.grade_deg(-truth_pos_x_m);
             backend.set_grade_deg(grade_deg);
@@ -3389,6 +3488,28 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 }
             }
         }
+        if handoff_state.is_none() {
+            battery.step(last_amps as f64, wheel_rate_rad_s as f64, hud_kt, hud_mass, DT_S);
+        }
+        if let Some(addr) = cfg.hud_out_addr {
+            if ticks % 10 == 0 {
+                let pkt = crate::hud::HudOut {
+                    flags: margin_level as u16,
+                    seq: hud_seq,
+                    t_s: t_known_s,
+                    speed_m_s: wheel_rate_rad_s * DEFAULT_R_EFF_M,
+                    current_a: last_amps,
+                    torque_nm: (hud_kt as f32) * last_amps,
+                    torque_limit_nm: (hud_kt as f32) * hud_i_limit,
+                    batt_soc: battery.soc as f32,
+                    batt_v: battery.v as f32,
+                    batt_i_a: battery.i as f32,
+                    margin: margin.margin(),
+                };
+                let _ = out_socket.send_to(&pkt.to_bytes(), addr);
+                hud_seq += 1;
+            }
+        }
         let pitch_ref_rad = match cfg.speed_hold_m_s {
             Some(v_ref) => speed_loop.update(forward_speed_m_s, v_ref, DT_S as f32, last_saturated),
             None => 0.0,
@@ -3483,9 +3604,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             eprintln!(
                 "sim-host: LOSS OF PITCH AUTHORITY IMMINENT at sim_t={t_known_s:.3}s -- \
                  filtered authority utilisation {:.0}% (demand {proposed_amps:+.1} A of \
-                 {MAX_CURRENT_A:.0} A) at {forward_speed_m_s:+.2} m/s, below the \
+                 {:.0} A) at {forward_speed_m_s:+.2} m/s, below the \
                  {SPEED_CAP_ONSET_M_S:.2} m/s speed-cap onset. Pitch {:+.1} deg.",
                 utilisation_filtered * 100.0,
+                cfg.max_current_a.unwrap_or(MAX_CURRENT_A),
                 pitch_rad.to_degrees(),
             );
         } else if prev_authority_warning && !authority_warning {

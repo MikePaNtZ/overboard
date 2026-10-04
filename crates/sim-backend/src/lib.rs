@@ -752,6 +752,21 @@ impl SimBackend {
         plant.set_gravity_profiled([9.81 * s, 0.0, -9.81 * c]);
     }
 
+    /// Puts the plant back to `qpos` with every velocity at zero: sim-host
+    /// `--hold-until-arm` holds the board at its spawn pose this way until a
+    /// player arms it. It takes effect at the next step.
+    ///
+    /// # Panics
+    /// If called before `open()`, or if `qpos` is not `nq` long.
+    pub fn hold_pose(&mut self, qpos: &[f64]) {
+        let plant = self.plant.as_mut().expect("hold_pose: backend is not open");
+        assert_eq!(qpos.len(), plant.nq(), "hold_pose: qpos must be nq long");
+        plant.set_qpos_range(0, qpos);
+        let zeros = vec![0.0; plant.nv()];
+        plant.set_qvel_range(0, &zeros);
+        self.last_wheel_rate_rad_s = 0.0;
+    }
+
     /// Puts the `wheel_ground` mocap plate (sim-host smooth wheel contact)
     /// at `pos` with orientation `quat` (w, x, y, z). A no-op on a model
     /// without that body.

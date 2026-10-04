@@ -85,6 +85,9 @@ WINDOW = (14.0, 88.0)              # on-grade window for speed (energy: constant
 # R = 100 m, 4 m/s, 104 kg). At 400 m that term is < 0.4 N.m.
 R_CURVE = 400.0
 EXTRA_ARGS = []                    # extra sim-host flags (--host-arg)
+# --rider-law: a rider model leans and the DEPLOYED balance law balances
+# (sim-host --rider-speed), instead of the SpeedHoldLqr harness (--speed-hold).
+RIDER_FLAG = ['--speed-hold']
 # --tail-brake: tail pad friction on the road. Hard plastic about 0.3,
 # rubber or urethane skid pads up to about 0.8 (typical, not measured).
 TAIL_MU_RANGE = (0.3, 0.8)
@@ -138,7 +141,7 @@ def run_one(k, p, out, port, ground):
     csv_path, log_path = out / 'runs' / f"{name}.csv", out / 'runs' / f"{name}.txt"
     secs = s_end(p, ground) / max(min(p['v_target'], p['v_start'] + 1), 1.0) + 25.0
     cmd = [os.environ['SIMHOST'], '--lean-steer', '--estimator-aiding', 'grade-aware',
-           '--max-current', f"{p['amps']:.2f}", '--speed-hold', f"{p['v_target']:.3f}",
+           '--max-current', f"{p['amps']:.2f}", RIDER_FLAG[0], f"{p['v_target']:.3f}",
            '--rider-mass', f"{p['rider_kg']:.2f}", '--kt-scale', f"{p['kt_scale']:.4f}",
            '--start-speed', f"{p['v_start']:.3f}",
            *(['--spawn-x', '88', '--terrain', str(p['course'] / 'course_hfield.bin')] if ground == 'hfield'
@@ -277,12 +280,16 @@ def main():
     ap.add_argument('--host-arg', action='append', default=[], help='extra sim-host flag; repeatable')
     ap.add_argument('--port-base', type=int, default=9000, help='UDP ports; separate parallel sweeps')
     ap.add_argument('--board-kg', type=float, help='board mass without rider (model: 13 kg)')
+    ap.add_argument('--rider-law', action='store_true',
+                    help='rider model + deployed balance law (--rider-speed), not the speed-hold LQR')
     ap.add_argument('--plant-x7', action='store_true',
                     help='the X7 build plant, with its mass-property dispersions (X7_RANGES)')
     ap.add_argument('--tail-brake', action='store_true',
                     help='tail pad brakes (no handoff); samples tail friction too')
     args = ap.parse_args()
     EXTRA_ARGS.extend(args.host_arg)
+    if args.rider_law:
+        RIDER_FLAG[0] = '--rider-speed'
     if args.board_kg:
         global BOARD_KG
         BOARD_KG = args.board_kg

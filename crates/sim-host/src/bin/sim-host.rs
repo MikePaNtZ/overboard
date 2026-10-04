@@ -92,6 +92,34 @@ fn main() -> ExitCode {
                 cfg.spawn_x_m = x;
                 i += 2;
             }
+            "--hold-until-arm" => {
+                cfg.hold_until_arm = true;
+                i += 1;
+            }
+            "--hud-out-addr" => {
+                let Some(Ok(a)) = args.get(i + 1).map(|v| v.parse::<SocketAddr>()) else {
+                    eprintln!("sim-host: --hud-out-addr needs ADDR:PORT");
+                    return ExitCode::FAILURE;
+                };
+                cfg.hud_out_addr = Some(a);
+                i += 2;
+            }
+            "--batt-soc0" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --batt-soc0 needs a number (0..1)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.batt_soc0 = x;
+                i += 2;
+            }
+            "--rider-speed" => {
+                let Some(Ok(v)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: --rider-speed needs a number (m/s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_speed_m_s = Some(v);
+                i += 2;
+            }
             "--speed-hold" => {
                 let Some(Ok(v)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
                     eprintln!("sim-host: --speed-hold needs a number (m/s)");
