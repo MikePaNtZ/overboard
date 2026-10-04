@@ -108,6 +108,10 @@ fn main() -> ExitCode {
                 cfg.max_current_a = Some(a);
                 i += 2;
             }
+            "--hfield-wheel-contact" => {
+                cfg.hfield_wheel_contact = true;
+                i += 1;
+            }
             "--grade-course" => {
                 let f: Vec<f64> = args
                     .get(i + 1)

@@ -259,3 +259,15 @@ void plant_mujoco_set_qpos_range(void* data, int adr, const double* src, int n) 
 void plant_mujoco_set_qvel_range(void* data, int adr, const double* src, int n) {
   memcpy(((mjData*)data)->qvel + adr, src, (size_t)n * sizeof(double));
 }
+
+// Mocap body pose, for sim-host's smooth wheel contact (`wheel_ground`).
+// Returns -1 for a body that is not a mocap body.
+int plant_mujoco_body_mocapid(void* model, int body_id) {
+  return ((const mjModel*)model)->body_mocapid[body_id];
+}
+
+// Ownership: `pos` 3 doubles, `quat` 4 doubles (w, x, y, z), only read.
+void plant_mujoco_set_mocap(void* data, int mocap_id, const double* pos, const double* quat) {
+  memcpy(((mjData*)data)->mocap_pos + 3 * mocap_id, pos, 3 * sizeof(double));
+  memcpy(((mjData*)data)->mocap_quat + 4 * mocap_id, quat, 4 * sizeof(double));
+}

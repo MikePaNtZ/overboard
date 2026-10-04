@@ -66,6 +66,8 @@ extern "C" {
     fn plant_mujoco_set_dof_damping(model: *mut c_void, dofadr: c_int, damping: f64);
     fn plant_mujoco_set_qpos_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
+    fn plant_mujoco_body_mocapid(model: *mut c_void, body_id: c_int) -> c_int;
+    fn plant_mujoco_set_mocap(data: *mut c_void, mocap_id: c_int, pos: *const f64, quat: *const f64);
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -444,6 +446,23 @@ impl Plant {
         } else {
             Some(id as usize)
         }
+    }
+
+    /// The mocap index of body `name`, or `None` if there is no such body or
+    /// it is not a mocap body.
+    pub fn mocap_id(&self, name: &str) -> Option<usize> {
+        let body = self.body_id(name)?;
+        // SAFETY: `body` was just resolved against this same model.
+        let id = unsafe { plant_mujoco_body_mocapid(self.model, body as c_int) };
+        (id >= 0).then_some(id as usize)
+    }
+
+    /// Sets a mocap body's pose (position, quaternion w-x-y-z). It takes
+    /// effect at the next step.
+    pub fn set_mocap_pose(&mut self, mocap_id: usize, pos: [f64; 3], quat: [f64; 4]) {
+        // SAFETY: `self.data` is owned; `mocap_id` came from `mocap_id()` on
+        // this model, and the shim only reads 3 + 4 doubles.
+        unsafe { plant_mujoco_set_mocap(self.data, mocap_id as c_int, pos.as_ptr(), quat.as_ptr()) };
     }
 
     /// `mjModel`'s actuator id for `name`, or `None` if there is no such

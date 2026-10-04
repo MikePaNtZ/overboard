@@ -93,6 +93,8 @@ def course(grade_pct, cache):
         subprocess.run([os.environ['PY'], str(HERE / 'course.py'), str(d), '--preset', preset,
                         flag, f"{abs(g)}", '--r-sag', '100', '--r-crest', '100'],
                        check=True, capture_output=True)
+        # sim-host reads only the .bin and metadata; the .npy is for Unreal.
+        (d / 'course_height.npy').unlink(missing_ok=True)
     return g, d
 
 

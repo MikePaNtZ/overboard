@@ -18,6 +18,7 @@
 //! [`wire`], never on [`host`]: it is a standalone UDP listener, not a
 //! client of this library.
 
+pub mod ground;
 pub mod host;
 pub mod lean_steer;
 pub mod pacer;

@@ -484,6 +484,7 @@ fn write_model_with_kerb(
     lean_steer: bool,
     max_current_a: Option<f32>,
     variation: PlantVariation,
+    smooth_wheel_contact: bool,
 ) -> Result<PathBuf, HostError> {
     let src = rider_model_path();
     let xml = std::fs::read_to_string(&src).map_err(|e| {
@@ -620,6 +621,36 @@ fn write_model_with_kerb(
             from,
             &format!(r#"<motor name="wheel_motor" joint="wheel_hinge" gear="{k:.4}" "#),
         );
+    }
+
+    if let (Some(t), true) = (terrain, smooth_wheel_contact) {
+        // Smooth wheel contact (crate::ground): the tire collides with a
+        // mocap plate only (bit 2), and everything else with the heightfield
+        // (bit 1). The host moves the plate under the tire every cycle.
+        let from = r#"<geom name="wheel_geom" "#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: smooth wheel contact could not find the wheel geom to splice",
+            )));
+        }
+        xml = xml.replace(from, r#"<geom name="wheel_geom" contype="2" conaffinity="2" "#);
+        let th = crate::ground::PLATE_HALF_THICKNESS_M;
+        let half = crate::ground::PLATE_HALF_SIZE_M;
+        let plate = format!(
+            "\n    <!-- sim-host smooth wheel contact, NOT part of the shared model. -->\n    \
+             <body name=\"wheel_ground\" mocap=\"true\" pos=\"{:.6} 0 {:.6}\">\
+             <geom name=\"wheel_ground_geom\" type=\"box\" size=\"{half} {half} {th}\" \
+             contype=\"2\" conaffinity=\"2\" condim=\"3\" friction=\"0.8 0.005 0.0001\" \
+             rgba=\"0 0 0 0\" group=\"3\"/></body>\n  ",
+            t.spawn_x_m,
+            t.z_at_spawn_m - th,
+        );
+        if xml.matches("</worldbody>").count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: expected exactly one </worldbody> to splice the wheel plate into",
+            )));
+        }
+        xml = xml.replace("</worldbody>", &format!("{plate}</worldbody>"));
     }
 
     if let Some(kerb) = kerb {
@@ -1676,6 +1707,11 @@ pub struct HostConfig {
     pub kt_scale: Option<f64>,
     /// Forward speed set at t = 1 s, m/s (`--start-speed`). `None`: from rest.
     pub start_speed_m_s: Option<f64>,
+    /// `--hfield-wheel-contact`: let the tire touch the `--terrain`
+    /// heightfield directly, as before the smooth contact (see
+    /// [`crate::ground`]). Only for kerb studies, where the tire must hit
+    /// the kerb face; the heightfield contact chatters.
+    pub hfield_wheel_contact: bool,
     /// A grade profile on the flat plane, by gravity (`--grade-course`).
     /// Replaces a `--terrain` heightfield for grade studies: MuJoCo's
     /// sphere-on-heightfield contact chatters at every grid edge (measured:
@@ -1886,6 +1922,7 @@ impl Default for HostConfig {
             kt_scale: None,
             start_speed_m_s: None,
             grade_course: None,
+            hfield_wheel_contact: false,
         }
     }
 }
@@ -2169,6 +2206,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             cfg.lean_steer,
             cfg.max_current_a,
             variation,
+            !cfg.hfield_wheel_contact,
         )?)
     } else {
         None
@@ -2193,6 +2231,21 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // Before `open()`, same reason -- see `HostConfig::damping_scale`.
     backend.set_damping_scale(cfg.damping_scale);
     backend.open().map_err(HostError::Backend)?;
+    // Smooth wheel contact: the heights the plate follows (crate::ground).
+    let ground = match (&terrain, cfg.hfield_wheel_contact) {
+        (Some(t), false) => Some(
+            crate::ground::GroundSurface::from_hfield_bin(&t.hfield_path, t.half_extent_m)
+                .map_err(HostError::Io)?,
+        ),
+        _ => None,
+    };
+    let place_wheel_ground = |backend: &mut SimBackend| {
+        if let Some(g) = &ground {
+            let (pos, quat) = g.plate_pose(backend.truth_frame_xpos(), DEFAULT_R_EFF_M as f64);
+            backend.set_wheel_ground(pos, quat);
+        }
+    };
+    place_wheel_ground(&mut backend);
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
     // tests): there is no synthetic Unreal client during a verification run,
@@ -2749,6 +2802,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         }
         backend.apply_external_force(force, torque);
 
+        place_wheel_ground(&mut backend);
         if let Some(course) = &cfg.grade_course {
             let grade_deg = course.grade_deg(-truth_pos_x_m);
             backend.set_grade_deg(grade_deg);

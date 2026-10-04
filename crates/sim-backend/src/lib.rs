@@ -741,6 +741,19 @@ impl SimBackend {
         plant.set_gravity_profiled([9.81 * s, 0.0, -9.81 * c]);
     }
 
+    /// Puts the `wheel_ground` mocap plate (sim-host smooth wheel contact)
+    /// at `pos` with orientation `quat` (w, x, y, z). A no-op on a model
+    /// without that body.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn set_wheel_ground(&mut self, pos: [f64; 3], quat: [f64; 4]) {
+        let plant = self.plant.as_mut().expect("set_wheel_ground: backend is not open");
+        if let Some(id) = plant.mocap_id("wheel_ground") {
+            plant.set_mocap_pose(id, pos, quat);
+        }
+    }
+
     /// Starts the board rolling forward (-X) at `v_m_s`: the frame's world
     /// velocity and a matching wheel rate, so the wheel does not skid on the
     /// first step. For Monte Carlo start-speed variation, on a settled board.
