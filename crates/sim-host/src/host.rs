@@ -2579,6 +2579,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // it -- it is the only signal path a real board has, and an
         // acceptance trace that stopped recording it would stop being able to
         // show how big the bias criterion (f) is neutralising actually is.
+        if lean_debug && ticks % 250 == 0 {
+            let f = sample.accel_m_s2;
+            eprintln!(
+                "IMU t={t_known_s:6.2} f=({:+.3},{:+.3},{:+.3}) aid={aiding:+.3} \
+                 accel_pitch={:+.2}deg gyro_y={:+.4}",
+                f[0], f[1], f[2],
+                (f[0] - aiding).atan2((f[1] * f[1] + f[2] * f[2]).sqrt()).to_degrees(),
+                sample.gyro_rad_s[1]
+            );
+        }
         let attitude = if cfg.lean_steer && std::env::var("OVERBOARD_TILT").as_deref() != Ok("0") {
             tilt_estimator.set_speed(last_forward_speed_m_s);
             tilt_estimator.update(std::slice::from_ref(&sample), aiding)

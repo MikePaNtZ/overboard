@@ -141,6 +141,14 @@ if __name__ == "__main__":
     ap.add_argument("--preset", default="valley", choices=sorted(PRESETS))
     ap.add_argument("--r-sag", type=float, default=R_SAG, help="sag vertical-curve radius, m")
     ap.add_argument("--r-crest", type=float, default=R_CREST, help="crest vertical-curve radius, m")
+    ap.add_argument("--descent", type=float, help="override the descent grade, %%")
+    ap.add_argument("--climb", type=float, help="override the climb grade, %% (uphill positive)")
     a = ap.parse_args()
     R_SAG, R_CREST = a.r_sag, a.r_crest
-    build(PRESETS[a.preset], Path(a.out))
+    segs = [list(x) for x in PRESETS[a.preset]]
+    for sg in segs:
+        if sg[0] == "descent" and a.descent is not None:
+            sg[2] = a.descent
+        if sg[0] == "climb" and a.climb is not None:
+            sg[2] = -abs(a.climb)
+    build([tuple(x) for x in segs], Path(a.out))
