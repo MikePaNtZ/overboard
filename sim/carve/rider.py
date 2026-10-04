@@ -62,6 +62,16 @@ def y_ref(x):
 LEAN_KMAX = float(os.environ.get("LEAN_KMAX", "0"))  # set for sim-host --lean-steer
 LOOK_TIME_S = float(os.environ.get("LOOK_TIME_S", "2.0"))
 LEAN_BOUND = float(os.environ.get("LEAN_BOUND", "0.6"))
+# A rider knows the grade under them and leans back by the amount that
+# balances the holding torque: d = m g sin(a) r / (M g) = 0.154 sin(a) m,
+# i.e. -3.08 sin(a) of the +-5 cm stick (grade + = downhill). Without it the
+# speed loop over-braked by lean on a 6 % descent and the board tipped back.
+_course = json.load(open(os.environ['COURSE_JSON'])) if os.environ.get('COURSE_JSON') else None
+def grade_at(s_path):
+    if not _course:
+        return 0.0
+    pr = _course['profile']
+    return float(np.interp(s_path, pr['s_m'], pr['grade_pct'])) / 100.0
 
 
 def kmax(v):
@@ -155,7 +165,9 @@ while True:
                 # Lean bounded to 3 cm (0.6 of the 5 cm range): the motor can
                 # hold the rider's centre of mass at most ~3.7 cm off the
                 # axle (28 N*m / (78 kg g)); asking for more tips the board.
-                raw = 0.30 * err + 0.10 * integ - 0.45 * acc_f
+                alpha = np.arctan(grade_at(COURSE_X0 - px + 0.5 * max(v, 0.0)))
+                ff = -3.08 * np.sin(alpha)
+                raw = ff + 0.30 * err + 0.10 * integ - 0.45 * acc_f
                 fa = float(np.clip(raw, -LEAN_BOUND, min(fwd_cap, LEAN_BOUND)))
                 if fa != raw:  # anti-windup: do not integrate into a stop
                     integ -= err * period
