@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 COURSE = Path('/Users/mike/projects/overboard-viz/out/carve-lab/data/courses/city_hill')
 COURSE_LEN_M = 182.0
 # Plant: the X7 build (sim-host --plant x7, 18.4 kg board). Each run still sets
@@ -83,6 +84,10 @@ def run(name, spec, out, port):
     if i0 > 0 or i1 < len(full['t']):
         np.savez(d / 'track.npz', **{k: v[i0:i1] for k, v in full.items()})
         msg += f"; render track t = {full['t'][i0]:.2f}..{full['t'][i1 - 1]:.1f} s"
+    # HUD columns (battery, limits, margin) for the renders and the game.
+    import hud_fields
+    hud_fields.augment(d / 'track.npz', 0.7 * kt, amps, 0.9, trace=d / 'trace.csv')
+    hud_fields.augment(d / 'track_full.npz', 0.7 * kt, amps, 0.9, trace=d / 'trace.csv')
     events = [l.split('sim-host: ', 1)[1] for l in open(d / 'host.txt')
               if any(k in l for k in ('rider warning', 'rider eases', 'rider dismount', 'handoff at'))]
     return name, msg, events
