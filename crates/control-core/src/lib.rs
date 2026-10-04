@@ -788,6 +788,135 @@ impl VelocityLoop {
     }
 }
 
+/// Full-state speed hold: one law for balance and speed, for a board whose
+/// rider stays passive (the sim's authority sweep).
+///
+/// `amps = -k_pitch·θ - k_rate·θ̇ + k_speed·e + k_int·∫e`, with θ
+/// nose-up-positive, e = v − v_ref and forward current positive.
+///
+/// This replaces a slow [`VelocityLoop`] cascaded on a fixed
+/// [`PitchRegulator`]. That pair overshot by 2–3 m/s at grade changes,
+/// because the outer loop could not see the inner loop's state. The gains
+/// come from a discrete LQR on the planar wheel-and-body model
+/// (`sim/carve/lqr_design.py`). That script also checks the closed loop with
+/// the rider's fore/aft spring mode, which this law cannot measure.
+///
+/// The positive speed gain is the non-minimum-phase part of a balancing
+/// vehicle: to slow down it first drives forward, so the body tips back.
+///
+/// The reference slews at `accel_limit_m_s2`, so a step in target speed does
+/// not ask for a lean the motor cannot recover from.
+#[derive(Debug, Clone, Copy)]
+pub struct SpeedHoldLqr {
+    k_pitch: f32,
+    k_rate: f32,
+    k_speed: f32,
+    k_int: f32,
+    accel_limit_m_s2: f32,
+    integral_limit_m: f32,
+    integral: f32,
+    v_ref: Option<f32>,
+}
+
+impl SpeedHoldLqr {
+    /// Gains in A/rad, A/(rad/s), A/(m/s), A/m — all magnitudes.
+    pub const fn new(k_pitch: f32, k_rate: f32, k_speed: f32, k_int: f32, accel_limit_m_s2: f32) -> Self {
+        SpeedHoldLqr {
+            k_pitch,
+            k_rate,
+            k_speed,
+            k_int,
+            accel_limit_m_s2,
+            integral_limit_m: 10.0,
+            integral: 0.0,
+            v_ref: None,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.integral = 0.0;
+        self.v_ref = None;
+    }
+
+    /// The slewed speed reference of the last update.
+    pub fn v_ref(&self) -> Option<f32> {
+        self.v_ref
+    }
+
+    /// Requested current in amps, before the envelope clamp.
+    ///
+    /// The reference starts at the measured speed and slews toward
+    /// `v_target_m_s`. `saturated` is the envelope's clamp bit from the last
+    /// cycle: while it is set, the integral does not wind in the direction
+    /// that pushes the demand further past the limit.
+    pub fn update(
+        &mut self,
+        pitch_rad: f32,
+        pitch_rate_rad_s: f32,
+        v_m_s: f32,
+        v_target_m_s: f32,
+        dt_s: f32,
+        saturated: bool,
+    ) -> f32 {
+        let step = self.accel_limit_m_s2 * dt_s;
+        let v_ref = match self.v_ref {
+            None => v_m_s,
+            Some(r) => r + (v_target_m_s - r).clamp(-step, step),
+        };
+        self.v_ref = Some(v_ref);
+        let err = v_m_s - v_ref;
+        let balance = -self.k_pitch * pitch_rad - self.k_rate * pitch_rate_rad_s;
+        let demand = balance + self.k_speed * err + self.k_int * self.integral;
+        let pushing_further = saturated && demand.is_sign_positive() == err.is_sign_positive();
+        if dt_s > 0.0 && !pushing_further {
+            self.integral =
+                (self.integral + err * dt_s).clamp(-self.integral_limit_m, self.integral_limit_m);
+        }
+        balance + self.k_speed * err + self.k_int * self.integral
+    }
+}
+
+#[cfg(test)]
+mod speed_hold_tests {
+    use super::*;
+
+    fn lqr() -> SpeedHoldLqr {
+        SpeedHoldLqr::new(376.8, 88.4, 28.35, 8.06, 1.0)
+    }
+
+    #[test]
+    fn nose_down_drives_forward() {
+        let mut c = lqr();
+        assert!(c.update(-0.05, 0.0, 0.0, 0.0, 0.002, false) > 0.0);
+    }
+
+    #[test]
+    fn too_fast_first_drives_forward_to_tip_back() {
+        let mut c = lqr();
+        c.update(0.0, 0.0, 3.0, 3.0, 0.002, false);
+        // Reference held at 3 m/s; board now at 3.5 m/s, level.
+        assert!(c.update(0.0, 0.0, 3.5, 3.0, 0.002, false) > 0.0);
+    }
+
+    #[test]
+    fn reference_slews_from_measured_speed() {
+        let mut c = lqr();
+        c.update(0.0, 0.0, 1.0, 5.0, 0.5, false);
+        assert_eq!(c.v_ref(), Some(1.0));
+        c.update(0.0, 0.0, 1.0, 5.0, 0.5, false);
+        assert!((c.v_ref().unwrap() - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn integral_does_not_wind_further_while_saturated() {
+        let mut c = lqr();
+        c.update(0.0, 0.0, 3.0, 3.0, 0.002, false);
+        let a = c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
+        let b = c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
+        assert!((a - b).abs() < 1e-3, "integral wound while saturated: {a} -> {b}");
+    }
+}
+
 /// Cascaded balance controller.
 ///
 /// **Stub.** Returns [`Command::ZERO`] regardless of input; the sim checkpoint

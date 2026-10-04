@@ -2135,6 +2135,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         sl_max_deg.to_radians(),
         control_core::PlantCoupling::ComAboveAxle,
     );
+    // `--speed-hold` law: full-state LQR from sim/carve/lqr_design.py.
+    // Tuning only: OVERBOARD_SPEED_LQR="k_pitch,k_rate,k_speed,k_int,accel".
+    let lqr_gains = std::env::var("OVERBOARD_SPEED_LQR")
+        .ok()
+        .and_then(|v| {
+            let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (f.len() == 5).then(|| (f[0], f[1], f[2], f[3], f[4]))
+        })
+        .unwrap_or((376.8, 88.4, 28.35, 8.06, 1.0));
+    let mut speed_lqr = control_core::SpeedHoldLqr::new(
+        lqr_gains.0, lqr_gains.1, lqr_gains.2, lqr_gains.3, lqr_gains.4,
+    );
     let mut last_saturated = false;
 
     let out_socket = UdpSocket::bind("127.0.0.1:0")?;
@@ -2439,6 +2451,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             last_amps = 0.0;
             grade_aid.reset();
             speed_loop.reset();
+            speed_lqr.reset();
             last_forward_speed_m_s = 0.0;
             utilisation_filtered = 0.0;
             prev_outside_corridor = false;
@@ -2730,6 +2743,21 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, pitch_ref_rad);
         // The single kt division -- the actuation boundary (issue #137).
         let mut proposed_amps = proposed_torque_nm / KT_NM_PER_A;
+        // `--speed-hold` uses ONE full-state law for balance and speed (the
+        // cascade above overshot 2-3 m/s at grade changes). The legacy
+        // cascade stays only behind OVERBOARD_SPEED_LOOP for reproduction.
+        if let Some(v_ref) = cfg.speed_hold_m_s {
+            if std::env::var_os("OVERBOARD_SPEED_LOOP").is_none() {
+                proposed_amps = speed_lqr.update(
+                    regulated_pitch_rad,
+                    regulated_pitch_rate_rad_s,
+                    forward_speed_m_s,
+                    v_ref,
+                    DT_S as f32,
+                    last_saturated,
+                );
+            }
+        }
         // Grade feedforward: the current that holds the board on the learned
         // grade, so the proportional regulator does not have to droop
         // nose-up to make it (3.8 deg on an 8 % descent, measured). The same
