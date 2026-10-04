@@ -50,7 +50,19 @@ NOMINAL = dict(rider_kg=70.0, grade_pct=0.0, v_target=3.0, v_start=0.0, amps=40.
 BOARD_KG = 13.0      # board alone: the sim's 83 kg total less the 70 kg ballast
 RUN_IN_M, GRADE_M = 10.0, 80.0
 S_END = RUN_IN_M + GRADE_M - 2.0   # "reached the end" (s = 90 - x)
-WINDOW = (14.0, 88.0)              # on-grade window for speed and energy
+WINDOW = (14.0, 88.0)              # on-grade window for speed (energy: constant grade only)
+R_CURVE = 100.0                    # vertical-curve radius, m
+
+
+def run_in(grade_pct):
+    """sim-host centres the vertical curve on the run-in end; this starts it
+    at s = RUN_IN_M for every grade, so no board spawns on the curve."""
+    return RUN_IN_M + 0.5 * R_CURVE * abs(grade_pct) / 100.0
+
+
+def grade_start(grade_pct):
+    """Where the constant grade begins, m."""
+    return RUN_IN_M + R_CURVE * abs(grade_pct) / 100.0
 
 
 def lhs(n, rng):
@@ -83,7 +95,7 @@ def run_one(k, p, out, port, ground):
            '--rider-mass', f"{p['rider_kg']:.2f}", '--kt-scale', f"{p['kt_scale']:.4f}",
            '--start-speed', f"{p['v_start']:.3f}",
            *(['--spawn-x', '88', '--terrain', str(p['course'] / 'course_hfield.bin')] if ground == 'hfield'
-             else ['--grade-course', f"{RUN_IN_M},{p['grade_pct']:.3f},100"]),
+             else ['--grade-course', f"{run_in(p['grade_pct']):.3f},{p['grade_pct']:.3f},{R_CURVE}"]),
            '--schedule-csv', str(out / 'passive.csv'),
            '--duration-secs', '3600', '--max-sim-secs', f"{min(secs, 90):.0f}", '--free-run',
            '--state-out-addr', f"127.0.0.1:{port}", '--input-in-addr', f"127.0.0.1:{port + 1}",
@@ -130,6 +142,7 @@ def analyse(csv_path, log_path, p, ground='plane'):
     reached = s.max()
     status = 'PASS' if not cause and reached >= S_END else ('FALL' if cause else 'STALL')
     on = (s >= WINDOW[0]) & (s <= WINDOW[1])
+    flat_grade = (s >= grade_start(p['grade_pct']) + 2.0) & (s <= WINDOW[1])
     vt, v0 = p['v_target'], p['v_start']
     # Overshoot past the target, in the direction of the approach, after the
     # first crossing. Zero for a run that starts at the target.
@@ -149,10 +162,10 @@ def analyse(csv_path, log_path, p, ground='plane'):
                         regen_eff=0.8, series=20, parallel=2, cell_ah=4.0, r_cell=0.015, max_duty=0.9,
                         mass=BOARD_KG + p['rider_kg'], crr=0.015, cda=0.5)
     wh_km = float('nan')
-    if on.sum() > 50:
+    if flat_grade.sum() > 50:
         # applied_amps is the COMMANDED current; the true current is the same
         # (Kt error changes torque, not current).
-        e = battery.analyse(t[on], amps[on], v[on], a)
+        e = battery.analyse(t[flat_grade], amps[flat_grade], v[flat_grade], a)
         wh_km = e['wh_per_km']
     return dict(
         status=status, cause=cause, reached_m=round(float(reached), 1),
