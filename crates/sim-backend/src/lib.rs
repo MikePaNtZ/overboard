@@ -246,6 +246,17 @@ impl SimBackend {
         }
     }
 
+    /// Sets the drive's current limit in the imperfection chain, amps. The
+    /// chain clamps every command at its profile's `max_current_a`, and
+    /// `IDEAL` holds 40 A. A host with a larger limit (`sim-host
+    /// --max-current`) must pass it here, or the motor is silently capped at
+    /// 40 A while the host logs the larger command (found 2026-10-04: every
+    /// Monte Carlo run above 40 A ran at 40 A). Call before `open()`.
+    pub fn with_current_limit(mut self, max_current_a: f64) -> Self {
+        self.imperfection_profile.max_current_a = max_current_a;
+        self
+    }
+
     /// Sets the two ballast position-actuator targets, metres, taking effect
     /// on the next [`BoardObserve::wait_observe`] call (issue #161 W2) -- the
     /// ridden rider model's physically-simulated fore/aft and lateral

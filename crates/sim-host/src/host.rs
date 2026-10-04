@@ -2223,6 +2223,8 @@ struct TraceRow {
     /// `--authority-margin`: margin and level (0 none, 1 pulse, 2 solid).
     margin: f32,
     margin_level: u8,
+    /// Truth roll, deg (body roll; positive = deck leans right).
+    truth_roll_deg: f32,
     /// `|proposed_amps| / MAX_CURRENT_A`, unfiltered.
     utilisation: f32,
     /// ... and low-passed at [`AUTHORITY_UTILISATION_TAU_S`].
@@ -2489,7 +2491,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             HANDOFF_TILT_RAD.to_degrees(),
         );
     }
-    let mut backend = SimBackend::with_model_path(params, model_path);
+    // The backend's chain clamps at its own limit (IDEAL: 40 A); it must be
+    // the host's limit, or a larger --max-current is a silent 40 A cap.
+    let mut backend = SimBackend::with_model_path(params, model_path)
+        .with_current_limit(cfg.max_current_a.unwrap_or(MAX_CURRENT_A) as f64);
     // Before `open()`, which is where the tilt is applied -- see
     // `HostConfig::incline_deg`.
     backend.set_incline_deg(cfg.incline_deg);
@@ -3509,6 +3514,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 tail_strike_n: tail_n,
                 margin: margin.margin(),
                 margin_level: margin_level as u8,
+                truth_roll_deg: roll_rad.to_degrees(),
                 utilisation,
                 utilisation_filtered,
                 authority_warning,
@@ -3741,12 +3747,12 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
         "seq,sim_time_s,stick_fore_aft,shaped_fore_aft,applied_fore_aft,truth_pitch_deg,\
          est_pitch_deg,est_pitch_rate_deg_s,truth_pitch_rate_deg_s,forward_speed_m_s,proposed_amps,applied_amps,\
          saturated,utilisation,utilisation_filtered,authority_warning,fallen,pos_x_m,pos_y_m,\
-         nose_strike_n,tail_strike_n,margin,margin_level\n",
+         nose_strike_n,tail_strike_n,margin,margin_level,truth_roll_deg\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?},{:?},{:?},{:?},{}",
+            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?},{:?},{:?},{:?},{},{:?}",
             r.seq,
             r.sim_time_s,
             r.stick_fore_aft,
@@ -3770,6 +3776,7 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
             r.tail_strike_n,
             r.margin,
             r.margin_level,
+            r.truth_roll_deg,
         );
     }
     std::fs::write(path, out).map_err(HostError::Io)
