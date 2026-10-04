@@ -92,6 +92,10 @@ fn main() -> ExitCode {
                 cfg.spawn_x_m = x;
                 i += 2;
             }
+            "--balance-comp" => {
+                cfg.balance_comp = true;
+                i += 1;
+            }
             "--hold-until-arm" => {
                 cfg.hold_until_arm = true;
                 i += 1;

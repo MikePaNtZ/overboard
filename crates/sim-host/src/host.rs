@@ -1973,6 +1973,10 @@ pub struct HostConfig {
     /// `limit`, the forward-acceleration limit (D2). See
     /// `control_core::AuthorityMargin`.
     pub authority_margin: MarginMode,
+    /// `--balance-comp`: the deployed balance law gets grade compensation
+    /// (control_core::GradeCompensator: learned-load feedforward and a slow
+    /// pitch integral). Ignored with `--speed-hold`, whose law has its own.
+    pub balance_comp: bool,
     /// `--hold-until-arm`: hold the board still at its spawn pose until the
     /// first input arm bit, as a rider's foot holds it on a hill. For live
     /// play: without it the board rolls away on a slope before the player
@@ -2372,6 +2376,7 @@ impl Default for HostConfig {
             hud_out_addr: None,
             batt_soc0: 0.9,
             hold_until_arm: false,
+            balance_comp: false,
         }
     }
 }
@@ -2797,6 +2802,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut start_speed_pending = cfg.start_speed_m_s;
     let mut margin = control_core::AuthorityMargin::new();
     let mut rider_model = RiderSpeedModel::default();
+    let mut grade_comp = control_core::GradeCompensator::new();
     let mut battery = crate::hud::BatteryModel::new(cfg.batt_soc0);
     let mut hud_seq: u64 = 0;
     let hud_kt = KT_NM_PER_A as f64 * variation.kt_scale.unwrap_or(1.0);
@@ -3137,6 +3143,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
             last_amps = 0.0;
             grade_aid.reset();
+            grade_comp.reset();
             speed_loop.reset();
             speed_lqr.reset();
             last_forward_speed_m_s = 0.0;
@@ -3557,6 +3564,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // idea as the VESC Float package's adaptive torque response.
         if cfg.grade_feedforward {
             proposed_amps += grade_aid.load_m_s2() / ACCEL_FF_GAIN_M_S2_PER_A;
+        }
+        // `--balance-comp`: grade compensation for the deployed law.
+        if cfg.balance_comp && cfg.speed_hold_m_s.is_none() {
+            proposed_amps += grade_comp.update(
+                regulated_pitch_rad - pitch_ref_rad,
+                grade_aid.load_m_s2(),
+                ACCEL_FF_GAIN_M_S2_PER_A,
+                KT_NM_PER_A,
+                last_saturated,
+                DT_S as f32,
+            );
         }
         // WARNING (measured 2026-10-04): `--grade-ff` is physically wrong for
         // a balancing board and runs away (7-14 m/s on 6-12 % descents). A

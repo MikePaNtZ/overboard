@@ -999,6 +999,70 @@ impl SpeedHoldLqr {
     }
 }
 
+/// Grade compensation for the deployed balance law ([`PitchRegulator`]).
+///
+/// The PD law alone makes a steady wheel torque only by drooping the deck:
+/// theta = L / Kp. A rider stands on the deck, so the droop moves the rider's
+/// centre of mass forward by about l * theta, and with Kp = 140 N.m/rad (below
+/// the rider's gravity stiffness m g l, about 660 N.m/rad) that is more than
+/// the steady state needs: the board must accelerate, which needs more torque
+/// and more droop. Measured: no steady speed beyond about 5 % grade
+/// (fable-oracle review, 2026-10-04). Two terms remove the droop:
+///
+/// 1. Load feedforward: the current the learned grade load needs,
+///    `load / k` ([`GradeAwareAiding::load_m_s2`]), limited to
+///    `FF_LIMIT_A`. No lean is commanded; the rider supplies the small
+///    centre-of-mass offset a steady climb needs.
+/// 2. A slow pitch integral, Ki = 25 N.m/(rad s) (integral time about 5 s),
+///    for the residual (estimator bias, rolling loss); limited to
+///    `I_LIMIT_NM`, and frozen while the drive is saturated in the same
+///    direction.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GradeCompensator {
+    integral_nm: f32,
+}
+
+impl GradeCompensator {
+    pub const KI_NM_PER_RAD_S: f32 = 25.0;
+    pub const I_LIMIT_NM: f32 = 20.0;
+    /// About 45 N.m (a 25 % grade at 110 kg) at Kt 0.7.
+    pub const FF_LIMIT_A: f32 = 64.0;
+
+    pub const fn new() -> Self {
+        GradeCompensator { integral_nm: 0.0 }
+    }
+
+    /// Extra current, A, to add to the regulator's output.
+    /// `pitch_err_rad` = pitch - reference (nose down negative);
+    /// `saturated` = the envelope clamped last cycle.
+    pub fn update(
+        &mut self,
+        pitch_err_rad: f32,
+        load_m_s2: f32,
+        k_m_s2_per_a: f32,
+        kt_nm_per_a: f32,
+        saturated: bool,
+        dt_s: f32,
+    ) -> f32 {
+        let ff_a = if k_m_s2_per_a > 0.0 {
+            (load_m_s2 / k_m_s2_per_a).clamp(-Self::FF_LIMIT_A, Self::FF_LIMIT_A)
+        } else {
+            0.0
+        };
+        // The integral term is a torque: -Ki * integral(pitch error).
+        let step = -Self::KI_NM_PER_RAD_S * pitch_err_rad * dt_s;
+        let pushing_further = saturated && (step > 0.0) == (self.integral_nm > 0.0);
+        if dt_s > 0.0 && !pushing_further {
+            self.integral_nm = (self.integral_nm + step).clamp(-Self::I_LIMIT_NM, Self::I_LIMIT_NM);
+        }
+        ff_a + self.integral_nm / kt_nm_per_a
+    }
+
+    pub fn reset(&mut self) {
+        self.integral_nm = 0.0;
+    }
+}
+
 /// Rider warning level from [`AuthorityMargin`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MarginLevel {
