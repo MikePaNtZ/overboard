@@ -2640,7 +2640,72 @@ pub fn spawn(cfg: HostConfig) -> std::thread::JoinHandle<Result<RunSummary, Host
 /// `None`), or until a backend/I-O error stops it. Blocking -- call this
 /// from a spawned thread, not the process's main thread, unless the caller
 /// has nothing else to do on main either.
+/// Asks macOS to schedule the loop thread as real-time (Mach time-constraint
+/// policy, plus user-interactive QoS), so the
+/// 2 ms cycle and its state packets come out in fewer bursts under load. Live
+/// play needs this; a scripted run does not, but it does no harm. It does
+/// nothing on other targets (the RT target uses PREEMPT_RT, not this host).
+/// The last part of each paced wait that the loop spins instead of sleeping.
+const SPIN_WINDOW: Duration = Duration::from_millis(1);
+
+fn request_interactive_scheduling() {
+    #[cfg(target_os = "macos")]
+    {
+        // <mach/thread_policy.h> and <pthread/qos.h>. libSystem is always
+        // linked on macOS.
+        #[repr(C)]
+        struct TimeConstraint {
+            period: u32,
+            computation: u32,
+            constraint: u32,
+            preemptible: i32,
+        }
+        #[repr(C)]
+        struct Timebase {
+            numer: u32,
+            denom: u32,
+        }
+        extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+            fn mach_thread_self() -> u32;
+            fn mach_timebase_info(info: *mut Timebase) -> i32;
+            fn thread_policy_set(thread: u32, flavor: u32, policy: *const i32, count: u32) -> i32;
+        }
+        const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+        const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
+        // SAFETY: plain libSystem calls on the current thread; the pointers
+        // are to live, correctly laid-out locals.
+        unsafe {
+            let _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            let mut tb = Timebase { numer: 0, denom: 0 };
+            if mach_timebase_info(&mut tb) != 0 || tb.numer == 0 {
+                eprintln!("sim-host: no Mach timebase; real-time policy not set");
+                return;
+            }
+            let abs = |ns: u64| (ns * tb.denom as u64 / tb.numer as u64) as u32;
+            // One 2 ms cycle; a tick computes in about 20 us. Ask for 0.5 ms
+            // of CPU, delivered within 1 ms of the period start.
+            let policy = TimeConstraint {
+                period: abs(2_000_000),
+                computation: abs(500_000),
+                constraint: abs(1_000_000),
+                preemptible: 1,
+            };
+            let rc = thread_policy_set(
+                mach_thread_self(),
+                THREAD_TIME_CONSTRAINT_POLICY,
+                &policy as *const TimeConstraint as *const i32,
+                4,
+            );
+            if rc != 0 {
+                eprintln!("sim-host: real-time thread policy refused (kern {rc}); QoS only");
+            }
+        }
+    }
+}
+
 pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
+    request_interactive_scheduling();
     let params = Params {
         kp_nm_per_rad: KP_NM_PER_RAD,
         kd_nm_per_rad_s: KD_NM_PER_RAD_S,
@@ -3954,7 +4019,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                     pacer.missed_deadlines()
                 );
             } else {
-                std::thread::sleep(sleep_for);
+                // macOS coalesces timers: a 2 ms sleep can take 16 ms, and the
+                // loop then runs the missed ticks back to back (issue #168),
+                // so state packets leave in bursts. Sleep to 1 ms before the
+                // deadline, then spin. Paced runs only; free runs never wait.
+                let deadline = Instant::now() + sleep_for;
+                if let Some(coarse) = sleep_for.checked_sub(SPIN_WINDOW) {
+                    std::thread::sleep(coarse);
+                }
+                while Instant::now() < deadline {
+                    std::hint::spin_loop();
+                }
             }
         }
     }
