@@ -97,8 +97,12 @@ def main():
     a = ap.parse_args()
     print(f"pack {a.series}S{a.parallel}P, {a.series * a.parallel * a.cell_ah * 3.6:.0f} Wh nominal")
     for p in a.runs:
-        r = analyse(*load(p, a.s_range), a)
         name = p.rsplit('/', 1)[-1].removesuffix('.csv')
+        run = load(p, a.s_range)
+        if len(run[0]) < 2:
+            print(f"{name:14s} no samples in the window (fell first?)")
+            continue
+        r = analyse(*run, a)
         print(f"{name:14s} {r['wh_per_km']:6.1f} Wh/km  P peak {r['p_peak_w']:6.0f} W  "
               f"P min {r["p_regen_w"]:6.0f} W  cell peak {r['cell_a_peak']:5.1f} A  "
               f"voltage headroom {r['headroom']:5.1f} V  range(80%) {r['range_km']:5.1f} km")
