@@ -116,6 +116,26 @@ fn main() -> ExitCode {
                 cfg.batt_soc0 = x;
                 i += 2;
             }
+            "--tumble" => {
+                cfg.tumble = true;
+                i += 1;
+            }
+            "--pose-out" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --pose-out needs a path");
+                    return ExitCode::FAILURE;
+                };
+                cfg.pose_out = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
+            "--stop-after-handoff" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --stop-after-handoff needs a number (s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.stop_after_handoff_s = Some(x);
+                i += 2;
+            }
             "--rider-reach" => {
                 let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
                     eprintln!("sim-host: --rider-reach needs a number (m)");

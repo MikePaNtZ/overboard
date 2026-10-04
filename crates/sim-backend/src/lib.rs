@@ -752,6 +752,76 @@ impl SimBackend {
         plant.set_gravity_profiled([9.81 * s, 0.0, -9.81 * c]);
     }
 
+    /// World position and orientation of body `name`, or `None`.
+    pub fn truth_body_pose(&self, name: &str) -> Option<([f64; 3], [f64; 4])> {
+        let plant = self.plant.as_ref()?;
+        let id = plant.body_id(name)?;
+        Some((plant.body_xpos(id), plant.body_xquat(id)))
+    }
+
+    /// sim-host `--tumble`. Moves the rider's mass from the ballast (a slide on
+    /// the board) to the free `rider_free` body. With `free`, the rider comes
+    /// off at the ballast's place, upright with the deck, at the ballast's
+    /// velocity, and its parking weld is released. Without `free` (a step-off),
+    /// the rider stays parked: the board only loses the rider's mass.
+    /// Returns false if the model has no tumble rider.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn release_rider(&mut self, free: bool) -> bool {
+        let linvel = self.truth_frame_linvel();
+        let angvel = self.truth_frame_angvel();
+        let plant = self.plant.as_mut().expect("release_rider: backend is not open");
+        let (Some(ballast), Some(frame), Some(upper), Some(legs), Some(park), Some(free_q), Some(hip_q)) = (
+            plant.body_id("ballast"),
+            plant.body_id("frame"),
+            plant.body_id("rider_free"),
+            plant.body_id("rider_legs"),
+            plant.eq_id("rider_park"),
+            plant.joint_qposadr("rider_free_j"),
+            plant.joint_qposadr("rider_hip"),
+        ) else {
+            return false;
+        };
+        let (Some(free_v), Some(hip_v)) = (plant.joint_dofadr("rider_free_j"), plant.joint_dofadr("rider_hip")) else {
+            return false;
+        };
+        // 5 kg stays on the ballast slide: its joint damping (600 N*s/m) on a
+        // lighter mass is unstable under RK4 at 2 ms (rate x step > 1), which
+        // launched the board. 5 kg gives 0.24.
+        const KEEP_KG: f64 = 5.0;
+        let m = plant.body_mass(ballast) - KEEP_KG;
+        plant.set_body_mass(ballast, KEEP_KG, [0.01; 3]);
+        // A standing body: about 60 % above the hips, 40 % in the legs.
+        let (mu, ml) = (0.6 * m, 0.4 * m);
+        plant.set_body_mass(upper, mu, [0.10 * mu, 0.10 * mu, 0.02 * mu]);
+        plant.set_body_mass(legs, ml, [0.06 * ml, 0.06 * ml, 0.01 * ml]);
+        if free {
+            let p = plant.body_xpos(ballast);
+            let f = plant.body_xpos(frame);
+            let q = plant.body_xquat(frame);
+            let r = plant.body_xmat(frame);
+            let d = [p[0] - f[0], p[1] - f[1], p[2] - f[2]];
+            let v = [
+                linvel[0] + angvel[1] * d[2] - angvel[2] * d[1],
+                linvel[1] + angvel[2] * d[0] - angvel[0] * d[2],
+                linvel[2] + angvel[0] * d[1] - angvel[1] * d[0],
+            ];
+            // The free joint's angular velocity is in the body frame: R^T w.
+            let w = [
+                r[0] * angvel[0] + r[3] * angvel[1] + r[6] * angvel[2],
+                r[1] * angvel[0] + r[4] * angvel[1] + r[7] * angvel[2],
+                r[2] * angvel[0] + r[5] * angvel[1] + r[8] * angvel[2],
+            ];
+            plant.set_qpos_range(free_q, &[p[0], p[1], p[2], q[0], q[1], q[2], q[3]]);
+            plant.set_qpos_range(hip_q, &[1.0, 0.0, 0.0, 0.0]);
+            plant.set_qvel_range(free_v, &[v[0], v[1], v[2], w[0], w[1], w[2]]);
+            plant.set_qvel_range(hip_v, &[0.0; 3]);
+            plant.set_eq_active(park, false);
+        }
+        true
+    }
+
     /// Puts the plant back to `qpos` with every velocity at zero: sim-host
     /// `--hold-until-arm` holds the board at its spawn pose this way until a
     /// player arms it. It takes effect at the next step.

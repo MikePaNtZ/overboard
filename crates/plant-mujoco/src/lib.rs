@@ -68,6 +68,16 @@ extern "C" {
     fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_body_mocapid(model: *mut c_void, body_id: c_int) -> c_int;
     fn plant_mujoco_set_mocap(data: *mut c_void, mocap_id: c_int, pos: *const f64, quat: *const f64);
+    fn plant_mujoco_eq_id(model: *mut c_void, name: *const c_char) -> c_int;
+    fn plant_mujoco_set_eq_active(data: *mut c_void, eq_id: c_int, on: c_int);
+    fn plant_mujoco_body_mass(model: *mut c_void, body_id: c_int) -> f64;
+    fn plant_mujoco_set_body_mass(
+        model: *mut c_void,
+        data: *mut c_void,
+        body_id: c_int,
+        mass: f64,
+        inertia: *const f64,
+    );
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -446,6 +456,34 @@ impl Plant {
         } else {
             Some(id as usize)
         }
+    }
+
+    /// The index of equality constraint `name`, or `None`.
+    pub fn eq_id(&self, name: &str) -> Option<usize> {
+        let name_c = CString::new(name).expect("equality name must not contain a NUL byte");
+        // SAFETY: see `sensor_adr_dim`.
+        let id = unsafe { plant_mujoco_eq_id(self.model, name_c.as_ptr()) };
+        (id >= 0).then_some(id as usize)
+    }
+
+    /// Switches equality constraint `eq_id` on or off (`mjData::eq_active`).
+    pub fn set_eq_active(&mut self, eq_id: usize, on: bool) {
+        // SAFETY: `eq_id` came from `eq_id()`, so it is in range.
+        unsafe { plant_mujoco_set_eq_active(self.data, eq_id as c_int, on as c_int) };
+    }
+
+    /// `mjModel::body_mass[body_id]`, kg.
+    pub fn body_mass(&self, body_id: usize) -> f64 {
+        // SAFETY: `body_id` came from `body_id()`, so it is in range.
+        unsafe { plant_mujoco_body_mass(self.model, body_id as c_int) }
+    }
+
+    /// Sets a body's mass and principal inertia during a run (sim-host
+    /// `--tumble` moves the rider's mass off the board at a fall), then
+    /// recomputes the model constants.
+    pub fn set_body_mass(&mut self, body_id: usize, mass: f64, inertia: [f64; 3]) {
+        // SAFETY: `body_id` came from `body_id()`; `inertia` is 3 doubles.
+        unsafe { plant_mujoco_set_body_mass(self.model, self.data, body_id as c_int, mass, inertia.as_ptr()) };
     }
 
     /// The mocap index of body `name`, or `None` if there is no such body or

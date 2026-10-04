@@ -418,6 +418,42 @@ const KERB_CENTRE_X_M: f64 = (CORRIDOR_X_MAX_M + CORRIDOR_X_MIN_M) / 2.0;
 /// touched; the depth exists so the board cannot clip through the far side.
 const KERB_HALF_DEPTH_M: f64 = 0.6;
 
+/// `--tumble`: a free two-part rider (torso and head; legs on a ball hip),
+/// parked 50 m up on a weld until a fall. Low-resolution on purpose: it shows
+/// how a rider leaves the board and slides, not a human body. It does not
+/// touch the board (contact excluded), only the road.
+fn splice_tumble_rider(xml: &str) -> Result<String, HostError> {
+    if xml.matches("</worldbody>").count() != 1 {
+        return Err(HostError::Io(std::io::Error::other("sim-host: --tumble: no single </worldbody>")));
+    }
+    // Skin on asphalt, about 0.6.
+    let f = r#"friction="0.6 0.005 0.0001" condim="3" material="rider_mat" group="0""#;
+    let body = format!(
+        r#"<body name="rider_free" pos="0 0 50">
+      <freejoint name="rider_free_j"/>
+      <inertial pos="0 0 0.2" mass="1" diaginertia="0.1 0.1 0.02"/>
+      <geom name="rider_torso" type="capsule" fromto="0 0 0.02 0 0 0.50" size="0.15" {f}/>
+      <geom name="rider_head" type="sphere" pos="0 0 0.70" size="0.11" {f}/>
+      <body name="rider_legs" pos="0 0 0">
+        <joint name="rider_hip" type="ball" limited="true" range="0 110" damping="6"/>
+        <inertial pos="0 0 -0.33" mass="1" diaginertia="0.06 0.06 0.01"/>
+        <geom name="rider_leg_f" type="capsule" fromto="0 0 0 -0.17 0 -0.62" size="0.065" {f}/>
+        <geom name="rider_leg_r" type="capsule" fromto="0 0 0 0.17 0 -0.62" size="0.065" {f}/>
+      </body>
+    </body>
+  "#
+    );
+    let tail = r#"<equality><weld name="rider_park" body1="rider_free"/></equality>
+  <contact>
+    <exclude body1="rider_free" body2="frame"/>
+    <exclude body1="rider_legs" body2="frame"/>
+    <exclude body1="rider_free" body2="wheel"/>
+    <exclude body1="rider_legs" body2="wheel"/>
+  </contact>
+"#;
+    Ok(xml.replace("</worldbody>", &format!("{body}</worldbody>\n  {tail}")))
+}
+
 /// `--rider-reach`: widens the fore/aft slide joint and its servo range to
 /// +-`reach` m. The servo gains do not change.
 fn splice_rider_reach(xml: &str, reach: f64) -> Result<String, HostError> {
@@ -2018,6 +2054,21 @@ pub struct HostConfig {
     pub rider_speed_m_s: Option<f32>,
     /// `--rider-reach M`: see `PlantVariation::rider_reach_m`.
     pub rider_reach_m: Option<f64>,
+    /// `--tumble`: at a fall (the ADR-0012 handoff) the rider comes off as a
+    /// free two-part body (torso, legs on a ball hip) and MuJoCo goes on
+    /// computing the board and the rider sliding on the road; the motor is
+    /// cut, as the firmware does at a fall. At a `--rider-reacts` dismount the
+    /// board only loses the rider's mass. The wire still freezes at the
+    /// handoff (Unreal's ragdoll does not change). Scripted runs only: a
+    /// reset does not put the rider's mass back.
+    pub tumble: bool,
+    /// `--pose-out PATH`: the full MuJoCo pose at 50 Hz for the whole run,
+    /// with the tumble rider, for a MuJoCo render (sim/carve/render_pose.py).
+    /// The model is kept beside it as `sim/models/<stem>.generated.xml`.
+    pub pose_out: Option<PathBuf>,
+    /// `--stop-after-handoff S`: end the run S seconds after a fall or a
+    /// dismount (to record the tumble).
+    pub stop_after_handoff_s: Option<f64>,
     /// `--rider-reacts` (speed-hold harness only): a rider model that answers
     /// the warning. Pulsed for 0.5 s: the rider eases off (target 0). Solid
     /// for 0.5 s while driving: the rider steps off and the run ends (DISMOUNT).
@@ -2415,6 +2466,9 @@ impl Default for HostConfig {
             rider_reacts: false,
             rider_speed_m_s: None,
             rider_reach_m: None,
+            tumble: false,
+            pose_out: None,
+            stop_after_handoff_s: None,
             hud_out_addr: None,
             batt_soc0: 0.9,
             hold_until_arm: false,
@@ -2789,6 +2843,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     } else {
         None
     };
+    if cfg.tumble {
+        let Some(path) = &generated_model else {
+            return Err(HostError::Io(std::io::Error::other("sim-host: --tumble needs a generated model (use --lean-steer)")));
+        };
+        let xml = std::fs::read_to_string(path)?;
+        std::fs::write(path, splice_tumble_rider(&xml)?)?;
+    }
     let model_path = generated_model.clone().unwrap_or_else(rider_model_path);
     if let Some(kerb) = &cfg.kerb {
         eprintln!(
@@ -2910,6 +2971,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut start_speed_pending = cfg.start_speed_m_s;
     let mut margin = control_core::AuthorityMargin::new();
     let mut rider_model = RiderSpeedModel::default();
+    // `--tumble`: the rider is free (fall) or off (dismount); the motor is cut.
+    let mut rider_free = false;
+    let mut motor_cut = false;
+    let mut handoff_at_s: Option<f64> = None;
+    let mut pose_rows: Vec<String> = Vec::new();
     // `--rider-reach`: the stick spans the rider's reach, and the rider model
     // uses the same share of it (60 %) as of the model's 5 cm.
     let fore_aft_range_m = variation.rider_reach_m.map_or(BALLAST_RANGE_M, |r| r as f32);
@@ -3104,8 +3170,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             }
         }
         // `--rider-reacts`: the rider has stepped off; the run is over.
-        if dismount_at_s.is_some_and(|t| t_known_s > t + 0.2) {
+        if dismount_at_s.is_some_and(|t| t_known_s > t + cfg.stop_after_handoff_s.unwrap_or(0.2)) {
             break;
+        }
+        if let (Some(s), Some(t0)) = (cfg.stop_after_handoff_s, handoff_at_s) {
+            if t_known_s > t0 + s {
+                break;
+            }
         }
 
         // Drain every pending datagram; only the most recent VALID one
@@ -3417,12 +3488,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let mut torque = torque;
         if cfg.lean_steer {
             // Tire turn-slip moment (see `crate::lean_steer`), about world +Z.
-            torque[2] += lean_yaw_torque_nm;
+            if !rider_free {
+                torque[2] += lean_yaw_torque_nm;
+            }
             // Rider balance skill, about the board's forward axis. Forward is
             // body -X, and + rolls the board right (top towards body +Y),
             // which is a rotation about body -X.
             let xm = backend.truth_frame_xmat();
-            let tau = lean_balance_torque_nm as f64;
+            let tau = if rider_free { 0.0 } else { lean_balance_torque_nm as f64 };
             torque[0] -= tau * xm[0];
             torque[1] -= tau * xm[3];
             torque[2] -= tau * xm[6];
@@ -3613,6 +3686,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                     && (stopped_on_climb || (level == control_core::MarginLevel::Solid && held && last_amps > 0.0))
                 {
                     dismount_at_s = Some(t_known_s);
+                    if cfg.tumble && backend.release_rider(false) {
+                        motor_cut = true;
+                        eprintln!("sim-host: --tumble: the rider steps off; the motor is cut");
+                    }
                     eprintln!("sim-host: rider dismount at sim_t={t_known_s:.3}s");
                 }
             }
@@ -3711,6 +3788,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // out of authority" signal existed, was computed every cycle, and was
         // dropped on the floor, while `FALLEN` -- which trips about a second
         // AFTER the outcome is decided -- was the only thing anyone was told.
+        if motor_cut {
+            proposed_amps = 0.0;
+        }
         let (bounded_cmd, saturation) = envelope.apply(
             Command::MotorCurrent {
                 amps: proposed_amps,
@@ -3861,6 +3941,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
             if by_strike || by_tilt {
                 handoff_latched = true;
+                handoff_at_s = Some(t_known_s);
+                if cfg.tumble && !motor_cut && backend.release_rider(true) {
+                    rider_free = true;
+                    motor_cut = true;
+                    eprintln!("sim-host: --tumble: the rider comes off at t={t_known_s:.3}s; the motor is cut");
+                }
                 // The state handed over is the state at the instant of the
                 // strike, captured BEFORE the freeze below stops it reaching
                 // the wire -- everything sent from here on is this snapshot.
@@ -3887,6 +3973,28 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             flags |= wire::STATE_FLAG_HANDOFF;
         }
 
+        if cfg.pose_out.is_some() && ticks.is_multiple_of(10) {
+            // Before the rider is free, the rider pose is drawn at the ballast,
+            // upright with the deck.
+            let rider = if rider_free {
+                backend.truth_body_pose("rider_free")
+            } else {
+                match (backend.truth_body_pose("ballast"), backend.truth_body_pose("frame")) {
+                    (Some((p, _)), Some((_, q))) => Some((p, q)),
+                    _ => None,
+                }
+            };
+            let (rp, rq) = rider.unwrap_or(([0.0; 3], [1.0, 0.0, 0.0, 0.0]));
+            let ev = (rider_free as u8) | ((dismount_at_s.is_some() as u8) << 1) | ((handoff_latched as u8) << 2);
+            let mut row = format!(
+                "{t_known_s:.4},{ev},{:.3},{:.4},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
+                forward_speed_m_s, last_amps, rp[0], rp[1], rp[2], rq[0], rq[1], rq[2], rq[3]
+            );
+            for x in backend.truth_qpos() {
+                row.push_str(&format!(",{x:.6}"));
+            }
+            pose_rows.push(row);
+        }
         if cfg.trace_path.is_some() {
             trace.push(TraceRow {
                 seq: ticks,
@@ -4118,6 +4226,26 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         );
     }
 
+    if let Some(path) = &cfg.pose_out {
+        let model_note = match &generated_model {
+            Some(g) => {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("pose");
+                let keep = rider_model_path().with_file_name(format!("{stem}.generated.xml"));
+                std::fs::copy(g, &keep)?;
+                std::fs::canonicalize(&keep)?.display().to_string()
+            }
+            None => std::fs::canonicalize(rider_model_path())?.display().to_string(),
+        };
+        let mut out = format!(
+            "# model={model_note}\n# t,event(bit0 rider free, bit1 dismount, bit2 handoff),speed,amps,rider_x,rider_y,rider_z,rider_qw,rider_qx,rider_qy,rider_qz,qpos...\n"
+        );
+        for r in &pose_rows {
+            out.push_str(r);
+            out.push('\n');
+        }
+        std::fs::write(path, out)?;
+        eprintln!("sim-host: wrote {} pose rows to {}", pose_rows.len(), path.display());
+    }
     let _ = backend.close();
     // The spliced model is a per-process scratch file; leaving it behind
     // would litter `sim/models/` with generated XML that looks committed.
