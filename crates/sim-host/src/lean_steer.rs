@@ -25,37 +25,35 @@
 //! `v* = sqrt(g r_c / eta)` (3.4 m/s) is the speed at which camber steer and
 //! balance agree for a board and rider leaning together.
 //!
-//! # Rider side (the human): feet and hips
-//!
-//! The rider has two inputs, as a real one does:
-//! - **ankles** (`a`, a roll hinge at deck level, torque-limited to what heel
-//!   and toe pressure can apply): tilt the DECK relative to the body. Deck
-//!   camber is what steers, so this is the fast steering input;
-//! - **hips** (`d`, the lateral slide of the 70 kg mass): move the centre of
-//!   mass for balance.
+//! # Rider side: an idealised skilled rider
 //!
 //! The steer stick is the rider's INTENT, a target curvature
-//! `kappa = steer * kappa_max`, eased with a lag. From it:
+//! `kappa = steer * kappa_max`, eased with a lag and clamped to a turn the
+//! rider can hold. From it:
 //!
 //! ```text
-//! phi_ref   = atan(kappa * r_c / eta)          deck camber that steers kappa
-//! theta_ref = atan(v^2 * kappa / g)            body lean that balances the turn
-//! a_ref     = theta_ref - phi_ref,  d_ref = 0
-//! [a_cmd, d_cmd] = [a_ref, 0] - K(v) . (x - x_ref)
-//! x = [phi, a, d, phi_dot, a_dot, d_dot, v_lat, r, r_t, a_servo, d_servo]
+//! phi_ref = atan(kappa * r_c / eta)                    deck camber that steers kappa
+//! d_ref   = (h v^2 kappa / g - (h - rho) sin phi_ref) / cos phi_ref
+//!                                                      hip offset that balances the turn
+//! tau     = -kp (phi - phi_ref) - kd phi_dot           balance skill, about the board axis
 //! ```
 //!
-//! `K(v)` is a speed-scheduled discrete LQR on the MuJoCo model linearised at
-//! forward speed `v` (finite differences), with this module's tire law and
-//! relaxation in the loop ([`RIDER_GAIN_SCHEDULE`]). Closed-loop damping is
-//! >= 0.61 at every scheduled speed from 0 to 9.5 m/s.
+//! **What is idealised.** `tau` is a roll torque applied to the board about
+//! its forward axis. It stands for the balance a real rider gets from foot
+//! pressure and the ground reaction under the tire, which this model does not
+//! resolve. It is the one non-physical force in the model; its size is
+//! bounded ([`LeanSteerParams::balance_torque_limit_nm`]) and logged. Camber
+//! steer, the cornering force from tire friction, gravity, the hip mass and
+//! the pitch controller are all physical.
 //!
-//! **Why two inputs.** A first rider had only the hip slide. It balanced at
-//! a standstill and carved at low speed, but could not reverse a lean near or
-//! above `v*`: the mass shift has too little roll authority there, and the
-//! lean it asked for needed more reach than a body has (measured, and
-//! confirmed by an independent review). Heel/toe pressure on the deck is the
-//! input a real rider steers with.
+//! **Why idealised.** Two resolved riders were built and measured first, and
+//! both are kept in git history (`b64b841`, `3f1e287`):
+//! - hips only (70 kg on a +-0.25 m slide, speed-scheduled LQR): balances
+//!   standing and carves at low speed, but cannot reverse a lean near or above
+//!   `v*` -- too little roll authority there;
+//! - ankles and hips (a roll hinge at deck level + the slide, two-input LQR):
+//!   the ankle servo cannot hold its angle against the body, and a stiffer
+//!   one designed by the same linear method is unstable in the full sim.
 //!
 //! # Signs
 //!
@@ -79,19 +77,20 @@ pub struct LeanSteerParams {
     pub yaw_servo_nms: f32,
     /// Largest curvature the rider asks for at full stick, 1/m.
     pub kappa_max_per_m: f32,
-    /// Largest body lean the rider will commit to, rad.
-    pub max_body_lean_rad: f32,
-    /// Rider ankle range, rad (symmetric; matches the model joint).
-    pub ankle_range_rad: f32,
+    /// Height of the centre of mass above the ground, metres.
+    pub com_height_m: f32,
+    /// Crown radius of the tire profile, metres.
+    pub crown_radius_m: f32,
     /// Rider hip reach, metres (symmetric; matches the model joint).
     pub hip_reach_m: f32,
-    /// Scale on the scheduled rider gains (1.0 = as designed; tuning only).
-    pub rider_gain_scale: f32,
+    /// Share of the hip reach the steady-turn offset may use.
+    pub feasible_reach_fraction: f32,
+    /// Balance skill: roll stiffness, N*m/rad, damping, N*m*s/rad, limit, N*m.
+    pub balance_kp_nm_per_rad: f32,
+    pub balance_kd_nms_per_rad: f32,
+    pub balance_torque_limit_nm: f32,
     /// How fast the rider eases into a new curvature intent, s.
     pub intent_lag_s: f32,
-    /// Lags of the rider's ankle and hip servos, s (match the actuators).
-    pub ankle_servo_lag_s: f32,
-    pub hip_servo_lag_s: f32,
 }
 
 impl Default for LeanSteerParams {
@@ -102,13 +101,17 @@ impl Default for LeanSteerParams {
             relaxation_m: 0.15,
             yaw_servo_nms: 150.0,
             kappa_max_per_m: 0.25,
-            max_body_lean_rad: 35.0_f32.to_radians(),
-            ankle_range_rad: 0.6,
+            com_height_m: 0.82,
+            crown_radius_m: 0.099,
             hip_reach_m: 0.25,
-            rider_gain_scale: 1.0,
+            feasible_reach_fraction: 0.6,
+            // Roll inertia about the contact ~ m h^2 = 52 kg m^2 and gravity
+            // destiffens by m g h ~ 630 N*m/rad: kp 2000 leaves ~1400 net,
+            // ~5 rad/s, and kd 400 damps it near zeta 0.8.
+            balance_kp_nm_per_rad: 2000.0,
+            balance_kd_nms_per_rad: 400.0,
+            balance_torque_limit_nm: 400.0,
             intent_lag_s: 0.4,
-            ankle_servo_lag_s: 0.03,
-            hip_servo_lag_s: 0.05,
         }
     }
 }
@@ -131,7 +134,9 @@ impl LeanSteerParams {
                     "sigma" => p.relaxation_m = v,
                     "yaw_servo" => p.yaw_servo_nms = v,
                     "kappa_max" => p.kappa_max_per_m = v,
-                    "gain_scale" => p.rider_gain_scale = v,
+                    "balance_kp" => p.balance_kp_nm_per_rad = v,
+                    "balance_kd" => p.balance_kd_nms_per_rad = v,
+                    "balance_limit" => p.balance_torque_limit_nm = v,
                     "intent_lag" => p.intent_lag_s = v,
                     other => eprintln!("sim-host: OVERBOARD_LEAN: unknown key '{other}'"),
                 }
@@ -163,99 +168,35 @@ pub fn roll_reference(p: &LeanSteerParams, kappa: f32) -> f32 {
     (kappa * p.rolling_radius_m / p.camber_efficiency).atan()
 }
 
-/// Number of rider feedback states. See the module doc for the order.
-pub const RIDER_STATES: usize = 11;
-
-/// Rider state-feedback gains `K(v)`, two rows (ankle rad, hip m) on the
-/// state vector in the module doc, against forward speed `|v|` (m/s). Linear
-/// interpolation between rows; held at the ends. Generated by the
-/// speed-scheduled LQR described in the module doc (`Q` on deck camber 400,
-/// body lean 400, hip 5, their rates 40/40/0.1, yaw rate 0.5; `R` = 50 on
-/// the ankle, 1000 on the hip). The first row is linearised at 0.05 m/s: at
-/// exactly zero the heading is uncontrollable and the Riccati solve fails.
-pub const RIDER_GAIN_SCHEDULE: &[(f32, [[f32; RIDER_STATES]; 2])] = &[
-    (0.1, [[18.3266, 14.6296, 15.9508, 5.4309, 5.0649, 5.9173, 5.9274, 0.0117, 0.0623, 2.0576, 3.4535], [14.2103, 11.8756, 12.6926, 4.2060, 3.8995, 4.6178, 4.6896, 0.0088, 0.0433, 0.1027, 2.3608]]),
-    (0.5, [[19.8593, 15.9969, 17.6251, 5.9202, 5.5149, 6.4453, 6.4610, 0.1249, 0.5130, 2.0627, 3.5004], [13.2587, 11.1454, 11.7784, 3.9453, 3.6604, 4.3375, 4.4064, 0.0834, 0.3324, 0.1042, 2.3525]]),
-    (1.0, [[22.4424, 18.6147, 20.7797, 6.8581, 6.3792, 7.4600, 7.4867, 0.2872, 0.7747, 2.0832, 3.6343], [9.9199, 8.5595, 8.5458, 3.0216, 2.8132, 3.3442, 3.4029, 0.1296, 0.3439, 0.1082, 2.3190]]),
-    (1.5, [[20.3961, 17.7061, 19.5200, 6.5363, 6.0883, 7.1208, 7.1446, 0.4107, 0.8286, 2.1114, 3.7331], [6.1315, 5.5806, 4.8320, 1.9573, 1.8367, 2.1992, 2.2461, 0.1300, 0.2596, 0.1111, 2.2733]]),
-    (2.0, [[15.3889, 14.2946, 15.1803, 5.3189, 4.9746, 5.8163, 5.8271, 0.4488, 0.7259, 2.1350, 3.7677], [3.4698, 3.4586, 2.1938, 1.1988, 1.1407, 1.3830, 1.4214, 0.1122, 0.1804, 0.1119, 2.2365]]),
-    (2.5, [[10.5925, 10.8699, 10.8669, 4.0951, 3.8538, 4.5035, 4.5009, 0.4372, 0.5918, 2.1515, 3.7760], [1.9026, 2.2000, 0.6330, 0.7487, 0.7275, 0.8986, 0.9319, 0.0950, 0.1284, 0.1120, 2.2137]]),
-    (3.0, [[6.9404, 8.2487, 7.5818, 3.1573, 2.9948, 3.4975, 3.4845, 0.4108, 0.4792, 2.1633, 3.7835], [0.9914, 1.4719, -0.2680, 0.4881, 0.4883, 0.6182, 0.6486, 0.0825, 0.0967, 0.1121, 2.2017]]),
-    (3.5, [[4.3059, 6.3917, 5.2634, 2.4920, 2.3855, 2.7844, 2.7639, 0.3852, 0.3954, 2.1728, 3.7986], [0.4316, 1.0349, -0.8080, 0.3316, 0.3447, 0.4499, 0.4785, 0.0742, 0.0770, 0.1125, 2.1966]]),
-    (4.0, [[2.3833, 5.0889, 3.6422, 2.0244, 1.9576, 2.2840, 2.2582, 0.3649, 0.3348, 2.1815, 3.8226], [0.0595, 0.7578, -1.1505, 0.2322, 0.2535, 0.3432, 0.3707, 0.0689, 0.0643, 0.1133, 2.1959]]),
-    (5.0, [[-0.2281, 3.4767, 1.6447, 1.4441, 1.4273, 1.6655, 1.6330, 0.3396, 0.2577, 2.1986, 3.8912], [-0.4164, 0.4387, -1.5459, 0.1176, 0.1486, 0.2206, 0.2468, 0.0633, 0.0495, 0.1154, 2.2021]]),
-    (6.0, [[-2.0019, 2.5602, 0.5156, 1.1129, 1.1258, 1.3154, 1.2789, 0.3284, 0.2130, 2.2162, 3.9772], [-0.7343, 0.2629, -1.7658, 0.0543, 0.0910, 0.1534, 0.1789, 0.0611, 0.0412, 0.1181, 2.2134]]),
-    (7.0, [[-3.3825, 1.9799, -0.1962, 0.9024, 0.9352, 1.0954, 1.0563, 0.3252, 0.1845, 2.2344, 4.0719], [-0.9843, 0.1499, -1.9091, 0.0136, 0.0541, 0.1107, 0.1356, 0.0603, 0.0358, 0.1211, 2.2268]]),
-    (8.0, [[-4.5563, 1.5795, -0.6861, 0.7566, 0.8041, 0.9452, 0.9043, 0.3266, 0.1649, 2.2529, 4.1709], [-1.1991, 0.0693, -2.0133, -0.0155, 0.0279, 0.0804, 0.1051, 0.0601, 0.0320, 0.1243, 2.2412]]),
-    (9.5, [[-6.1071, 1.1639, -1.1954, 0.6046, 0.6689, 0.7920, 0.7491, 0.3335, 0.1449, 2.2810, 4.3224], [-1.4837, -0.0184, -2.1296, -0.0471, -0.0004, 0.0479, 0.0722, 0.0602, 0.0279, 0.1291, 2.2634]]),
-];
-
-/// `K(|v|)` from [`RIDER_GAIN_SCHEDULE`].
-pub fn rider_gains(speed_m_s: f32) -> [[f32; RIDER_STATES]; 2] {
-    let v = speed_m_s.abs();
-    let t = RIDER_GAIN_SCHEDULE;
-    if v <= t[0].0 {
-        return t[0].1;
-    }
-    for w in t.windows(2) {
-        let ((v0, k0), (v1, k1)) = (w[0], w[1]);
-        if v <= v1 {
-            let a = (v - v0) / (v1 - v0);
-            let mut k = [[0.0; RIDER_STATES]; 2];
-            for r in 0..2 {
-                for i in 0..RIDER_STATES {
-                    k[r][i] = k0[r][i] + a * (k1[r][i] - k0[r][i]);
-                }
-            }
-            return k;
-        }
-    }
-    t[t.len() - 1].1
-}
-
 /// What the rider senses each cycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RiderObs {
-    /// Deck roll, rad, + = leaning right.
+    /// Board roll, rad, + = leaning right, and its rate.
     pub roll_rad: f32,
     pub roll_rate_rad_s: f32,
-    /// Ankle angle (body relative to deck), rad, + = body right, and rate.
-    pub ankle_rad: f32,
-    pub ankle_rate_rad_s: f32,
-    /// Hip offset on its slide, m, + = right, and rate.
-    pub offset_m: f32,
-    pub offset_rate_m_s: f32,
-    /// Board sideways velocity in its own heading frame, m/s, + = right.
-    pub lateral_velocity_m_s: f32,
-    /// Yaw rate, rad/s, + = left.
-    pub yaw_rate_rad_s: f32,
-    /// The tire's relaxed yaw-rate target ([`TireYaw`]), rad/s, + = left.
-    pub tire_yaw_target_rad_s: f32,
 }
 
 /// What the rider commands each cycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RiderCmd {
-    /// Ankle target, rad (body relative to deck, + = body right).
-    pub ankle_rad: f32,
     /// Hip offset target, m (+ = right).
     pub offset_m: f32,
+    /// Balance torque about the board's forward axis, N*m (+ rolls it right).
+    pub roll_torque_nm: f32,
 }
 
-/// The rider model. Holds the rider's intent and servo states.
+/// The rider model. Holds the rider's eased intent.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rider {
     /// The rider's eased curvature intent, 1/m, + = right.
     pub kappa_intent_per_m: f32,
-    /// Lagged commands: what each servo is currently aiming at.
-    pub ankle_servo_rad: f32,
-    pub hip_servo_m: f32,
 }
 
-/// Steady-turn references for curvature `kappa` at speed `v`:
-/// `(phi_ref, theta_ref)`, deck camber and body lean, rad.
-pub fn turn_reference(p: &LeanSteerParams, v: f32, kappa: f32) -> (f32, f32) {
-    (roll_reference(p, kappa), (v * v * kappa / G).atan())
+/// Hip offset, metres (+right), that balances a steady turn of curvature
+/// `kappa` (+right) at speed `v` and board lean `phi`.
+pub fn steady_turn_offset(p: &LeanSteerParams, v: f32, kappa: f32, phi: f32) -> f32 {
+    let h = p.com_height_m;
+    (h * v * v * kappa / G - (h - p.crown_radius_m) * phi.sin()) / phi.cos()
 }
 
 impl Rider {
@@ -268,58 +209,35 @@ impl Rider {
         o: &RiderObs,
         dt_s: f32,
     ) -> RiderCmd {
-        // Intent: eased, zero at a standstill, and clamped to a turn the
-        // body can lean into (theta_ref <= max_body_lean) and the ankles can
-        // reach (|a_ref| within 60 % of the range, the rest is for feedback).
         let speed_frac = ((speed_m_s.abs() - NO_TURN_BELOW_M_S)
             / (FULL_TURN_SPEED_M_S - NO_TURN_BELOW_M_S))
             .clamp(0.0, 1.0);
         let goal = steer.clamp(-1.0, 1.0) * p.kappa_max_per_m * speed_frac;
         let b = (dt_s / p.intent_lag_s.max(dt_s)).min(1.0);
         self.kappa_intent_per_m += b * (goal - self.kappa_intent_per_m);
-        let feasible = |k: f32| {
-            let (phi, theta) = turn_reference(p, speed_m_s, k);
-            theta.abs() <= p.max_body_lean_rad && (theta - phi).abs() <= 0.6 * p.ankle_range_rad
+        // Only ask for a turn the hips can balance with headroom to spare.
+        let reference = |k: f32| {
+            let phi = roll_reference(p, k);
+            (phi, steady_turn_offset(p, speed_m_s, k, phi))
         };
-        if !feasible(self.kappa_intent_per_m) {
+        let budget = p.feasible_reach_fraction * p.hip_reach_m;
+        if reference(self.kappa_intent_per_m).1.abs() > budget {
             let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
             for _ in 0..12 {
                 let mid = 0.5 * (lo + hi);
-                if feasible(self.kappa_intent_per_m * mid) {
-                    lo = mid;
-                } else {
+                if reference(self.kappa_intent_per_m * mid).1.abs() > budget {
                     hi = mid;
+                } else {
+                    lo = mid;
                 }
             }
             self.kappa_intent_per_m *= lo;
         }
-        let kappa = self.kappa_intent_per_m;
-        let (phi_ref, theta_ref) = turn_reference(p, speed_m_s, kappa);
-        let a_ref = theta_ref - phi_ref;
-        let r_ref = -speed_m_s * kappa;
-
-        let e = [
-            o.roll_rad - phi_ref,
-            o.ankle_rad - a_ref,
-            o.offset_m,
-            o.roll_rate_rad_s,
-            o.ankle_rate_rad_s,
-            o.offset_rate_m_s,
-            o.lateral_velocity_m_s,
-            o.yaw_rate_rad_s - r_ref,
-            o.tire_yaw_target_rad_s - r_ref,
-            self.ankle_servo_rad - a_ref,
-            self.hip_servo_m,
-        ];
-        let k = rider_gains(speed_m_s);
-        let dot = |row: &[f32; RIDER_STATES]| -> f32 {
-            row.iter().zip(e.iter()).map(|(k, e)| k * e).sum::<f32>() * p.rider_gain_scale
-        };
-        let ankle = (a_ref - dot(&k[0])).clamp(-p.ankle_range_rad, p.ankle_range_rad);
-        let hip = (-dot(&k[1])).clamp(-p.hip_reach_m, p.hip_reach_m);
-        self.ankle_servo_rad += (dt_s / p.ankle_servo_lag_s).min(1.0) * (ankle - self.ankle_servo_rad);
-        self.hip_servo_m += (dt_s / p.hip_servo_lag_s).min(1.0) * (hip - self.hip_servo_m);
-        RiderCmd { ankle_rad: ankle, offset_m: hip }
+        let (phi_ref, d_ref) = reference(self.kappa_intent_per_m);
+        let tau = (-p.balance_kp_nm_per_rad * (o.roll_rad - phi_ref)
+            - p.balance_kd_nms_per_rad * o.roll_rate_rad_s)
+            .clamp(-p.balance_torque_limit_nm, p.balance_torque_limit_nm);
+        RiderCmd { offset_m: d_ref.clamp(-p.hip_reach_m, p.hip_reach_m), roll_torque_nm: tau }
     }
 }
 
@@ -396,16 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn a_right_turn_leans_the_body_further_than_the_deck_at_speed() {
-        let p = LeanSteerParams::default();
-        let (phi, theta) = turn_reference(&p, 6.0, 0.1);
-        assert!(phi > 0.0 && theta > phi, "phi {phi} theta {theta}");
-        let (phi, theta) = turn_reference(&p, 1.5, 0.1);
-        assert!(theta < phi, "below v* the body leans less than the deck");
-    }
-
-    #[test]
-    fn the_intent_is_clamped_to_a_lean_the_body_and_ankles_can_hold() {
+    fn the_intent_is_clamped_to_what_the_hips_can_balance() {
         let p = LeanSteerParams::default();
         for v10 in 0..=95 {
             let v = v10 as f32 / 10.0;
@@ -413,20 +322,18 @@ mod tests {
             for _ in 0..3000 {
                 r.command(&p, 1.0, v, &RiderObs::default(), 0.002);
             }
-            let (phi, theta) = turn_reference(&p, v, r.kappa_intent_per_m);
-            assert!(theta.abs() <= p.max_body_lean_rad + 1e-3, "v {v} theta {theta}");
-            assert!((theta - phi).abs() <= 0.6 * p.ankle_range_rad + 1e-3, "v {v}");
+            let k = r.kappa_intent_per_m;
+            let d = steady_turn_offset(&p, v, k, roll_reference(&p, k));
+            assert!(d.abs() <= p.feasible_reach_fraction * p.hip_reach_m + 1e-3, "v {v}: {d}");
         }
     }
 
     #[test]
-    fn gain_schedule_interpolates_and_holds_at_the_ends() {
-        let t = RIDER_GAIN_SCHEDULE;
-        assert_eq!(rider_gains(0.0), t[0].1);
-        assert_eq!(rider_gains(-20.0), t[t.len() - 1].1);
-        let v = 0.5 * (t[0].0 + t[1].0);
-        let k = rider_gains(v);
-        assert!((k[0][0] - 0.5 * (t[0].1[0][0] + t[1].1[0][0])).abs() < 1e-3);
+    fn the_balance_torque_rolls_the_board_towards_the_reference() {
+        let p = LeanSteerParams::default();
+        let mut r = Rider::default();
+        let o = RiderObs { roll_rad: 0.1, ..Default::default() };
+        assert!(r.command(&p, 0.0, 3.0, &o, 0.002).roll_torque_nm < 0.0);
     }
 
     #[test]

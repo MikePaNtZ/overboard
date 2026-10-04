@@ -17,7 +17,7 @@ LOOKAHEAD = 4.0       # long enough for smooth arcs, short enough to reach the l
 YAW_K_TOP = 1 / 6.67  # rad/m per unit steer at top speed (host.rs)
 V_TOP = 9.34
 RAMP_S = 8.0          # target speed rises over this many seconds
-BRAKE_X = -46.0       # brake to a stop past this x (weak brake on this grade: ~0.7 m/s^2)
+BRAKE_X = float(os.environ.get("BRAKE_X", "-46.0"))       # brake to a stop past this x (weak brake on this grade: ~0.7 m/s^2)
 LEAN_RATIO = 0.8      # lateral weight shift per unit steer: lean into the turn
 
 ST = struct.Struct('<IHHQd3f4f5f2f3f3f')
@@ -74,6 +74,8 @@ tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 rows, last, seq = [], None, 0
 integ = 0.0
+v_prev = None
+acc_f = 0.0
 t0 = None
 period = 0.02
 next_send = time.perf_counter()
@@ -114,13 +116,26 @@ while True:
             vr = V_REF * min(1.0, t / RAMP_S) if px > BRAKE_X else 0.0
             err = vr - v
             integ = np.clip(integ + err * period, -3, 3)
-            kp, ki = (0.18, 0.05) if vr > 0 else (0.35, 0.12)
+            # Lean-to-steer needs a firmer speed hold: a soft one let the speed
+            # run to 6.6 m/s on the 6.5 % grade (measured).
+            kp, ki = (0.35, 0.12) if (vr == 0 or LEAN_KMAX > 0) else (0.18, 0.05)
             # The -0.45 brake bias holds speed on the 6.5 % grade. It fades in
             # with speed so the rider pushes off forward from a flat start.
             bias = -0.45 * min(1.0, max(v, 0.0) / 2.0)
             # Push off gently: forward lean past ~0.1 saturates the motor at low
             # speed (the full-stick flip). On the hill gravity supplies the speed.
-            fa = float(np.clip(kp * err + ki * integ + bias, -0.85, 0.10))
+            if LEAN_KMAX > 0:
+                # A balancing board brakes with a lag (it must pitch nose-up
+                # first), so a plain PI rings: brake too late, then push
+                # forward again (measured). Damp on acceleration, keep the
+                # integral small, and never push forward once rolling.
+                acc = (v - v_prev) / period if v_prev is not None else 0.0
+                acc_f = acc_f + 0.1 * (acc - acc_f)
+                fwd_cap = 0.10 if v < 1.5 else 0.0
+                fa = float(np.clip(0.30 * err + 0.03 * integ - 0.45 * acc_f + bias, -0.85, fwd_cap))
+            else:
+                fa = float(np.clip(kp * err + ki * integ + bias, -0.85, 0.10))
+            v_prev = v
             # steer: pure pursuit to the reference path
             # Look further ahead at speed: a lean-steered board takes ~0.5 s to
             # build a turn, and a short look-ahead then weaves (measured).

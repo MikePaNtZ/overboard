@@ -428,12 +428,6 @@ const KERB_HALF_DEPTH_M: f64 = 0.6;
 /// - Rider: lateral reach +-0.25 m (knee, hip and body lean),
 ///   and a faster lateral servo (kp 12000 N/m, 0.05 s lag): a rider balances
 ///   roll with ~0.2 s reactions, which the 1 Hz fore/aft servo cannot.
-/// Rider ankle servo: torque limit, joint damping and stiffness. The gains in
-/// `lean_steer::RIDER_GAIN_SCHEDULE` are designed for these values.
-const ANKLE_TORQUE_NM: f64 = 80.0;
-const ANKLE_DAMPING_NMS: f64 = 300.0;
-const ANKLE_KP_NM_PER_RAD: f64 = 1500.0;
-
 fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
     let swaps = [
         (
@@ -454,48 +448,6 @@ fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
         ),
     ];
     let mut out = xml.to_string();
-    // Rider ankles: a roll hinge at deck level between the deck and the
-    // body, so heel/toe pressure can camber the deck (see `lean_steer`).
-    // Torque-limited to 80 N*m, about what heel and toe can lever on a deck.
-    let ankle = [
-        (
-            r#"<body name="ballast_fa_carrier" pos="0 0 0.75">"#,
-            r#"<body name="rider_ankle" pos="0 0 0.05">
-        <joint name="ankle_roll" type="hinge" axis="-1 0 0" pos="0 0 0" range="-0.6 0.6" damping="ANKLE_DAMP"/>
-        <inertial pos="0 0 0.35" mass="0.5" diaginertia="0.01 0.01 0.01"/>
-      <body name="ballast_fa_carrier" pos="0 0 0.70">"#,
-        ),
-        (
-            "        </body>\n      </body>\n\n      <camera name=\"side\"",
-            "        </body>\n      </body>\n      </body>\n\n      <camera name=\"side\"",
-        ),
-        (
-            "</actuator>",
-            r#"<position name="ankle_roll" joint="ankle_roll" kp="ANKLE_KP" ctrlrange="-0.6 0.6" ctrllimited="true" forcerange="-ANKLE_TQ ANKLE_TQ" forcelimited="true" timeconst="0.03"/>
-  </actuator>"#,
-        ),
-    ];
-    // Tuning only: OVERBOARD_ANKLE="torque_nm,damping_nms,kp_nm_per_rad".
-    let (ankle_tq, ankle_damp, ankle_kp) = std::env::var("OVERBOARD_ANKLE")
-        .ok()
-        .and_then(|v| {
-            let f: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-            (f.len() == 3).then(|| (f[0], f[1], f[2]))
-        })
-        .unwrap_or((ANKLE_TORQUE_NM, ANKLE_DAMPING_NMS, ANKLE_KP_NM_PER_RAD));
-    for (from, to) in ankle {
-        let to = to
-            .replace("ANKLE_TQ", &format!("{ankle_tq}"))
-            .replace("ANKLE_DAMP", &format!("{ankle_damp}"))
-            .replace("ANKLE_KP", &format!("{ankle_kp}"));
-        if out.matches(from).count() != 1 {
-            return Err(HostError::Io(std::io::Error::other(format!(
-                "sim-host: --lean-steer could not find exactly one '{}' for the ankle splice",
-                from.lines().next().unwrap_or(from)
-            ))));
-        }
-        out = out.replace(from, &to);
-    }
     let keep_cylinder = std::env::var("OVERBOARD_TIRE").as_deref() == Ok("cyl");
     for (from, to) in swaps {
         if keep_cylinder && from.contains("wheel_geom") {
@@ -2211,7 +2163,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut lean_roll_rate_rad_s: f32 = 0.0;
     let mut rider = crate::lean_steer::Rider::default();
     let lean_debug = std::env::var("OVERBOARD_LEAN_DEBUG").is_ok();
-    let mut lean_prev_offset_m: f32 = 0.0;
+    let mut lean_balance_torque_nm: f32 = 0.0;
+    let mut lean_balance_peak_nm: f32 = 0.0;
     let mut lean_yaw_torque_nm: f64 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
     // Previous tick's ground speed, m/s, signed (positive = forward) -- used
@@ -2421,7 +2374,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             lean_roll_rate_rad_s = 0.0;
             lean_yaw_torque_nm = 0.0;
             rider = crate::lean_steer::Rider::default();
-            lean_prev_offset_m = 0.0;
+            lean_balance_torque_nm = 0.0;
             estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
             tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
             last_amps = 0.0;
@@ -2506,53 +2459,29 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // PHYSICALLY (see this file's header). Set every cycle, mirroring
         // apply_external_force's own "call every cycle or a stale value
         // persists" convention.
-        // With lean-to-steer the rider model owns the ankles and the hips:
-        // it cambers the deck for the curvature `steer` asks for and keeps
-        // the body balanced over it.
+        // With lean-to-steer the rider model owns the hips and the balance
+        // torque: it cambers the board for the curvature `steer` asks for
+        // and keeps it balanced (see `lean_steer`).
         let lateral_target_m = if cfg.lean_steer {
-            let (_, offset_m) = backend.truth_ballast_positions();
-            let offset_rate_m_s = (offset_m - lean_prev_offset_m) / DT_S as f32;
-            lean_prev_offset_m = offset_m;
-            let v = backend.truth_frame_linvel();
-            let (hs, hc) = yaw_rad.sin_cos();
-            // The body +Y axis (RIGHT) at heading h is (-sin h, cos h).
-            let lateral_velocity_m_s = -hs * v[0] as f32 + hc * v[1] as f32;
-            let (ankle_rad, ankle_rate_rad_s) = backend.truth_ankle();
             let obs = crate::lean_steer::RiderObs {
                 roll_rad: lean_roll_rad,
                 roll_rate_rad_s: lean_roll_rate_rad_s,
-                ankle_rad,
-                ankle_rate_rad_s,
-                offset_m,
-                offset_rate_m_s,
-                lateral_velocity_m_s,
-                yaw_rate_rad_s: backend.truth_frame_angvel()[2] as f32,
-                tire_yaw_target_rad_s: tire_yaw.yaw_rate_target_rad_s,
             };
             let cmd = rider.command(&lean_params, steer, last_forward_speed_m_s, &obs, DT_S as f32);
+            lean_balance_torque_nm = cmd.roll_torque_nm;
+            lean_balance_peak_nm = lean_balance_peak_nm.max(cmd.roll_torque_nm.abs());
             if lean_debug && ticks % 125 == 0 {
-                let (phi_r, th_r) = crate::lean_steer::turn_reference(
-                    &lean_params,
-                    last_forward_speed_m_s,
-                    rider.kappa_intent_per_m,
-                );
                 eprintln!(
-                    "LEAN t={t_known_s:6.2} v={last_forward_speed_m_s:5.2} steer={steer:+.2} kappa={:+.3} \
-                     phi_ref={:+5.1} theta_ref={:+5.1} | phi={:+5.1} ankle={:+5.1} d={:+.3} vlat={:+.2} r={:+.2} | \
-                     cmd ankle={:+5.1} d={:+.3}",
+                    "LEAN t={t_known_s:6.2} v={last_forward_speed_m_s:5.2} steer={steer:+.2} \
+                     kappa={:+.3} phi_ref={:+5.1} phi={:+5.1} d={:+.3} tau={:+6.1}",
                     rider.kappa_intent_per_m,
-                    phi_r.to_degrees(),
-                    th_r.to_degrees(),
+                    crate::lean_steer::roll_reference(&lean_params, rider.kappa_intent_per_m)
+                        .to_degrees(),
                     obs.roll_rad.to_degrees(),
-                    obs.ankle_rad.to_degrees(),
-                    obs.offset_m,
-                    obs.lateral_velocity_m_s,
-                    obs.yaw_rate_rad_s,
-                    cmd.ankle_rad.to_degrees(),
-                    cmd.offset_m
+                    cmd.offset_m,
+                    cmd.roll_torque_nm
                 );
             }
-            backend.set_ankle_target(cmd.ankle_rad);
             cmd.offset_m
         } else {
             weight_shift_lateral * BALLAST_RANGE_M
@@ -2603,6 +2532,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if cfg.lean_steer {
             // Tire turn-slip moment (see `crate::lean_steer`), about world +Z.
             torque[2] += lean_yaw_torque_nm;
+            // Rider balance skill, about the board's forward axis. Forward is
+            // body -X, and + rolls the board right (top towards body +Y),
+            // which is a rotation about body -X.
+            let xm = backend.truth_frame_xmat();
+            let tau = lean_balance_torque_nm as f64;
+            torque[0] -= tau * xm[0];
+            torque[1] -= tau * xm[3];
+            torque[2] -= tau * xm[6];
         }
         backend.apply_external_force(force, torque);
 
@@ -3077,6 +3014,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         );
     }
 
+    if cfg.lean_steer {
+        eprintln!(
+            "sim-host: lean-steer rider balance torque peak {lean_balance_peak_nm:.1} N*m \
+             (limit {:.0} N*m)",
+            lean_params.balance_torque_limit_nm
+        );
+    }
     if let Some(path) = &cfg.trace_path {
         write_trace(path, &trace)?;
         eprintln!(
