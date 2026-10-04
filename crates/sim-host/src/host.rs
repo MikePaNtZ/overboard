@@ -1267,6 +1267,8 @@ pub const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
 /// Rust binding to that geometry query, so this is a fixed proxy near that
 /// value, not the real contact test -- good enough to prove "the board is
 /// clearly down", not precise enough to gate a published claim.
+/// Sign of the `--grade-course` gyro fix-up in the IMU pitch axis.
+const GRADE_GYRO_SIGN: f32 = 1.0;
 /// Sim time at which `--start-speed` is applied, s (see `start_speed_pending`).
 const START_SPEED_AT_S: f64 = 1.0;
 const FALLEN_PITCH_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
@@ -1691,8 +1693,9 @@ pub struct GradeCourse {
     pub run_in_m: f64,
     /// Percent, positive uphill.
     pub grade_pct: f64,
-    /// Vertical-curve radius, m. The grade changes linearly over
-    /// `radius * |grade|`, centred on the end of the run-in.
+    /// Vertical-curve length scale, m: the grade changes over
+    /// `radius * |grade|`, centred on the end of the run-in, by a cosine
+    /// blend (the mean radius is `radius`; the tightest is `2 radius / pi`).
     pub radius_m: f64,
 }
 
@@ -1704,7 +1707,14 @@ impl GradeCourse {
         let frac = if half <= 0.0 {
             if s_m >= self.run_in_m { 1.0 } else { 0.0 }
         } else {
-            ((s_m - (self.run_in_m - half)) / (2.0 * half)).clamp(0.0, 1.0)
+            // Cosine blend, not linear: the grade RATE must start and end at
+            // zero. The plane model turns gravity, so a board held vertical
+            // rotates against the plane at the grade rate, and a rate step
+            // leaves its angular momentum behind (no Euler torque in the
+            // model). Measured with the linear blend: a nose-down drift at
+            // every curve end that saturated the motor (103 kg, 14.8 %).
+            let u = ((s_m - (self.run_in_m - half)) / (2.0 * half)).clamp(0.0, 1.0);
+            0.5 - 0.5 * (std::f64::consts::PI * u).cos()
         };
         (g * frac).atan().to_degrees()
     }
@@ -2252,12 +2262,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             .with_feedforward(-0.1261, 17.82)
     };
     let mut speed_lqr = new_speed_lqr();
+    // OVERBOARD_SPEED_HOLD_BASELINE: the law without grade feedforward or
+    // governor, kept so the 2026-10-04 Monte Carlo baseline can be re-taken.
+    let speed_hold_baseline = std::env::var_os("OVERBOARD_SPEED_HOLD_BASELINE").is_some();
     // `--start-speed`: applied once the board has settled, not at t = 0. A
     // board that is moving on its first IMU sample has its estimator start
     // from a deceleration it reads as tilt (measured: -4.2 deg, 27 A), and on
     // terrain the spawn drop makes that worse. A real board also starts its
     // estimator at rest.
     let mut start_speed_pending = cfg.start_speed_m_s;
+    // `--grade-course`: last cycle's grade and its rate (see the gyro fix-up).
+    let mut grade_rad_prev: Option<f32> = None;
+    let mut grade_rate_rad_s: f32 = 0.0;
     let mut last_saturated = false;
 
     let out_socket = UdpSocket::bind("127.0.0.1:0")?;
@@ -2734,7 +2750,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         backend.apply_external_force(force, torque);
 
         if let Some(course) = &cfg.grade_course {
-            backend.set_grade_deg(course.grade_deg(-truth_pos_x_m));
+            let grade_deg = course.grade_deg(-truth_pos_x_m);
+            backend.set_grade_deg(grade_deg);
+            let grade_rad = grade_deg.to_radians() as f32;
+            grade_rate_rad_s = (grade_rad - grade_rad_prev.unwrap_or(grade_rad)) / DT_S as f32;
+            grade_rad_prev = Some(grade_rad);
         }
         if let Some(v) = start_speed_pending.filter(|_| t_known_s >= START_SPEED_AT_S) {
             backend.set_forward_speed(v, DEFAULT_R_EFF_M as f64);
@@ -2751,7 +2771,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // matching `shuttle_run.py`'s tuned ridden config -- "the
         // recommended configuration" per that scenario's own comment).
         // `pitch_ref` is always 0: no outer loop (see this file's header).
-        let sample = obs.newest_imu().copied().unwrap_or(ImuSample::ZERO);
+        let mut sample = obs.newest_imu().copied().unwrap_or(ImuSample::ZERO);
+        // `--grade-course` turns gravity, not the road. A board held vertical
+        // then rotates against the plane, and the gyro reads that; on a real
+        // vertical curve the body stays vertical and the gyro reads ~0. Add
+        // the frame rate back (nose-up positive), or the complementary filter
+        // lags the curve by rate x tau: measured 2.6 deg at 2 m/s, R = 100 m,
+        // which saturated the motor at the curve end.
+        sample.gyro_rad_s[1] += GRADE_GYRO_SIGN * grade_rate_rad_s;
         let wheel_rate_rad_s = obs.erpm * RAD_S_PER_ERPM;
         // Real forward ground speed, m/s, signed -- computed here (rather
         // than only down in the dead-reckoning block that used to be its
@@ -2869,15 +2896,32 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // cascade stays only behind OVERBOARD_SPEED_LOOP for reproduction.
         if let Some(v_ref) = cfg.speed_hold_m_s {
             if std::env::var_os("OVERBOARD_SPEED_LOOP").is_none() {
-                proposed_amps = speed_lqr.update(
-                    regulated_pitch_rad,
-                    regulated_pitch_rate_rad_s,
-                    forward_speed_m_s,
-                    // Stand still until `--start-speed` is applied.
-                    if start_speed_pending.is_some() { 0.0 } else { v_ref },
-                    DT_S as f32,
-                    last_saturated,
-                );
+                // Stand still until `--start-speed` is applied.
+                let target = if start_speed_pending.is_some() { 0.0 } else { v_ref };
+                proposed_amps = if speed_hold_baseline {
+                    speed_lqr.update(
+                        regulated_pitch_rad,
+                        regulated_pitch_rate_rad_s,
+                        forward_speed_m_s,
+                        target,
+                        DT_S as f32,
+                        last_saturated,
+                    )
+                } else {
+                    // The learned grade load (zero unless `--estimator-aiding
+                    // grade-aware`) and the envelope limit: see
+                    // `SpeedHoldLqr::update_with_grade`.
+                    speed_lqr.update_with_grade(
+                        regulated_pitch_rad,
+                        regulated_pitch_rate_rad_s,
+                        forward_speed_m_s,
+                        target,
+                        DT_S as f32,
+                        last_saturated,
+                        grade_aid.load_m_s2(),
+                        cfg.max_current_a.unwrap_or(MAX_CURRENT_A),
+                    )
+                };
             }
         }
         // Grade feedforward: the current that holds the board on the learned

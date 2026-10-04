@@ -51,7 +51,12 @@ BOARD_KG = 13.0      # board alone: the sim's 83 kg total less the 70 kg ballast
 RUN_IN_M, GRADE_M = 10.0, 80.0
 S_END = RUN_IN_M + GRADE_M - 2.0   # "reached the end" (s = 90 - x)
 WINDOW = (14.0, 88.0)              # on-grade window for speed (energy: constant grade only)
-R_CURVE = 100.0                    # vertical-curve radius, m
+# Plane ground: mean vertical-curve radius, m. Long on purpose: the plane
+# model turns gravity instead of the road and has no Euler torque, so a tight
+# curve asks the motor for torque a real road does not (13 A measured at
+# R = 100 m, 4 m/s, 104 kg). At 400 m that term is < 0.4 N.m.
+R_CURVE = 400.0
+FLAT_GRADE_M = 60.0                # constant grade after the curve, plane ground
 
 
 def run_in(grade_pct):
@@ -63,6 +68,11 @@ def run_in(grade_pct):
 def grade_start(grade_pct):
     """Where the constant grade begins, m."""
     return RUN_IN_M + R_CURVE * abs(grade_pct) / 100.0
+
+
+def s_end(p, ground):
+    """'Reached the end', m along the course."""
+    return S_END if ground == 'hfield' else grade_start(p['grade_pct']) + FLAT_GRADE_M
 
 
 def lhs(n, rng):
@@ -89,7 +99,7 @@ def course(grade_pct, cache):
 def run_one(k, p, out, port, ground):
     name = f"r{k:03d}"
     csv_path, log_path = out / 'runs' / f"{name}.csv", out / 'runs' / f"{name}.txt"
-    secs = (RUN_IN_M + GRADE_M) / max(min(p['v_target'], p['v_start'] + 1), 1.0) + 25.0
+    secs = s_end(p, ground) / max(min(p['v_target'], p['v_start'] + 1), 1.0) + 25.0
     cmd = [os.environ['SIMHOST'], '--lean-steer', '--estimator-aiding', 'grade-aware',
            '--max-current', f"{p['amps']:.2f}", '--speed-hold', f"{p['v_target']:.3f}",
            '--rider-mass', f"{p['rider_kg']:.2f}", '--kt-scale', f"{p['kt_scale']:.4f}",
@@ -97,7 +107,7 @@ def run_one(k, p, out, port, ground):
            *(['--spawn-x', '88', '--terrain', str(p['course'] / 'course_hfield.bin')] if ground == 'hfield'
              else ['--grade-course', f"{run_in(p['grade_pct']):.3f},{p['grade_pct']:.3f},{R_CURVE}"]),
            '--schedule-csv', str(out / 'passive.csv'),
-           '--duration-secs', '3600', '--max-sim-secs', f"{min(secs, 90):.0f}", '--free-run',
+           '--duration-secs', '3600', '--max-sim-secs', f"{min(secs, 200):.0f}", '--free-run',
            '--state-out-addr', f"127.0.0.1:{port}", '--input-in-addr', f"127.0.0.1:{port + 1}",
            '--stats-path', 'none', '--trace-csv', str(csv_path)]
     if not csv_path.exists():
@@ -120,7 +130,8 @@ def analyse(csv_path, log_path, p, ground='plane'):
     m = re.search(r"handoff at t=([\d.]+)s -- (bumper strike|tilt) \(bumper \d+ N: nose (\d+) N, "
                   r"tail (\d+) N, tilt ([\d.]+) deg", log)
     # The host runs on past the course end; only the course counts.
-    done = np.nonzero(s[:n] >= S_END)[0]
+    end_m = s_end(p, ground)
+    done = np.nonzero(s[:n] >= end_m)[0]
     n = done[0] + 1 if len(done) else n
     fall_i = np.nonzero(fallen[:n])[0]
     end = n
@@ -140,9 +151,9 @@ def analyse(csv_path, log_path, p, ground='plane'):
         if sat[last].mean() >= 0.5:
             cause = 'saturation (' + cause + ')'
     reached = s.max()
-    status = 'PASS' if not cause and reached >= S_END else ('FALL' if cause else 'STALL')
-    on = (s >= WINDOW[0]) & (s <= WINDOW[1])
-    flat_grade = (s >= grade_start(p['grade_pct']) + 2.0) & (s <= WINDOW[1])
+    status = 'PASS' if not cause and reached >= end_m else ('FALL' if cause else 'STALL')
+    on = (s >= WINDOW[0]) & (s <= end_m)
+    flat_grade = (s >= grade_start(p['grade_pct']) + 2.0) & (s <= end_m)
     vt, v0 = p['v_target'], p['v_start']
     # Overshoot past the target, in the direction of the approach, after the
     # first crossing. Zero for a run that starts at the target.
@@ -190,7 +201,7 @@ def main():
     args = ap.parse_args()
     out = Path(args.out).resolve()
     (out / 'runs').mkdir(parents=True, exist_ok=True)
-    (out / 'passive.csv').write_text("0,60,0,0,0,passive rider\n")
+    (out / 'passive.csv').write_text("0,300,0,0,0,passive rider\n")
     if args.probe:
         plan = []
         for spec in args.probe:

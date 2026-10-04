@@ -873,12 +873,9 @@ impl SpeedHoldLqr {
         self.v_ref
     }
 
-    /// Requested current in amps, before the envelope clamp.
-    ///
-    /// The reference starts at the measured speed and slews toward
-    /// `v_target_m_s`. `saturated` is the envelope's clamp bit from the last
-    /// cycle: while it is set, the integral does not wind in the direction
-    /// that pushes the demand further past the limit.
+    /// Requested current in amps, before the envelope clamp, on level
+    /// ground: [`SpeedHoldLqr::update_with_grade`] with no grade load and no
+    /// current budget.
     pub fn update(
         &mut self,
         pitch_rad: f32,
@@ -888,6 +885,51 @@ impl SpeedHoldLqr {
         dt_s: f32,
         saturated: bool,
     ) -> f32 {
+        self.update_with_grade(
+            pitch_rad,
+            pitch_rate_rad_s,
+            v_m_s,
+            v_target_m_s,
+            dt_s,
+            saturated,
+            0.0,
+            f32::INFINITY,
+        )
+    }
+
+    /// Requested current in amps, before the envelope clamp.
+    ///
+    /// The reference starts at the measured speed and slews toward
+    /// `v_target_m_s`. `saturated` is the envelope's clamp bit from the last
+    /// cycle: while it is set, the integral does not wind in the direction
+    /// that pushes the demand further past the limit, the reference stops
+    /// accelerating, and it leaks toward the measured speed.
+    ///
+    /// `load_m_s2` is [`GradeAwareAiding::load_m_s2`] (positive on a climb).
+    /// It adds the steady current AND the steady lean of that grade. Without
+    /// them the speed integral alone must find 20-40 A on a vertical curve;
+    /// the board then runs behind the new equilibrium, the pitch loop pays
+    /// the deficit as a burst, and the burst saturates the motor (Monte
+    /// Carlo, 2026-10-04: 30 of 167 runs inside the static envelope fell
+    /// this way). Current alone, without the lean, runs away (`--grade-ff`).
+    ///
+    /// `load / k` is the current the real plant needed at steady speed, so
+    /// it needs no rider mass or Kt. `i_max_a` is the envelope limit: the
+    /// reference acceleration is held inside a current budget and a lean
+    /// budget (see [`SPEED_HOLD_LEAN_BUDGET_RAD`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_with_grade(
+        &mut self,
+        pitch_rad: f32,
+        pitch_rate_rad_s: f32,
+        v_m_s: f32,
+        v_target_m_s: f32,
+        dt_s: f32,
+        saturated: bool,
+        load_m_s2: f32,
+        i_max_a: f32,
+    ) -> f32 {
+        let i_grade = load_m_s2 / SPEED_HOLD_LOAD_M_S2_PER_A;
         // Reference trajectory: acceleration limited, and jerk limited so
         // the feedforward lean never steps. A lean step makes the board
         // first drive backward (non-minimum phase), and the accelerometer
@@ -895,8 +937,34 @@ impl SpeedHoldLqr {
         let v_ref = match self.v_ref {
             None => v_m_s,
             Some(r) => {
-                let a_lim = self.accel_limit_m_s2;
-                let a_des = (SPEED_HOLD_APPROACH_PER_S * (v_target_m_s - r)).clamp(-a_lim, a_lim);
+                // Governor: the acceleration the grade leaves room for.
+                let grade_rad = libm::asinf((load_m_s2 / 9.81).clamp(-1.0, 1.0));
+                let a_lim_i = if self.ff_amps_per_m_s2 > 0.0 {
+                    ((SPEED_HOLD_CURRENT_BUDGET * i_max_a - libm::fabsf(i_grade))
+                        / self.ff_amps_per_m_s2)
+                        .max(0.0)
+                } else {
+                    f32::INFINITY
+                };
+                let a_lim_th = if self.ff_pitch_rad_per_m_s2 != 0.0 {
+                    ((SPEED_HOLD_LEAN_BUDGET_RAD
+                        - libm::fabsf(grade_rad)
+                        - libm::fabsf(SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2 * load_m_s2))
+                        / libm::fabsf(self.ff_pitch_rad_per_m_s2))
+                    .max(0.0)
+                } else {
+                    f32::INFINITY
+                };
+                let a_lim = self.accel_limit_m_s2.min(a_lim_i).min(a_lim_th);
+                let mut r = r;
+                let a_des = if saturated {
+                    // A board that cannot follow must not be left behind by
+                    // its own reference.
+                    r += (v_m_s - r) * (dt_s / SPEED_HOLD_SATURATED_LEAK_S).min(1.0);
+                    0.0
+                } else {
+                    (SPEED_HOLD_APPROACH_PER_S * (v_target_m_s - r)).clamp(-a_lim, a_lim)
+                };
                 let da = SPEED_HOLD_JERK_M_S3 * dt_s;
                 self.a_ref += (a_des - self.a_ref).clamp(-da, da);
                 r + self.a_ref * dt_s
@@ -905,8 +973,9 @@ impl SpeedHoldLqr {
         let a_ref = self.a_ref;
         self.v_ref = Some(v_ref);
         let err = v_m_s - v_ref;
-        let pitch_ff = self.ff_pitch_rad_per_m_s2 * a_ref;
-        let balance = self.ff_amps_per_m_s2 * a_ref
+        let pitch_ff =
+            self.ff_pitch_rad_per_m_s2 * a_ref + SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2 * load_m_s2;
+        let balance = self.ff_amps_per_m_s2 * a_ref + i_grade
             - self.k_pitch * (pitch_rad - pitch_ff)
             - self.k_rate * pitch_rate_rad_s;
         let demand = balance + self.k_speed * err + self.k_int * self.integral;
@@ -918,6 +987,22 @@ impl SpeedHoldLqr {
         balance + self.k_speed * err + self.k_int * self.integral
     }
 }
+
+/// Grade load per amp, m/s² per A: the same scale [`GradeAwareAiding`] learns
+/// its load in (Kt / (R * 83 kg)), so `load / this` is amps.
+pub const SPEED_HOLD_LOAD_M_S2_PER_A: f32 = 0.0584;
+/// Steady lean per m/s² of grade load, rad: -R / (g L) at 70 kg. It equals
+/// the acceleration lean (-0.1261) less its inertial part (1/g), so the two
+/// feedforwards agree. Small (1 deg at 8 %), so a mass error costs < 0.5 deg.
+pub const SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2: f32 = -0.0234;
+/// Fraction of the current limit the reference may plan to use.
+pub const SPEED_HOLD_CURRENT_BUDGET: f32 = 0.6;
+/// Lean the reference may plan to use against the road, rad: the 18.6 deg
+/// deck strike less 5 deg for the transient on a vertical curve.
+pub const SPEED_HOLD_LEAN_BUDGET_RAD: f32 = 0.237;
+/// Time constant of the reference leak toward the measured speed while the
+/// motor is saturated, s.
+pub const SPEED_HOLD_SATURATED_LEAK_S: f32 = 0.5;
 
 #[cfg(test)]
 mod speed_hold_tests {
@@ -964,9 +1049,34 @@ mod speed_hold_tests {
     fn integral_does_not_wind_further_while_saturated() {
         let mut c = lqr();
         c.update(0.0, 0.0, 3.0, 3.0, 0.002, false);
-        let a = c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
-        let b = c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
-        assert!((a - b).abs() < 1e-3, "integral wound while saturated: {a} -> {b}");
+        // The reference also leaks toward the measured speed while saturated,
+        // so the output moves; the integral must not.
+        c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
+        let a = c.integral;
+        c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
+        assert!((a - c.integral).abs() < 1e-6, "integral wound while saturated: {a} -> {}", c.integral);
+    }
+
+    #[test]
+    fn grade_load_adds_its_current_and_its_lean() {
+        // On the reference, at the grade lean, the demand is the grade current.
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        let load = 0.8;
+        let lean = SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2 * load;
+        c.update_with_grade(lean, 0.0, 3.0, 3.0, 0.002, false, load, 40.0);
+        let i = c.update_with_grade(lean, 0.0, 3.0, 3.0, 0.002, false, load, 40.0);
+        assert!((i - load / SPEED_HOLD_LOAD_M_S2_PER_A).abs() < 0.05, "{i}");
+    }
+
+    #[test]
+    fn governor_stops_acceleration_when_the_grade_uses_the_current_budget() {
+        // 0.6 * 30 A = 18 A budget; a 1.2 m/s² load needs 20.5 A already.
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        c.update_with_grade(0.0, 0.0, 2.0, 5.0, 0.002, false, 1.2, 30.0);
+        for _ in 0..1000 {
+            c.update_with_grade(0.0, 0.0, 2.0, 5.0, 0.002, false, 1.2, 30.0);
+        }
+        assert!(c.a_ref.abs() < 1e-3, "a_ref {}", c.a_ref);
     }
 
     #[test]
