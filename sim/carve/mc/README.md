@@ -13,6 +13,15 @@ over 18-21 deg (pad_z), tail braking on, 200 runs, seed 1.
 | `x7_warn_no_reaction.csv` | Warning on, rider does not react: 200 PASS, 11 runs warned |
 | `x7_warn_rider_reacts.csv` | Warning on, rider reacts: 197 PASS, 3 DISMOUNT (20-25 % climbs) |
 
+**The deployed balance law (what a rider rides; sim-host 74490a4 or later):**
+a rider model leans (`--rider-law`), the deployed pitch law with grade
+compensation balances (`--balance-comp`), X7 plant, tail braking on.
+
+| File | Set |
+|---|---|
+| `x7_rider_law_comp.csv` | No warning: 159 PASS, 37 STALL (32 on climbs >= 15 %: the rider model's 3 cm lean bound), 2 RUNAWAY (23-24 % descents, 5.4-6.3 m/s), 2 nose strikes (110 kg, 20-24 % climbs) |
+| `x7_rider_law_comp_warn_reacts.csv` | Warning, rider reacts: 158 PASS, 36 STALL, 2 RUNAWAY, 4 DISMOUNT, 0 nose strikes |
+
 **Superseded.** Before c28e529 the backend capped the motor at 40 A
 whatever `--max-current` said, so every run with a limit above 40 A ran at
 40 A. These files are kept for the record only:
