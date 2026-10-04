@@ -727,6 +727,20 @@ impl SimBackend {
     /// IMMEDIATELY on the state vector rather than being buffered, so it is
     /// applied ONCE per call and must not be re-issued for the same tick.
     ///
+    /// Sets the grade under the board, degrees, positive uphill: rotates
+    /// gravity about world Y, as [`SimBackend::set_incline_deg`] does, but at
+    /// any time. sim-host `--grade-course` calls it every cycle with the grade
+    /// at the board's position. MuJoCo truth pitch is then against the road
+    /// normal, and the IMU measures true gravity.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn set_grade_deg(&mut self, grade_deg: f64) {
+        let plant = self.plant.as_mut().expect("set_grade_deg: backend is not open");
+        let (s, c) = grade_deg.to_radians().sin_cos();
+        plant.set_gravity_profiled([9.81 * s, 0.0, -9.81 * c]);
+    }
+
     /// Starts the board rolling forward (-X) at `v_m_s`: the frame's world
     /// velocity and a matching wheel rate, so the wheel does not skid on the
     /// first step. For Monte Carlo start-speed variation, on a settled board.

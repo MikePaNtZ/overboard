@@ -10,6 +10,10 @@ Varied (plant only -- the controller keeps its nominal 70 kg, Kt 0.7 design):
   kt_scale   0.85..1.15 --kt-scale (true torque per commanded amp)
 Fixed: --estimator-aiding grade-aware, passive rider, lean-steer plant.
 
+Ground (--ground): 'plane' (default) rides sim-host --grade-course, the grade
+by gravity on a flat plane. 'hfield' rides a course.py heightfield, whose
+sphere contact chatters at every grid edge; kept to measure that effect.
+
 One row per run in OUT/results.csv. PASS = no fall and the board reaches the
 end of the grade. The failure cause comes from the host's handoff line (nose
 strike, tail strike, tilt); it is 'saturation' when the motor was at its
@@ -70,7 +74,7 @@ def course(grade_pct, cache):
     return g, d
 
 
-def run_one(k, p, out, port):
+def run_one(k, p, out, port, ground):
     name = f"r{k:03d}"
     csv_path, log_path = out / 'runs' / f"{name}.csv", out / 'runs' / f"{name}.txt"
     secs = (RUN_IN_M + GRADE_M) / max(min(p['v_target'], p['v_start'] + 1), 1.0) + 25.0
@@ -78,7 +82,8 @@ def run_one(k, p, out, port):
            '--max-current', f"{p['amps']:.2f}", '--speed-hold', f"{p['v_target']:.3f}",
            '--rider-mass', f"{p['rider_kg']:.2f}", '--kt-scale', f"{p['kt_scale']:.4f}",
            '--start-speed', f"{p['v_start']:.3f}",
-           '--spawn-x', '88', '--terrain', str(p['course'] / 'course_hfield.bin'),
+           *(['--spawn-x', '88', '--terrain', str(p['course'] / 'course_hfield.bin')] if ground == 'hfield'
+             else ['--grade-course', f"{RUN_IN_M},{p['grade_pct']:.3f},100"]),
            '--schedule-csv', str(out / 'passive.csv'),
            '--duration-secs', '3600', '--max-sim-secs', f"{min(secs, 90):.0f}", '--free-run',
            '--state-out-addr', f"127.0.0.1:{port}", '--input-in-addr', f"127.0.0.1:{port + 1}",
@@ -86,14 +91,17 @@ def run_one(k, p, out, port):
     if not csv_path.exists():
         with open(log_path, 'w') as log:
             subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False)
-    return dict(run=name, **{key: p[key] for key in RANGES}, **analyse(csv_path, log_path, p))
+    return dict(run=name, **{key: p[key] for key in RANGES}, **analyse(csv_path, log_path, p, ground))
 
 
-def analyse(csv_path, log_path, p):
+def analyse(csv_path, log_path, p, ground='plane'):
     rows = list(csv.DictReader(open(csv_path)))
     g = lambda key: np.array([float(r[key]) for r in rows])
     t, v, amps, sat = g('sim_time_s'), g('forward_speed_m_s'), g('applied_amps'), g('saturated') > 0
-    s, fallen, pitch = 90.0 - g('pos_x_m'), g('fallen') > 0, g('truth_pitch_deg')
+    # Distance along the course: the heightfield spawns at x = 88 (s = 2),
+    # the plane at x = 0.
+    s = (90.0 if ground == 'hfield' else 0.0) - g('pos_x_m')
+    fallen, pitch = g('fallen') > 0, g('truth_pitch_deg')
     n = np.nonzero(np.diff(t) < 0)[0]
     n = n[0] + 1 if len(n) else len(t)
     log = open(log_path).read()
@@ -128,7 +136,8 @@ def analyse(csv_path, log_path, p):
     up = vt >= v0
     # A start speed is applied at t = 1 s (sim-host START_SPEED_AT_S).
     live = t > (1.01 if v0 > 0 else 0.0)
-    cross = np.nonzero(live & (v >= vt if up else v <= vt))[0]
+    tol = 0.01 * vt  # a run that settles just short of the target has crossed
+    cross = np.nonzero(live & (v >= vt - tol if up else v <= vt + tol))[0]
     if len(cross):
         tail_v = v[cross[0]:]
         over = (tail_v.max() - vt) if up else (vt - tail_v.min())
@@ -164,6 +173,7 @@ def main():
     ap.add_argument('--jobs', type=int, default=8)
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--probe', action='append', help="k=v,... over NOMINAL; repeatable")
+    ap.add_argument('--ground', choices=['plane', 'hfield'], default='plane')
     args = ap.parse_args()
     out = Path(args.out).resolve()
     (out / 'runs').mkdir(parents=True, exist_ok=True)
@@ -178,11 +188,11 @@ def main():
             plan.append(p)
     else:
         plan = lhs(args.n, np.random.default_rng(args.seed))
-    cache = out / 'courses'
-    for p in plan:
-        p['grade_pct'], p['course'] = course(p['grade_pct'], cache)
+    if args.ground == 'hfield':
+        for p in plan:
+            p['grade_pct'], p['course'] = course(p['grade_pct'], out / 'courses')
     with ThreadPoolExecutor(args.jobs) as ex:
-        futs = [ex.submit(run_one, k, p, out, 9000 + 2 * k) for k, p in enumerate(plan)]
+        futs = [ex.submit(run_one, k, p, out, 9000 + 2 * k, args.ground) for k, p in enumerate(plan)]
         results = []
         for f in futs:
             r = f.result()

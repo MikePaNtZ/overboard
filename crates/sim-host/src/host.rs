@@ -1674,6 +1674,40 @@ pub struct HostConfig {
     pub kt_scale: Option<f64>,
     /// Forward speed set at t = 1 s, m/s (`--start-speed`). `None`: from rest.
     pub start_speed_m_s: Option<f64>,
+    /// A grade profile on the flat plane, by gravity (`--grade-course`).
+    /// Replaces a `--terrain` heightfield for grade studies: MuJoCo's
+    /// sphere-on-heightfield contact chatters at every grid edge (measured:
+    /// specific force sd 3.2 m/s^2 at 4 m/s, with lift-off), and the IMU
+    /// gate turns that chatter into a pitch bias (2.6 deg flat, ~7 deg on
+    /// a 10 % climb). A plane has one clean contact.
+    pub grade_course: Option<GradeCourse>,
+}
+
+/// Flat run-in, then a vertical curve, then a constant grade -- the same
+/// profile `sim/carve/course.py` builds for its `steady_*` presets. The board
+/// starts at x = 0 and travels along -X, so s = -x.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradeCourse {
+    pub run_in_m: f64,
+    /// Percent, positive uphill.
+    pub grade_pct: f64,
+    /// Vertical-curve radius, m. The grade changes linearly over
+    /// `radius * |grade|`, centred on the end of the run-in.
+    pub radius_m: f64,
+}
+
+impl GradeCourse {
+    /// Grade at distance `s` along the course, degrees, positive uphill.
+    pub fn grade_deg(&self, s_m: f64) -> f64 {
+        let g = self.grade_pct / 100.0;
+        let half = 0.5 * self.radius_m * g.abs();
+        let frac = if half <= 0.0 {
+            if s_m >= self.run_in_m { 1.0 } else { 0.0 }
+        } else {
+            ((s_m - (self.run_in_m - half)) / (2.0 * half)).clamp(0.0, 1.0)
+        };
+        (g * frac).atan().to_degrees()
+    }
 }
 
 /// The plant-only changes a Monte Carlo run splices into the model.
@@ -1841,6 +1875,7 @@ impl Default for HostConfig {
             rider_mass_kg: None,
             kt_scale: None,
             start_speed_m_s: None,
+            grade_course: None,
         }
     }
 }
@@ -2698,6 +2733,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         }
         backend.apply_external_force(force, torque);
 
+        if let Some(course) = &cfg.grade_course {
+            backend.set_grade_deg(course.grade_deg(-truth_pos_x_m));
+        }
         if let Some(v) = start_speed_pending.filter(|_| t_known_s >= START_SPEED_AT_S) {
             backend.set_forward_speed(v, DEFAULT_R_EFF_M as f64);
             // The reference and the grade aid restart from the new speed.
@@ -2998,7 +3036,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Armed by EITHER an authored kerb or real terrain. Terrain was
         // missing from this condition at first, which meant the whole point of
         // loading City Park -- striking its real kerbs -- could not fire.
-        if (cfg.kerb.is_some() || cfg.terrain.is_some()) && !handoff_latched {
+        if (cfg.kerb.is_some() || cfg.terrain.is_some() || cfg.grade_course.is_some()) && !handoff_latched {
             let by_strike = strike_n > STRIKE_FORCE_N;
             let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
             if by_strike || by_tilt {

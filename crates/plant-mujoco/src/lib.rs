@@ -354,6 +354,16 @@ impl Plant {
         unsafe { plant_mujoco_set_gravity(self.model, g.as_ptr()) };
     }
 
+    /// Sets gravity at any time, including mid-run. For a grade that follows
+    /// the board's position on a flat plane (sim-host `--grade-course`): the
+    /// caller changes it a little every cycle, as the board moves along the
+    /// profile, so each change is small. [`Plant::set_gravity`] stays the
+    /// guarded setter for a constant incline.
+    pub fn set_gravity_profiled(&mut self, g: [f64; 3]) {
+        // SAFETY: see `gravity`; `g` is 3 doubles the shim only reads.
+        unsafe { plant_mujoco_set_gravity(self.model, g.as_ptr()) };
+    }
+
     /// `mj_forward` -- issue #107 (I1c) AC8, carried forward from I1b. Every
     /// CONTROLLED Python scenario calls this exactly once, right after
     /// building its `mjData` and before its first `mj_step`, to populate

@@ -108,6 +108,22 @@ fn main() -> ExitCode {
                 cfg.max_current_a = Some(a);
                 i += 2;
             }
+            "--grade-course" => {
+                let f: Vec<f64> = args
+                    .get(i + 1)
+                    .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                    .unwrap_or_default();
+                if f.len() != 3 {
+                    eprintln!("sim-host: --grade-course needs RUNIN_M,GRADE_PCT,RADIUS_M");
+                    return ExitCode::FAILURE;
+                }
+                cfg.grade_course = Some(sim_host::host::GradeCourse {
+                    run_in_m: f[0],
+                    grade_pct: f[1],
+                    radius_m: f[2],
+                });
+                i += 2;
+            }
             "--rider-mass" | "--kt-scale" | "--start-speed" => {
                 let flag = args[i].clone();
                 let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
