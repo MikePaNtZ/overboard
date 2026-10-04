@@ -198,6 +198,7 @@ def main():
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--probe', action='append', help="k=v,... over NOMINAL; repeatable")
     ap.add_argument('--ground', choices=['plane', 'hfield'], default='plane')
+    ap.add_argument('--port-base', type=int, default=9000, help='UDP ports; separate parallel sweeps')
     args = ap.parse_args()
     out = Path(args.out).resolve()
     (out / 'runs').mkdir(parents=True, exist_ok=True)
@@ -216,7 +217,7 @@ def main():
         for p in plan:
             p['grade_pct'], p['course'] = course(p['grade_pct'], out / 'courses')
     with ThreadPoolExecutor(args.jobs) as ex:
-        futs = [ex.submit(run_one, k, p, out, 9000 + 2 * k, args.ground) for k, p in enumerate(plan)]
+        futs = [ex.submit(run_one, k, p, out, args.port_base + 2 * k, args.ground) for k, p in enumerate(plan)]
         results = []
         for f in futs:
             r = f.result()
