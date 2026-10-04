@@ -116,6 +116,14 @@ fn main() -> ExitCode {
                 cfg.batt_soc0 = x;
                 i += 2;
             }
+            "--rider-reach" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --rider-reach needs a number (m)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_reach_m = Some(x);
+                i += 2;
+            }
             "--rider-speed" => {
                 let Some(Ok(v)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
                     eprintln!("sim-host: --rider-speed needs a number (m/s)");

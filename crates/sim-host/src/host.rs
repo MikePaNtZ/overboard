@@ -418,6 +418,26 @@ const KERB_CENTRE_X_M: f64 = (CORRIDOR_X_MAX_M + CORRIDOR_X_MIN_M) / 2.0;
 /// touched; the depth exists so the board cannot clip through the far side.
 const KERB_HALF_DEPTH_M: f64 = 0.6;
 
+/// `--rider-reach`: widens the fore/aft slide joint and its servo range to
+/// +-`reach` m. The servo gains do not change.
+fn splice_rider_reach(xml: &str, reach: f64) -> Result<String, HostError> {
+    let bad = |what: &str| HostError::Io(std::io::Error::other(format!("sim-host: --rider-reach: {what}")));
+    if !(0.01..=0.25).contains(&reach) {
+        return Err(bad("reach must be 0.01..0.25 m"));
+    }
+    let range = format!("{reach:.4}");
+    let joint = r#"<joint name="ballast_fa" type="slide" axis="-1 0 0" pos="0 0 0"
+               range="-0.05 0.05""#;
+    if xml.matches(joint).count() != 1 {
+        return Err(bad("fore/aft slide joint not found"));
+    }
+    let mut out = xml.replace(joint, &joint.replace("-0.05 0.05", &format!("-{range} {range}")));
+    let at = out.find(r#"<position name="ballast_fa""#).ok_or_else(|| bad("fore/aft servo not found"))?;
+    let rel = out[at..].find(r#"ctrlrange="-0.05 0.05""#).ok_or_else(|| bad("fore/aft servo range not found"))?;
+    out.replace_range(at + rel..at + rel + 22, &format!(r#"ctrlrange="-{range} {range}""#));
+    Ok(out)
+}
+
 /// Lean-to-steer model changes (see [`crate::lean_steer`]), applied to the
 /// shared rider model text. Each replacement must match exactly once, so a
 /// change to the shared model fails loudly here rather than silently.
@@ -693,6 +713,9 @@ fn write_model_with_kerb(
     // --- Kerb: an authored box, for runs without the real terrain ----------
     if lean_steer {
         xml = splice_lean_steer(&xml)?;
+    }
+    if let Some(reach) = variation.rider_reach_m {
+        xml = splice_rider_reach(&xml, reach)?;
     }
     if let Some(amps) = max_current_a {
         // Sizing studies: the motor torque limit follows the current limit.
@@ -1993,10 +2016,14 @@ pub struct HostConfig {
     /// law is sim/carve/rider.py's lean mode (leaky PI on speed, acceleration
     /// damping, a grade lean the rider sees). Without `--speed-hold`.
     pub rider_speed_m_s: Option<f32>,
+    /// `--rider-reach M`: see `PlantVariation::rider_reach_m`.
+    pub rider_reach_m: Option<f64>,
     /// `--rider-reacts` (speed-hold harness only): a rider model that answers
     /// the warning. Pulsed for 0.5 s: the rider eases off (target 0). Solid
     /// for 0.5 s while driving: the rider steps off and the run ends (DISMOUNT).
-    /// Solid while braking: the rider stays on and leans onto the tail.
+    /// Eased and stopped (below 0.3 m/s) on a climb with the warning on: the
+    /// rider steps off (DISMOUNT). Solid while braking: the rider stays on and
+    /// leans onto the tail.
     pub rider_reacts: bool,
     /// A grade profile on the flat plane, by gravity (`--grade-course`).
     /// Replaces a `--terrain` heightfield for grade studies: MuJoCo's
@@ -2045,8 +2072,10 @@ impl GradeCourse {
 /// `--rider-speed`: a rider who rides at a target speed by leaning, the way
 /// sim/carve/rider.py's lean mode does (its gains, at 500 Hz instead of
 /// 50 Hz). Output is the fore/aft stick, -1..1 (full stick = 5 cm of lean).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct RiderSpeedModel {
+    /// Lean bound, in units of the model's 5 cm stick (`LEAN_BOUND` = 3 cm).
+    pub bound: f32,
     v_ref: Option<f32>,
     integral: f32,
     acc_f: f32,
@@ -2056,7 +2085,7 @@ pub struct RiderSpeedModel {
 impl RiderSpeedModel {
     /// The rider eases the target in at this rate, m/s^2.
     pub const TARGET_RATE_M_S2: f32 = 0.5;
-    /// Lean bound, stick units: 0.6 = 3 cm.
+    /// Default lean bound, in 5 cm stick units: 0.6 = 3 cm.
     pub const LEAN_BOUND: f32 = 0.6;
     /// Grade lean per unit sin(downhill grade), stick units (rider.py).
     pub const GRADE_LEAN: f32 = 3.08;
@@ -2076,7 +2105,7 @@ impl RiderSpeedModel {
         self.acc_f += dt / (0.19 + dt) * (acc - self.acc_f);
         let raw = -Self::GRADE_LEAN * grade_down_rad.sin() + 0.30 * err + 0.10 * self.integral
             - 0.45 * self.acc_f;
-        let fa = raw.clamp(-Self::LEAN_BOUND, Self::LEAN_BOUND);
+        let fa = raw.clamp(-self.bound, self.bound);
         if fa != raw {
             self.integral -= err * dt; // do not integrate into a bound
         }
@@ -2084,7 +2113,13 @@ impl RiderSpeedModel {
     }
 
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self { bound: self.bound, ..Self::default() };
+    }
+}
+
+impl Default for RiderSpeedModel {
+    fn default() -> Self {
+        Self { bound: Self::LEAN_BOUND, v_ref: None, integral: 0.0, acc_f: 0.0, v_prev: None }
     }
 }
 
@@ -2137,6 +2172,10 @@ pub struct PlantVariation {
     /// `--plant`: raise (+) or lower (-) the nose and tail pads, m. 1 cm is
     /// about 1.6 deg of strike angle. The proxy pads give 20.4 deg.
     pub pad_z_m: Option<f64>,
+    /// `--rider-reach M` (or plant key `reach`): the rider's fore/aft reach,
+    /// m (model 0.05). A real rider moves the body over the feet with the
+    /// ankles and knees, well past 5 cm; the stick maps onto +-M.
+    pub rider_reach_m: Option<f64>,
 }
 
 impl PlantVariation {
@@ -2171,6 +2210,7 @@ pub fn plant_x7() -> PlantVariation {
         wheel_radius_m: Some(0.146),
         x7_geometry: true,
         pad_z_m: None,
+        rider_reach_m: None,
     }
 }
 
@@ -2199,6 +2239,7 @@ pub fn parse_plant_spec(spec: &str) -> Result<PlantVariation, String> {
             "radius" => v.wheel_radius_m = Some(x),
             "kt" => v.kt_scale = Some(x),
             "pad_z" => v.pad_z_m = Some(x),
+            "reach" => v.rider_reach_m = Some(x),
             _ => return Err(format!("--plant: unknown key '{k}'")),
         }
     }
@@ -2373,6 +2414,7 @@ impl Default for HostConfig {
             authority_margin: MarginMode::Off,
             rider_reacts: false,
             rider_speed_m_s: None,
+            rider_reach_m: None,
             hud_out_addr: None,
             batt_soc0: 0.9,
             hold_until_arm: false,
@@ -2726,6 +2768,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         rider_mass_kg: cfg.rider_mass_kg.or(base.rider_mass_kg),
         kt_scale: cfg.kt_scale.or(base.kt_scale),
         tail_friction: cfg.tail_friction.or(base.tail_friction),
+        rider_reach_m: cfg.rider_reach_m.or(base.rider_reach_m),
         ..base
     };
     let generated_model = if cfg.kerb.is_some()
@@ -2867,6 +2910,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut start_speed_pending = cfg.start_speed_m_s;
     let mut margin = control_core::AuthorityMargin::new();
     let mut rider_model = RiderSpeedModel::default();
+    // `--rider-reach`: the stick spans the rider's reach, and the rider model
+    // uses the same share of it (60 %) as of the model's 5 cm.
+    let fore_aft_range_m = variation.rider_reach_m.map_or(BALLAST_RANGE_M, |r| r as f32);
+    rider_model.bound = RiderSpeedModel::LEAN_BOUND * fore_aft_range_m / BALLAST_RANGE_M;
     let mut grade_comp = control_core::GradeCompensator::new();
     let mut battery = crate::hud::BatteryModel::new(cfg.batt_soc0);
     let mut hud_seq: u64 = 0;
@@ -3133,6 +3180,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                         .map_or(0.0, |c| -(c.grade_deg(-truth_pos_x_m) as f32).to_radians());
                     let target = if rider_eased { 0.0 } else { v_target };
                     rider_model.update(last_forward_speed_m_s, target, grade_down_rad, DT_S as f32)
+                        * (BALLAST_RANGE_M / fore_aft_range_m)
                 }
             }
             None => stick_fore_aft,
@@ -3325,7 +3373,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             weight_shift_lateral * BALLAST_RANGE_M
         };
         backend.set_ballast_targets(
-            corridor_enforced_fore_aft * BALLAST_RANGE_M,
+            corridor_enforced_fore_aft * fore_aft_range_m,
             lateral_target_m,
         );
 
@@ -3554,7 +3602,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 }
                 // Braking at the limit (negative current) is not a reason to step off:
                 // the rider leans back onto the tail, which is a safe brake.
-                if dismount_at_s.is_none() && level == control_core::MarginLevel::Solid && held && last_amps > 0.0 {
+                // An eased rider who has come to a stop on a climb with the warning
+                // still on steps off: nobody balances in place on a 20 % hill. Without
+                // this the model rocks the board at 0 m/s until the nose strikes.
+                let stopped_on_climb = rider_eased
+                    && last_forward_speed_m_s.abs() < 0.3
+                    && level >= control_core::MarginLevel::Pulse
+                    && last_amps > 0.0;
+                if dismount_at_s.is_none()
+                    && (stopped_on_climb || (level == control_core::MarginLevel::Solid && held && last_amps > 0.0))
+                {
                     dismount_at_s = Some(t_known_s);
                     eprintln!("sim-host: rider dismount at sim_t={t_known_s:.3}s");
                 }
