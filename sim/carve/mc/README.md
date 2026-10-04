@@ -3,7 +3,7 @@
 One CSV row per run, written by `sim/carve/monte_carlo.py`; summarise with
 `sim/carve/mc_summary.py`.
 
-**Current baseline (sim-host 46f07b5 or later):** the X7 build plant
+**Current baseline (sim-host b03fece or later; the end boxes kicked 4.2 deg, strike 20.4 deg nominal):** the X7 build plant
 (`--plant-x7`) with the build's meshes and pads, the deck strike angle spread
 over 18-21 deg (pad_z), tail braking on, 200 runs, seed 1.
 
