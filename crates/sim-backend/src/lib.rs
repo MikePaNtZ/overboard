@@ -137,6 +137,12 @@ pub struct SimBackend {
     /// which has no ballast at all. Resolved once in `open()`.
     ballast_fa_actuator: Option<usize>,
     ballast_lateral_actuator: Option<usize>,
+    /// Lean-to-steer rider's ankle roll servo (only on a model that declares
+    /// `ankle_roll`); see [`SimBackend::set_ankle_target`].
+    ankle_actuator: Option<usize>,
+    ankle_qposadr: Option<usize>,
+    ankle_dofadr: Option<usize>,
+    ankle_target_rad: f32,
     /// Commanded ballast actuator targets, metres -- see
     /// [`SimBackend::set_ballast_targets`]. Zero (centred) until set, and
     /// reset to zero on every `open()`.
@@ -437,6 +443,26 @@ impl SimBackend {
         (fore_aft, lateral)
     }
 
+    /// Target angle, rad, of the lean-to-steer rider's ankle roll servo: the
+    /// rider's body lean RELATIVE TO THE DECK (+ = body right of the deck
+    /// normal). Same buffering as [`SimBackend::set_ballast_targets`]; a
+    /// no-op on a model without an `ankle_roll` actuator.
+    pub fn set_ankle_target(&mut self, angle_rad: f32) {
+        self.ankle_target_rad = angle_rad;
+    }
+
+    /// Ankle roll joint angle and rate (rad, rad/s), or zeros on a model
+    /// without the joint.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_ankle(&self) -> (f32, f32) {
+        let plant = self.plant.as_ref().expect("truth_ankle: backend is not open");
+        let a = self.ankle_qposadr.map(|i| plant.qpos()[i] as f32).unwrap_or(0.0);
+        let r = self.ankle_dofadr.map(|i| plant.qvel()[i] as f32).unwrap_or(0.0);
+        (a, r)
+    }
+
     /// Puts the plant back to the model's initial state -- `mj_resetData`,
     /// then the same `mj_forward` prime `open()` does.
     ///
@@ -505,6 +531,7 @@ impl SimBackend {
         self.applied_current_a = 0.0;
         self.ballast_fa_target_m = 0.0;
         self.ballast_lateral_target_m = 0.0;
+        self.ankle_target_rad = 0.0;
         self.last_wheel_rate_rad_s = 0.0;
     }
 
@@ -853,6 +880,9 @@ impl BoardObserve for SimBackend {
         // actuator that happens to drive it (issue #161 wire v2).
         self.ballast_fa_qposadr = plant.joint_qposadr("ballast_fa");
         self.ballast_lateral_qposadr = plant.joint_qposadr("ballast_lat");
+        self.ankle_actuator = plant.actuator_id("ankle_roll");
+        self.ankle_qposadr = plant.joint_qposadr("ankle_roll");
+        self.ankle_dofadr = plant.joint_dofadr("ankle_roll");
         // The board's own free joint -- both models declare it (`frame_free`).
         // Resolved leniently (`Option`, not `expect`) for the same reason the
         // ballast lookups are: this backend must keep opening a model that
@@ -885,6 +915,7 @@ impl BoardObserve for SimBackend {
         self.applied_current_a = 0.0;
         self.ballast_fa_target_m = 0.0;
         self.ballast_lateral_target_m = 0.0;
+        self.ankle_target_rad = 0.0;
         self.last_wheel_rate_rad_s = 0.0;
         self.open = true;
         self.seq.reset();
@@ -952,6 +983,9 @@ impl BoardObserve for SimBackend {
         }
         if let Some(idx) = self.ballast_lateral_actuator {
             ctrl[idx] = self.ballast_lateral_target_m as f64;
+        }
+        if let Some(idx) = self.ankle_actuator {
+            ctrl[idx] = self.ankle_target_rad as f64;
         }
 
         // AC3: sim time comes from mjData::time, read after stepping, never
