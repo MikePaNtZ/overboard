@@ -116,6 +116,10 @@ fn main() -> ExitCode {
                 cfg.batt_soc0 = x;
                 i += 2;
             }
+            "--rider-ankle" => {
+                cfg.rider_ankle = true;
+                i += 1;
+            }
             "--motor-limits" => {
                 cfg.motor_limits = true;
                 i += 1;

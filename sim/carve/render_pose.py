@@ -39,6 +39,10 @@ M.vis.global_.offwidth, M.vis.global_.offheight = W, H
 M.vis.map.znear = 0.05 / M.stat.extent
 M.vis.map.zfar = 150 / M.stat.extent
 D = mujoco.MjData(M)
+# The smooth-contact plate under the tyre is a physics helper, not scenery.
+_plate = mujoco.mj_name2id(M, mujoco.mjtObj.mjOBJ_BODY, 'wheel_ground')
+if _plate >= 0:
+    M.geom_rgba[M.geom_bodyid == _plate, 3] = 0.0
 adr = lambda j: M.jnt_qposadr[mujoco.mj_name2id(M, mujoco.mjtObj.mjOBJ_JOINT, j)]
 free_a, hip_a = adr('rider_free_j'), adr('rider_hip')
 frame_b = mujoco.mj_name2id(M, mujoco.mjtObj.mjOBJ_BODY, 'frame')

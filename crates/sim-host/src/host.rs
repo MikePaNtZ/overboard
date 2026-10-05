@@ -418,6 +418,26 @@ const KERB_CENTRE_X_M: f64 = (CORRIDOR_X_MAX_M + CORRIDOR_X_MIN_M) / 2.0;
 /// touched; the depth exists so the board cannot clip through the far side.
 const KERB_HALF_DEPTH_M: f64 = 0.6;
 
+/// Rider centre of mass above the deck pivot (the ballast carrier), m.
+const RIDER_COM_HEIGHT_M: f32 = 0.75;
+/// Pad mode (fable-oracle, 2026-10-04): the tail pad is on the road. Entered
+/// at this nose-up deck pitch, at any speed.
+const PAD_MODE_ENTER_RAD: f32 = 17.0 * std::f32::consts::PI / 180.0;
+/// Pad mode starts only below this speed, m/s: it is for the stop. A tail
+/// drag at speed keeps full motor braking (damping only there removed the
+/// braking, and the board ran on and nose-struck after the exit).
+const PAD_MODE_SPEED_M_S: f32 = 1.0;
+/// Pad mode ends below this pitch (hysteresis). Raise it toward 15 deg if a
+/// pull-away nose-strikes, before any gain changes.
+const PAD_MODE_EXIT_RAD: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// Pad mode: damping only, tau = -Kd * pitch rate, limited to this, N*m
+/// (about 18 A). With the rider's centre of mass near the tail pad's tipping
+/// edge, any larger nose-up torque pivots the board over the tail.
+const PAD_MODE_TORQUE_LIMIT_NM: f32 = 12.0;
+/// After pad mode, the grade load is not learned for this long, s: the deck
+/// dropping back to level is not a grade.
+const PAD_MODE_GRADE_HOLD_S: f64 = 1.0;
+
 /// `--tumble`: a free two-part rider (torso and head; legs on a ball hip),
 /// parked 50 m up on a weld until a fall. Low-resolution on purpose: it shows
 /// how a rider leaves the board and slides, not a human body. It does not
@@ -461,7 +481,9 @@ fn splice_rider_reach(xml: &str, reach: f64) -> Result<String, HostError> {
     if !(0.01..=0.25).contains(&reach) {
         return Err(bad("reach must be 0.01..0.25 m"));
     }
-    let range = format!("{reach:.4}");
+    // The joint and servo allow 0.35 m: the stick spans +-reach, and the
+    // pad-rest ankle correction may move the rider further.
+    let range = format!("{:.4}", reach.max(0.35));
     let joint = r#"<joint name="ballast_fa" type="slide" axis="-1 0 0" pos="0 0 0"
                range="-0.05 0.05""#;
     if xml.matches(joint).count() != 1 {
@@ -2078,6 +2100,13 @@ pub struct HostConfig {
     /// (it sags under load). Off by default: the Monte Carlo results do not
     /// include it.
     pub motor_limits: bool,
+    /// `--rider-ankle`: the rider stays upright as the deck pitches (the
+    /// slide moves by 0.75 m * sin(pitch)); otherwise the rider is rigid
+    /// with the deck. Needs `--rider-reach` (it widens the slide to 0.35 m).
+    /// DO NOT USE with the deployed law: 145 of 200 Monte Carlo runs fell
+    /// (its gains assume the rigid rider). Pad mode uses the same correction
+    /// on its own.
+    pub rider_ankle: bool,
     /// `--stop-after-handoff S`: end the run S seconds after a fall or a
     /// dismount (to record the tumble).
     pub stop_after_handoff_s: Option<f64>,
@@ -2487,6 +2516,7 @@ impl Default for HostConfig {
             rider_target_change: None,
             tumble: false,
             motor_limits: false,
+            rider_ankle: false,
             pose_out: None,
             stop_after_handoff_s: None,
             hud_out_addr: None,
@@ -2993,6 +3023,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut rider_model = RiderSpeedModel::default();
     // `--tumble`: the rider is free (fall) or off (dismount); the motor is cut.
     let mut rider_free = false;
+    // Pad rest (see the loop): stopped on a pad, motor off until the deck is level.
+    let mut pad_mode = false;
+    let mut pad_grade_hold_s = 0.0_f64;
+    let mut last_pitch_rad = 0.0_f32;
     let mut target_changed = false;
     let mut motor_cut = false;
     let mut handoff_at_s: Option<f64> = None;
@@ -3491,8 +3525,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         } else {
             weight_shift_lateral * BALLAST_RANGE_M
         };
+        // `--rider-ankle`: a person stays upright with the ankles and knees as
+        // the deck pitches; the model's rider is otherwise rigid with the deck.
+        // Without it, on the tail pad the rider's mass swings back to the pad's
+        // tipping edge and the board pivots over (fable-oracle, 2026-10-04).
+        let upright_m = if cfg.rider_ankle {
+            (RIDER_COM_HEIGHT_M * last_pitch_rad.sin()).clamp(-0.30, 0.30)
+        } else {
+            0.0
+        };
         backend.set_ballast_targets(
-            corridor_enforced_fore_aft * fore_aft_range_m,
+            corridor_enforced_fore_aft
+                * fore_aft_range_m
+                + upright_m,
             lateral_target_m,
         );
 
@@ -3685,6 +3730,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Zero on any deployed run, so this whole line is a no-op there --
         // see HostConfig::pitch_bias_deg.
         let regulated_pitch_rad = source_pitch_rad + pitch_bias_rad;
+        last_pitch_rad = regulated_pitch_rad;
         // Optional outer speed loop (`--speed-hold`): sets the pitch
         // reference from the speed error, as a Segway does. Off by default:
         // the deployed board leaves speed to the rider.
@@ -3812,16 +3858,26 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if cfg.grade_feedforward {
             proposed_amps += grade_aid.load_m_s2() / ACCEL_FF_GAIN_M_S2_PER_A;
         }
-        // Resting on a pad (a tail stop): the deck is far from level and the
-        // board is stopped, so the pad, not a grade, holds the board. The
-        // grade-load estimate and the compensation integral would learn the
-        // pad's support as a load and dump it nose-down at the pull-away (the
-        // game saw a nose strike 3-6 s after every tail-down stop). Both use
-        // only pitch and speed, so a real controller can do the same. 14 deg
-        // is above the deck angle on a 25 % grade.
-        if regulated_pitch_rad.abs() > 0.25 && forward_speed_m_s.abs() < 0.5 {
+        // Pad mode (fable-oracle, 2026-10-04): the tail pad is on the road (a
+        // tail drag or a tail stop). The PD law would ask 75-90 A against the
+        // pad and drive the board over its tail; the grade estimate and the
+        // integral would learn the pad's support and dump it nose-down at the
+        // pull-away (the game: 3 of 3 tail stops ended in a fall). In pad mode
+        // only damping acts, limited to 12 N*m; the grade load and the
+        // integral are held at zero, and the grade load is not learned for
+        // 1 s after. Pitch only, so firmware can use the same rule.
+        if !pad_mode && regulated_pitch_rad >= PAD_MODE_ENTER_RAD && forward_speed_m_s.abs() < PAD_MODE_SPEED_M_S {
+            pad_mode = true;
+            eprintln!("sim-host: pad mode at sim_t={t_known_s:.3}s (tail pad down)");
+        } else if pad_mode && regulated_pitch_rad <= PAD_MODE_EXIT_RAD {
+            pad_mode = false;
+            pad_grade_hold_s = PAD_MODE_GRADE_HOLD_S;
+            eprintln!("sim-host: pad mode ends at sim_t={t_known_s:.3}s -- full balance");
+        }
+        if pad_mode || pad_grade_hold_s > 0.0 {
             grade_aid.reset();
             grade_comp.reset();
+            pad_grade_hold_s = (pad_grade_hold_s - DT_S).max(0.0);
         }
         // `--balance-comp`: grade compensation for the deployed law.
         if cfg.balance_comp && cfg.speed_hold_m_s.is_none() {
@@ -3849,6 +3905,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // AFTER the outcome is decided -- was the only thing anyone was told.
         if motor_cut || !armed_seen {
             proposed_amps = 0.0;
+        }
+        if pad_mode {
+            proposed_amps = (-KD_NM_PER_RAD_S * regulated_pitch_rate_rad_s)
+                .clamp(-PAD_MODE_TORQUE_LIMIT_NM, PAD_MODE_TORQUE_LIMIT_NM)
+                / KT_NM_PER_A;
         }
         // `--motor-limits`: what the motor and the pack can give at this speed.
         let mut limit_clamped = false;
