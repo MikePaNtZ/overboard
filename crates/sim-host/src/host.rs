@@ -430,6 +430,11 @@ const PAD_MODE_SPEED_M_S: f32 = 1.0;
 /// Pad mode also ends when the rider leans forward past this stick: the
 /// rider asks to go, and the full law lifts the nose off the pad.
 const PAD_MODE_GO_STICK: f32 = 0.2;
+/// Pad mode starts only when the deck is nearly still: a board resting on
+/// its pad does not rotate. In the game a deck passing 17 deg while pitching
+/// fast nose-up (no pad contact) entered pad mode, lost the law, and fell back
+/// 28 ms later.
+const PAD_MODE_REST_RATE_RAD_S: f32 = 0.5;
 /// Pad mode ends below this pitch (hysteresis). Raise it toward 15 deg if a
 /// pull-away nose-strikes, before any gain changes.
 const PAD_MODE_EXIT_RAD: f32 = 15.0 * std::f32::consts::PI / 180.0;
@@ -4130,6 +4135,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             && regulated_pitch_rad >= PAD_MODE_ENTER_RAD
             && forward_speed_m_s.abs() < PAD_MODE_SPEED_M_S
             && corridor_enforced_fore_aft <= PAD_MODE_GO_STICK
+            && regulated_pitch_rate_rad_s.abs() < PAD_MODE_REST_RATE_RAD_S
         {
             pad_mode = true;
             eprintln!("sim-host: pad mode at sim_t={t_known_s:.3}s (tail pad down)");
