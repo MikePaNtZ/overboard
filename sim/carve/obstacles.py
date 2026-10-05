@@ -4,10 +4,20 @@
     python3 sim/carve/obstacles.py ELEMENTS.json > obstacles.csv
 
 Only physical obstacles are kept (cones and debris); gates, flags and zones
-are drawn by the game and are not bodies. One CSV row per obstacle, in the
-MuJoCo frame: type,id,x_m,y_m,lx_m,ly_m,lz_m,yaw_deg (lx/ly/lz are full
-sizes; a cone gets its standard size). No board physics here: sim-host makes
-the bodies, the game draws them at the same place.
+are drawn by the game and are not bodies. No board physics here: sim-host
+makes the bodies, the game draws them at the same place.
+
+One CSV row per obstacle, in the MuJoCo frame. The full format has 11 columns:
+
+    type,id,x_m,y_m,lx_m,ly_m,lz_m,yaw_deg,pitch_deg,roll_deg,z_m
+
+lx/ly/lz are full sizes; a cone gets its standard size. Columns 9-11
+(pitch_deg, roll_deg, z_m) are optional and may each be empty; a row with 8
+columns is still valid. z_m is the absolute world z of the box BOTTOM before
+rotation; absent or empty, the bottom sits on the terrain at (x, y). Pitch and
+roll apply to the `box` and `debris` types only. Types: `cone`, `debris` and
+the generic grey `box` (ramps, planks, kerbs). This converter keeps writing 8
+columns; sim-host reads all 11.
 """
 import json
 import sys

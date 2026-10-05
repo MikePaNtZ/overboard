@@ -16,7 +16,8 @@
 //!          [--estimator-aiding command-feedforward|wheel-odometry]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--damping-scale SCALE] [--kerb [Y[,HEIGHT]]]
-//!          [--terrain HFIELD.bin] [--lean-steer] [--spawn-x M] [--schedule-csv PATH]
+//!          [--terrain HFIELD.bin] [--lean-steer] [--spawn-x M] [--spawn-y M]
+//!          [--spawn-yaw DEG] [--schedule-csv PATH]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -89,7 +90,23 @@ fn main() -> ExitCode {
                     eprintln!("sim-host: --spawn-x needs a number (metres)");
                     return ExitCode::FAILURE;
                 };
-                cfg.spawn_x_m = x;
+                cfg.spawn_x_m = Some(x);
+                i += 2;
+            }
+            "--spawn-y" => {
+                let Some(Ok(y)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --spawn-y needs a number (metres)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.spawn_y_m = Some(y);
+                i += 2;
+            }
+            "--spawn-yaw" => {
+                let Some(Ok(d)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --spawn-yaw needs a number (degrees)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.spawn_yaw_deg = Some(d);
                 i += 2;
             }
             "--balance-comp" => {

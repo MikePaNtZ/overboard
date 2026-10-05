@@ -245,12 +245,24 @@ pub const DEFAULT_KERB: KerbSpec = KerbSpec {
 /// The path is supplied by the operator rather than hardcoded, so this crate
 /// carries no build-time dependency on a sibling checkout -- the coupling is a
 /// data contract, exactly as the repo-boundary rule requires.
+#[derive(Debug, Clone, Copy)]
+pub struct TerrainBounds {
+    pub xmin: f64,
+    pub xmax: f64,
+    pub ymin: f64,
+    pub ymax: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerrainSpec {
     pub hfield_path: PathBuf,
     pub nrow: usize,
     pub ncol: usize,
-    pub half_extent_m: f64,
+    /// Half extent of the field, metres. `x` spans the columns (world X) and
+    /// `y` spans the rows (world Y). A square field sets both to the same
+    /// value, which is the only shape older metadata describes.
+    pub half_extent_x_m: f64,
+    pub half_extent_y_m: f64,
     /// Real-world elevation of the grid's minimum, metres. MuJoCo normalises
     /// hfield file data to [0,1], so the geom has to be placed at this value
     /// for a post to land at the height it was measured at.
@@ -261,10 +273,64 @@ pub struct TerrainSpec {
     /// on real terrain the board has to be lifted onto the surface or it
     /// starts the run embedded in the road.
     pub z_at_origin_m: f64,
-    /// Where the board spawns along MuJoCo X, metres (`--spawn-x`), and the
-    /// terrain height there. The frame (and so the map to Unreal) does not move.
+    /// Where the board spawns, metres, and the terrain height there. The frame
+    /// (and so the map to Unreal) does not move. The pose is resolved from, in
+    /// order of precedence: the `--spawn-*` flags, the metadata `"spawn"`
+    /// object, then the default (x from `--spawn-x`, y 0, yaw 0).
     pub spawn_x_m: f64,
+    pub spawn_y_m: f64,
+    /// Spawn heading about +Z, radians. 0 is the shared model's heading
+    /// (board forward is body -X).
+    pub spawn_yaw_rad: f64,
     pub z_at_spawn_m: f64,
+    /// Drivable area, metres, from the metadata `"bounds"` object. `Some`
+    /// replaces the corridor-clamp constants for this run; `None` keeps the
+    /// default corridor behaviour. See [`CORRIDOR_X_MIN_M`].
+    pub bounds: Option<TerrainBounds>,
+}
+
+/// Finds the object body of `"key": { ... }` in `s`, returning the text
+/// between the matching braces. Used so a flat scalar scan of a nested object
+/// (e.g. the `"x"` inside `"spawn"`) is bounded to that object and cannot pick
+/// a key of another name at the top level.
+fn find_object_body<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let at = s.find(&needle)?;
+    let rest = &s[at + needle.len()..];
+    let open = rest.find('{')?;
+    let bytes = rest.as_bytes();
+    let mut depth = 0usize;
+    for i in open..bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[open + 1..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Scans `s` for `"key": NUMBER` and parses the number. `None` when the key is
+/// absent. Deliberately a tiny scan rather than a serde dependency: a handful
+/// of scalars out of a file whose schema this crate does not own.
+fn scan_scalar(s: &str, key: &str) -> Option<f64> {
+    let needle = format!("\"{key}\"");
+    let at = s.find(&needle)?;
+    let rest = &s[at + needle.len()..];
+    let rest = rest
+        .trim_start()
+        .strip_prefix(':')
+        .unwrap_or(rest)
+        .trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
+        .unwrap_or(rest.len());
+    rest[..end].parse::<f64>().ok()
 }
 
 /// Reads `metadata.json` from the same directory as the hfield binary, and
@@ -274,7 +340,27 @@ pub struct TerrainSpec {
 /// the rasteriser's parameters while the `.bin` carries its own `nrow`/`ncol`,
 /// and a stale metadata file beside a fresh binary would otherwise place the
 /// terrain at the wrong scale with nothing to say so.
-fn read_terrain_spec(hfield_path: &Path, spawn_x_m: f64) -> Result<TerrainSpec, HostError> {
+///
+/// # Level metadata
+///
+/// Required scalars: `nrow`, `ncol`, `half_extent_m`, `z_min_m`, `z_max_m`.
+/// Optional keys, each backward compatible (absent = today's behaviour):
+/// - `half_extent_x_m`, `half_extent_y_m`: a rectangular field. `x` spans the
+///   columns (world X), `y` spans the rows (world Y). Absent = `half_extent_m`
+///   on both axes (a square field).
+/// - `spawn`: `{"x": m, "y": m, "yaw_deg": deg}`, the default spawn pose.
+///   `yaw_deg` 0 is the shared model's heading (board forward is body -X).
+/// - `bounds`: `{"xmin","xmax","ymin","ymax"}` metres, the drivable area. When
+///   present it replaces the corridor-clamp constants for this run.
+///
+/// The spawn pose precedence is: the `--spawn-*` flags, then `spawn`, then the
+/// default (x from `--spawn-x`, y 0, yaw 0).
+fn read_terrain_spec(
+    hfield_path: &Path,
+    spawn_x_cli: Option<f64>,
+    spawn_y_cli: Option<f64>,
+    spawn_yaw_deg_cli: Option<f64>,
+) -> Result<TerrainSpec, HostError> {
     let dir = hfield_path.parent().unwrap_or(Path::new("."));
     let meta_path = dir.join("metadata.json");
     let meta_raw = std::fs::read_to_string(&meta_path).map_err(|e| {
@@ -288,28 +374,12 @@ fn read_terrain_spec(hfield_path: &Path, spawn_x_m: f64) -> Result<TerrainSpec, 
         ))
     })?;
 
-    // Deliberately a tiny scan rather than a serde dependency: six scalars out
-    // of a file whose schema this crate does not own.
+    // A required scalar: like `scan_scalar`, but errors rather than returning
+    // `None`, with a message naming the file and the key.
     let pick = |key: &str| -> Result<f64, HostError> {
-        let needle = format!("\"{key}\"");
-        let at = meta_raw.find(&needle).ok_or_else(|| {
+        scan_scalar(&meta_raw, key).ok_or_else(|| {
             HostError::Io(std::io::Error::other(format!(
-                "sim-host: {} has no \"{key}\"",
-                meta_path.display()
-            )))
-        })?;
-        let rest = &meta_raw[at + needle.len()..];
-        let rest = rest
-            .trim_start()
-            .strip_prefix(':')
-            .unwrap_or(rest)
-            .trim_start();
-        let end = rest
-            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
-            .unwrap_or(rest.len());
-        rest[..end].parse::<f64>().map_err(|_| {
-            HostError::Io(std::io::Error::other(format!(
-                "sim-host: {} has a non-numeric \"{key}\"",
+                "sim-host: {} has no numeric \"{key}\"",
                 meta_path.display()
             )))
         })
@@ -318,8 +388,41 @@ fn read_terrain_spec(hfield_path: &Path, spawn_x_m: f64) -> Result<TerrainSpec, 
     let nrow = pick("nrow")? as usize;
     let ncol = pick("ncol")? as usize;
     let half_extent_m = pick("half_extent_m")?;
+    let half_extent_x_m = scan_scalar(&meta_raw, "half_extent_x_m").unwrap_or(half_extent_m);
+    let half_extent_y_m = scan_scalar(&meta_raw, "half_extent_y_m").unwrap_or(half_extent_m);
     let z_min_m = pick("z_min_m")?;
     let z_max_m = pick("z_max_m")?;
+
+    // Spawn pose: flags, then the metadata "spawn" object, then the default.
+    let spawn = find_object_body(&meta_raw, "spawn");
+    let meta_spawn = |key: &str| spawn.and_then(|b| scan_scalar(b, key));
+    let spawn_x_m = spawn_x_cli.or_else(|| meta_spawn("x")).unwrap_or(0.0);
+    let spawn_y_m = spawn_y_cli.or_else(|| meta_spawn("y")).unwrap_or(0.0);
+    let spawn_yaw_rad = spawn_yaw_deg_cli
+        .or_else(|| meta_spawn("yaw_deg"))
+        .unwrap_or(0.0)
+        .to_radians();
+
+    // Drivable bounds: all four keys are required when the object is present.
+    let bounds = match find_object_body(&meta_raw, "bounds") {
+        Some(b) => {
+            let get = |key: &str| -> Result<f64, HostError> {
+                scan_scalar(b, key).ok_or_else(|| {
+                    HostError::Io(std::io::Error::other(format!(
+                        "sim-host: {} \"bounds\" has no numeric \"{key}\"",
+                        meta_path.display()
+                    )))
+                })
+            };
+            Some(TerrainBounds {
+                xmin: get("xmin")?,
+                xmax: get("xmax")?,
+                ymin: get("ymin")?,
+                ymax: get("ymax")?,
+            })
+        }
+        None => None,
+    };
 
     let raw = std::fs::read(hfield_path).map_err(|e| {
         HostError::Io(std::io::Error::new(
@@ -364,14 +467,24 @@ fn read_terrain_spec(hfield_path: &Path, spawn_x_m: f64) -> Result<TerrainSpec, 
     let z_at_origin_m =
         f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f64;
 
-    let spacing_m = 2.0 * half_extent_m / (ncol as f64 - 1.0);
-    let col = (ncol / 2) as i64 + (spawn_x_m / spacing_m).round() as i64;
+    // The nearest post to the spawn point, per axis. A square field with
+    // y = 0 lands on the centre row, the same post the old single-axis lookup
+    // read, so a square level is unchanged.
+    let spacing_x_m = 2.0 * half_extent_x_m / (ncol as f64 - 1.0);
+    let spacing_y_m = 2.0 * half_extent_y_m / (nrow as f64 - 1.0);
+    let col = (ncol / 2) as i64 + (spawn_x_m / spacing_x_m).round() as i64;
+    let row = (nrow / 2) as i64 + (spawn_y_m / spacing_y_m).round() as i64;
     if col < 0 || col >= ncol as i64 {
         return Err(HostError::Io(std::io::Error::other(format!(
-            "sim-host: --spawn-x {spawn_x_m} m is outside the terrain (half-extent {half_extent_m} m)"
+            "sim-host: spawn x {spawn_x_m} m is outside the terrain (half-extent {half_extent_x_m} m)"
         ))));
     }
-    let off = 8 + ((nrow / 2) * ncol + col as usize) * 4;
+    if row < 0 || row >= nrow as i64 {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: spawn y {spawn_y_m} m is outside the terrain (half-extent {half_extent_y_m} m)"
+        ))));
+    }
+    let off = 8 + (row as usize * ncol + col as usize) * 4;
     let z_at_spawn_m =
         f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f64;
 
@@ -379,12 +492,16 @@ fn read_terrain_spec(hfield_path: &Path, spawn_x_m: f64) -> Result<TerrainSpec, 
         hfield_path: hfield_path.to_path_buf(),
         nrow,
         ncol,
-        half_extent_m,
+        half_extent_x_m,
+        half_extent_y_m,
         z_min_m,
         z_max_m,
         z_at_origin_m,
         spawn_x_m,
+        spawn_y_m,
+        spawn_yaw_rad,
         z_at_spawn_m,
+        bounds,
     })
 }
 
@@ -505,10 +622,28 @@ fn splice_ankle_hinge(xml: &str, rigid: bool) -> Result<String, HostError> {
     Ok(out)
 }
 
-/// `--obstacles`: fixed obstacle geoms from the CSV (type,id,x,y,lx,ly,lz,
-/// yaw_deg; full sizes), standing on the terrain (or z = 0 without one).
-/// Collision bits 1 and 2: the wheel and pads (bit 2) and the bumpers and
-/// rider (bit 1) all hit them.
+/// The quaternion (w, x, y, z) for intrinsic yaw (Z), then pitch (Y), then
+/// roll (X): R = Rz(yaw) * Ry(pitch) * Rx(roll). Computed here so an obstacle's
+/// orientation does not depend on a MuJoCo euler-sequence default.
+fn zyx_intrinsic_quat(yaw: f64, pitch: f64, roll: f64) -> [f64; 4] {
+    let (sy, cy) = (0.5 * yaw).sin_cos();
+    let (sp, cp) = (0.5 * pitch).sin_cos();
+    let (sr, cr) = (0.5 * roll).sin_cos();
+    [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]
+}
+
+/// `--obstacles`: fixed obstacle geoms from the CSV
+/// (type,id,x,y,lx,ly,lz,yaw_deg[,pitch_deg,roll_deg,z_m]; full sizes),
+/// standing on the terrain (or z = 0 without one). Types: `cone`, `debris`
+/// and the generic grey `box` (ramps, planks, kerbs). `z_m` is the box bottom
+/// before rotation; absent, the bottom sits on the terrain. Pitch and roll
+/// apply to `box` and `debris` only. Collision bits 1 and 2: the wheel and
+/// pads (bit 2) and the bumpers and rider (bit 1) all hit them.
 fn splice_obstacles(
     xml: &str,
     csv: &Path,
@@ -531,14 +666,24 @@ fn splice_obstacles(
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
     {
         let f: Vec<&str> = line.split(',').map(str::trim).collect();
-        if f.len() != 8 {
-            return Err(bad(format!("expected 8 fields: {line}")));
+        // 8 columns is the original format; columns 9-11 (pitch_deg, roll_deg,
+        // z_m) are optional and may each be empty.
+        if !(8..=11).contains(&f.len()) {
+            return Err(bad(format!("expected 8 to 11 fields: {line}")));
         }
         let num = |i: usize| {
             f[i].parse::<f64>()
                 .map_err(|_| bad(format!("bad number '{}' in: {line}", f[i])))
         };
+        // An optional numeric column: absent or empty = `None`.
+        let opt = |i: usize| -> Result<Option<f64>, HostError> {
+            match f.get(i) {
+                None | Some(&"") => Ok(None),
+                Some(_) => Ok(Some(num(i)?)),
+            }
+        };
         let (x, y, lx, ly, lz, yaw) = (num(2)?, num(3)?, num(4)?, num(5)?, num(6)?, num(7)?);
+        let (pitch, roll, z_bottom) = (opt(8)?.unwrap_or(0.0), opt(9)?.unwrap_or(0.0), opt(10)?);
         let z0 = surface.map_or(0.0, |g| g.height(x, y));
         let id = if f[1].is_empty() {
             format!("obstacle{n}")
@@ -546,9 +691,18 @@ fn splice_obstacles(
             f[1].to_string()
         };
         let bits = r#"contype="3" conaffinity="3" condim="3" friction="0.8 0.005 0.0001""#;
+        // The box centre z: on the terrain by default, else at z_m (the box
+        // BOTTOM before rotation) plus half the height.
+        let pos_z = z_bottom.map_or(z0, |zb| zb) + lz / 2.0;
+        // Intrinsic yaw (Z), pitch (Y) then roll (X), about the box centre, as
+        // a MuJoCo quat so the result does not depend on the model's euler
+        // sequence default.
+        let q = zyx_intrinsic_quat(yaw.to_radians(), pitch.to_radians(), roll.to_radians());
+        let quat = format!(r#"quat="{:.9} {:.9} {:.9} {:.9}""#, q[0], q[1], q[2], q[3]);
         match f[0] {
             "cone" => {
-                // A square base and a tapered body as a cylinder of the mean radius.
+                // A square base and a tapered body as a cylinder of the mean
+                // radius. Pitch, roll and z_m do not apply to a cone.
                 let base = 0.03;
                 geoms.push_str(&format!(
                     r#"<geom name="{id}_base" type="box" pos="{x} {y} {:.4}" size="{:.4} {:.4} {:.4}" rgba="0.95 0.45 0.1 1" {bits}/>
@@ -559,9 +713,15 @@ fn splice_obstacles(
                 ));
             }
             "debris" => geoms.push_str(&format!(
-                r#"<geom name="{id}" type="box" pos="{x} {y} {:.4}" euler="0 0 {yaw}" size="{:.4} {:.4} {:.4}" rgba="0.35 0.3 0.25 1" {bits}/>
+                r#"<geom name="{id}" type="box" pos="{x} {y} {:.4}" {quat} size="{:.4} {:.4} {:.4}" rgba="0.35 0.3 0.25 1" {bits}/>
     "#,
-                z0 + lz / 2.0, lx / 2.0, ly / 2.0, lz / 2.0,
+                pos_z, lx / 2.0, ly / 2.0, lz / 2.0,
+            )),
+            // A generic grey box: ramps, planks and kerbs. Full sizes lx/ly/lz.
+            "box" => geoms.push_str(&format!(
+                r#"<geom name="{id}" type="box" pos="{x} {y} {:.4}" {quat} size="{:.4} {:.4} {:.4}" rgba="0.55 0.55 0.55 1" {bits}/>
+    "#,
+                pos_z, lx / 2.0, ly / 2.0, lz / 2.0,
             )),
             other => return Err(bad(format!("unknown type '{other}'"))),
         }
@@ -918,8 +1078,8 @@ fn write_model_with_kerb(
         let asset = format!(
             "\n    <hfield name=\"citypark\" file=\"{}\" size=\"{:.6} {:.6} {:.6} {:.6}\"/>\n  ",
             t.hfield_path.display(),
-            t.half_extent_m,
-            t.half_extent_m,
+            t.half_extent_x_m,
+            t.half_extent_y_m,
             elevation,
             base
         );
@@ -965,13 +1125,23 @@ fn write_model_with_kerb(
                  terrain -- the shared model has changed and this splice needs updating"
             ))));
         }
-        xml = xml.replace(
-            &spawn_from,
-            &format!(
+        // The spawn pose: x, y and a heading rotation about +Z. A level that
+        // sets neither y nor yaw keeps the exact single-axis form the old
+        // runs used, so a square course is unchanged. yaw rotates the frame
+        // body quat: q = [cos(yaw/2), 0, 0, sin(yaw/2)].
+        let spawn_to = if t.spawn_y_m == 0.0 && t.spawn_yaw_rad == 0.0 {
+            format!(
                 "<body name=\"frame\" pos=\"{:.6} 0 {spawn_z:.6}\">",
                 t.spawn_x_m
-            ),
-        );
+            )
+        } else {
+            let (sh, ch) = (0.5 * t.spawn_yaw_rad).sin_cos();
+            format!(
+                "<body name=\"frame\" pos=\"{:.6} {:.6} {spawn_z:.6}\" quat=\"{ch:.9} 0 0 {sh:.9}\">",
+                t.spawn_x_m, t.spawn_y_m,
+            )
+        };
+        xml = xml.replace(&spawn_from, &spawn_to);
 
         xml = xml.replace(
             plane,
@@ -1198,11 +1368,16 @@ fn write_model_with_kerb(
         let half = crate::ground::PLATE_HALF_SIZE_M;
         let plate = format!(
             "\n    <!-- sim-host smooth wheel contact, NOT part of the shared model. -->\n    \
-             <body name=\"wheel_ground\" mocap=\"true\" pos=\"{:.6} 0 {:.6}\">\
+             <body name=\"wheel_ground\" mocap=\"true\" pos=\"{:.6} {} {:.6}\">\
              <geom name=\"wheel_ground_geom\" type=\"box\" size=\"{half} {half} {th}\" \
              contype=\"2\" conaffinity=\"2\" condim=\"3\" friction=\"0.8 0.005 0.0001\" \
              rgba=\"0 0 0 0\" group=\"3\"/></body>\n  ",
             t.spawn_x_m,
+            if t.spawn_y_m == 0.0 {
+                "0".to_string()
+            } else {
+                format!("{:.6}", t.spawn_y_m)
+            },
             t.z_at_spawn_m - th,
         );
         if xml.matches("</worldbody>").count() != 1 {
@@ -2253,9 +2428,19 @@ pub struct HostConfig {
     /// curvature intent, and a rider model balances the roll.
     pub lean_steer: bool,
 
-    /// Spawn point along MuJoCo X, metres, on the `--terrain` heightmap. Lets a
-    /// run start on flatter road uphill of the origin without moving the frame.
-    pub spawn_x_m: f64,
+    /// Spawn point along MuJoCo X, metres, on the `--terrain` heightmap
+    /// (`--spawn-x`). Lets a run start on flatter road uphill of the origin
+    /// without moving the frame. `None` uses the level metadata `"spawn".x`,
+    /// then 0. A flag always wins over the metadata.
+    pub spawn_x_m: Option<f64>,
+    /// Spawn point along MuJoCo Y, metres (`--spawn-y`). Precedence as
+    /// [`HostConfig::spawn_x_m`]: flag, then metadata `"spawn".y`, then 0. The
+    /// spawn z is read from the terrain at (x, y).
+    pub spawn_y_m: Option<f64>,
+    /// Spawn heading about +Z, degrees (`--spawn-yaw`). 0 is the shared
+    /// model's heading (board forward is body -X). Precedence as
+    /// [`HostConfig::spawn_x_m`]: flag, then metadata `"spawn".yaw_deg`, then 0.
+    pub spawn_yaw_deg: Option<f64>,
 
     /// Add the learned grade current (`--grade-ff`) to the regulator output.
     /// Needs `EstimatorAiding::GradeAware`, which learns the grade.
@@ -2805,7 +2990,9 @@ impl Default for HostConfig {
             kerb: None,
             terrain: None,
             lean_steer: false,
-            spawn_x_m: 0.0,
+            spawn_x_m: None,
+            spawn_y_m: None,
+            spawn_yaw_deg: None,
             grade_feedforward: false,
             max_current_a: None,
             speed_hold_m_s: None,
@@ -3184,7 +3371,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // ADR-0012: a kerb run opens a spliced copy; every other run opens the
     // shared model itself, unchanged.
     let terrain = match &cfg.terrain {
-        Some(path) => Some(read_terrain_spec(path, cfg.spawn_x_m)?),
+        Some(path) => Some(read_terrain_spec(
+            path,
+            cfg.spawn_x_m,
+            cfg.spawn_y_m,
+            cfg.spawn_yaw_deg,
+        )?),
         None => None,
     };
     let base = cfg.plant.unwrap_or_default();
@@ -3233,7 +3425,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let surface = match &terrain {
             Some(t) => Some(crate::ground::GroundSurface::from_hfield_bin(
                 &t.hfield_path,
-                t.half_extent_m,
+                t.half_extent_x_m,
+                t.half_extent_y_m,
             )?),
             None => None,
         };
@@ -3295,8 +3488,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // Smooth wheel contact: the heights the plate follows (crate::ground).
     let ground = match (&terrain, cfg.hfield_wheel_contact) {
         (Some(t), false) => Some(
-            crate::ground::GroundSurface::from_hfield_bin(&t.hfield_path, t.half_extent_m)
-                .map_err(HostError::Io)?,
+            crate::ground::GroundSurface::from_hfield_bin(
+                &t.hfield_path,
+                t.half_extent_x_m,
+                t.half_extent_y_m,
+            )
+            .map_err(HostError::Io)?,
         ),
         _ => None,
     };
@@ -3498,24 +3695,52 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // The heightfield is finite. Outside its extent there is no geom at all --
     // not flat ground, NOTHING, because the terrain splice replaces the plane
     // rather than overlaying it (see write_model_with_kerb for why). A board
-    // that leaves the grid falls forever. The corridor is therefore clamped
-    // inside the grid with a margin, so the existing soft lean-arrest turns
-    // the board back before it reaches an edge that has no floor beyond it.
-    let (corridor_x_min_m, corridor_x_max_m, corridor_half_width_m) = match &terrain {
-        Some(t) => {
-            let limit = t.half_extent_m - TERRAIN_EDGE_MARGIN_M;
-            (
-                CORRIDOR_X_MIN_M.max(-limit),
-                CORRIDOR_X_MAX_M.min(limit),
-                corridor_half_width_m.min(limit),
-            )
-        }
-        None => (CORRIDOR_X_MIN_M, CORRIDOR_X_MAX_M, corridor_half_width_m),
-    };
+    // that leaves the grid falls forever.
+    //
+    // Three cases. On the flat game plane the corridor is active and symmetric
+    // in Y, as it always was. On a `--terrain` heightmap WITHOUT a `"bounds"`
+    // object the corridor is OFF (an authored course may sit anywhere in the
+    // frame, so the fixed corridor would brake it the whole way) -- unchanged
+    // from before. A `"bounds"` object turns the corridor back ON with the
+    // level's own rectangle, so a board that leaves a bounded level is braked
+    // rather than driven off the grid. Every rectangle is clamped inside the
+    // grid with a margin, so the soft lean-arrest turns the board back before
+    // an edge that has no floor beyond it.
+    let (corridor_x_min_m, corridor_x_max_m, corridor_y_min_m, corridor_y_max_m, corridor_active) =
+        match &terrain {
+            Some(t) => {
+                let lx = t.half_extent_x_m - TERRAIN_EDGE_MARGIN_M;
+                let ly = t.half_extent_y_m - TERRAIN_EDGE_MARGIN_M;
+                match t.bounds {
+                    Some(b) => (
+                        b.xmin.max(-lx),
+                        b.xmax.min(lx),
+                        b.ymin.max(-ly),
+                        b.ymax.min(ly),
+                        true,
+                    ),
+                    None => (
+                        CORRIDOR_X_MIN_M.max(-lx),
+                        CORRIDOR_X_MAX_M.min(lx),
+                        -corridor_half_width_m.min(ly),
+                        corridor_half_width_m.min(ly),
+                        false,
+                    ),
+                }
+            }
+            None => (
+                CORRIDOR_X_MIN_M,
+                CORRIDOR_X_MAX_M,
+                -corridor_half_width_m,
+                corridor_half_width_m,
+                true,
+            ),
+        };
     if terrain.is_some() {
         eprintln!(
-            "sim-host: drivable corridor clamped to the heightfield: \
-             x[{corridor_x_min_m:.1},{corridor_x_max_m:.1}] y+-{corridor_half_width_m:.1} m"
+            "sim-host: drivable corridor {} the heightfield: \
+             x[{corridor_x_min_m:.1},{corridor_x_max_m:.1}] y[{corridor_y_min_m:.1},{corridor_y_max_m:.1}] m",
+            if corridor_active { "from \"bounds\", clamped to" } else { "OFF (no \"bounds\"); grid is" }
         );
     }
 
@@ -3537,8 +3762,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // continuous running total (see `wire::StateOut::yaw_rad`), and the
     // attitude de-rotation below, which needs to know how much world-frame
     // yaw is currently baked into MuJoCo's own quaternion before it can read
-    // body pitch and roll back out of it.
+    // body pitch and roll back out of it. It starts at the spawn heading,
+    // which the terrain splice has baked into the frame body quat, so the
+    // de-rotation reads the true baked-in yaw from cycle one. A run with no
+    // spawn yaw keeps the literal-0.0 start the old runs used, so its trace is
+    // unchanged.
+    let spawn_yaw_rad = terrain.as_ref().map_or(0.0, |t| t.spawn_yaw_rad as f32);
     let mut yaw_rad: f32 = 0.0;
+    if spawn_yaw_rad != 0.0 {
+        yaw_rad = spawn_yaw_rad;
+    }
     // Lean-to-steer state (only used with `cfg.lean_steer`). Roll and roll
     // rate are last tick's: the rider reacts one 2 ms cycle late.
     let lean_params = crate::lean_steer::LeanSteerParams::from_env();
@@ -3810,7 +4043,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             backend.reset();
             handoff_latched = false;
             handoff_state = None;
-            yaw_rad = 0.0;
+            // `backend.reset()` returns the plant to the spawn pose, which
+            // carries the spawn heading in its frame quat; `yaw_rad` must match
+            // it, not snap to zero, or the de-rotation would read a false yaw.
+            yaw_rad = spawn_yaw_rad;
             tire_yaw = crate::lean_steer::TireYaw::default();
             lean_roll_rad = 0.0;
             lean_roll_rate_rad_s = 0.0;
@@ -3872,13 +4108,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // as of the END of the PREVIOUS tick (issue #163: this used to read
         // the dead-reckoned path, which no longer exists) -- the same
         // one-cycle lag the speed cap above uses, and for the same reason.
-        // The corridor bounds the flat game plane. On a `--terrain` heightmap
-        // the terrain itself bounds the run (and a course may sit anywhere in
-        // the frame -- an authored course starting at x = +88 m was braked by
-        // the corridor the whole way), so the corridor is off there.
-        let outside_corridor = cfg.terrain.is_none()
+        // The corridor bounds the flat game plane, and a `--terrain` level that
+        // declares a `"bounds"` rectangle (see `corridor_active` above). A
+        // terrain level WITHOUT `"bounds"` keeps the corridor off -- a course
+        // may sit anywhere in the frame (one started at x = +88 m), and the
+        // terrain itself bounds the run.
+        let outside_corridor = corridor_active
             && (!(corridor_x_min_m..=corridor_x_max_m).contains(&truth_pos_x_m)
-                || truth_pos_y_m.abs() > corridor_half_width_m);
+                || !(corridor_y_min_m..=corridor_y_max_m).contains(&truth_pos_y_m));
         if outside_corridor && !prev_outside_corridor {
             eprintln!(
                 "sim-host: LEFT THE DRIVABLE CORRIDOR at ({truth_pos_x_m:.1}, \
@@ -5509,5 +5746,126 @@ mod tests {
             previous = rate;
         }
         assert_eq!(yaw_rate_rad_s(1.0, 0.0, 1.0), 0.0);
+    }
+
+    /// The nested-object scanner must find a key's object body by matching
+    /// braces, so a flat scalar scan inside it cannot reach the top level.
+    #[test]
+    fn find_object_body_bounds_a_nested_scan() {
+        let s = r#"{"a": 1, "spawn": {"x": -10.0, "y": -5.0}, "x": 999}"#;
+        let body = find_object_body(s, "spawn").unwrap();
+        assert_eq!(scan_scalar(body, "x"), Some(-10.0));
+        assert_eq!(scan_scalar(body, "y"), Some(-5.0));
+        // The top-level "x": 999 is outside the spawn body.
+        assert!(!body.contains("999"));
+        assert_eq!(find_object_body(s, "bounds"), None);
+    }
+
+    /// Writes a metadata.json and a matching 3x3 flat hfield binary to a fresh
+    /// temp directory, and returns the hfield path.
+    fn write_level(meta: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "overboard_level_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("metadata.json"), meta).unwrap();
+        let (nrow, ncol) = (3usize, 3usize);
+        let mut bin = Vec::new();
+        bin.extend_from_slice(&(nrow as i32).to_le_bytes());
+        bin.extend_from_slice(&(ncol as i32).to_le_bytes());
+        for _ in 0..nrow * ncol {
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        let path = dir.join("course_hfield.bin");
+        std::fs::write(&path, bin).unwrap();
+        path
+    }
+
+    /// city_hill-style metadata (no new keys) keeps a square field, a spawn at
+    /// (spawn-x, 0) heading 0, and no bounds.
+    #[test]
+    fn metadata_without_new_keys_is_unchanged() {
+        let path = write_level(
+            r#"{"nrow": 3, "ncol": 3, "half_extent_m": 10.0, "z_min_m": -1.0, "z_max_m": 1.0}"#,
+        );
+        let t = read_terrain_spec(&path, Some(4.0), None, None).unwrap();
+        assert_eq!(t.half_extent_x_m, 10.0);
+        assert_eq!(t.half_extent_y_m, 10.0);
+        assert_eq!(t.spawn_x_m, 4.0);
+        assert_eq!(t.spawn_y_m, 0.0);
+        assert_eq!(t.spawn_yaw_rad, 0.0);
+        assert!(t.bounds.is_none());
+    }
+
+    /// Every new key present: a rectangular field, a spawn object, and bounds.
+    /// A flag still wins over the metadata spawn.
+    #[test]
+    fn metadata_with_all_new_keys_parses() {
+        let path = write_level(
+            r#"{"nrow": 3, "ncol": 3, "half_extent_m": 10.0,
+                "half_extent_x_m": 30.0, "half_extent_y_m": 20.0,
+                "z_min_m": -1.0, "z_max_m": 1.0,
+                "spawn": {"x": -8.0, "y": -5.0, "yaw_deg": 90.0},
+                "bounds": {"xmin": -29.0, "xmax": 29.0, "ymin": -19.0, "ymax": 19.0}}"#,
+        );
+        let t = read_terrain_spec(&path, None, None, None).unwrap();
+        assert_eq!(t.half_extent_x_m, 30.0);
+        assert_eq!(t.half_extent_y_m, 20.0);
+        assert_eq!(t.spawn_x_m, -8.0);
+        assert_eq!(t.spawn_y_m, -5.0);
+        assert!((t.spawn_yaw_rad - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        let b = t.bounds.unwrap();
+        assert_eq!((b.xmin, b.xmax, b.ymin, b.ymax), (-29.0, 29.0, -19.0, 19.0));
+        // A flag overrides the metadata spawn.
+        let t2 = read_terrain_spec(&path, Some(1.0), Some(2.0), Some(0.0)).unwrap();
+        assert_eq!(
+            (t2.spawn_x_m, t2.spawn_y_m, t2.spawn_yaw_rad),
+            (1.0, 2.0, 0.0)
+        );
+    }
+
+    /// Key order must not matter: the same keys in a different order parse the
+    /// same, because the reader scans by name.
+    #[test]
+    fn metadata_key_order_does_not_matter() {
+        let path = write_level(
+            r#"{"bounds": {"ymax": 19.0, "xmin": -29.0, "ymin": -19.0, "xmax": 29.0},
+                "spawn": {"yaw_deg": 45.0, "y": 3.0, "x": 7.0},
+                "z_max_m": 1.0, "half_extent_y_m": 20.0, "ncol": 3,
+                "z_min_m": -1.0, "half_extent_x_m": 30.0, "nrow": 3,
+                "half_extent_m": 10.0}"#,
+        );
+        let t = read_terrain_spec(&path, None, None, None).unwrap();
+        assert_eq!((t.half_extent_x_m, t.half_extent_y_m), (30.0, 20.0));
+        assert_eq!((t.spawn_x_m, t.spawn_y_m), (7.0, 3.0));
+        assert!((t.spawn_yaw_rad - 45.0f64.to_radians()).abs() < 1e-12);
+        let b = t.bounds.unwrap();
+        assert_eq!((b.xmin, b.xmax, b.ymin, b.ymax), (-29.0, 29.0, -19.0, 19.0));
+    }
+
+    /// A "box" obstacle gets a grey rgba and a quat; a raised plank (z_m) sits
+    /// its bottom at z_m, not on the terrain.
+    #[test]
+    fn splice_obstacles_box_and_raised_plank() {
+        let dir = std::env::temp_dir().join(format!("overboard_obst_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("obstacles.csv");
+        std::fs::write(
+            &csv,
+            "box,ramp,5,0,2.0,1.0,0.05,0,8,0,\nbox,plank,10,0,3.0,1.0,0.05,0,0,0,0.3\n",
+        )
+        .unwrap();
+        let xml = "<worldbody></worldbody>";
+        let out = splice_obstacles(xml, &csv, None).unwrap();
+        assert!(out.contains(r#"name="ramp""#));
+        assert!(out.contains(r#"rgba="0.55 0.55 0.55 1""#));
+        assert!(out.contains("quat="));
+        // The plank bottom is at z_m = 0.3, so its centre is 0.3 + 0.05/2.
+        assert!(out.contains(r#"name="plank""#));
+        assert!(out.contains("0.3250"), "plank centre z missing: {out}");
     }
 }

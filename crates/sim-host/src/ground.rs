@@ -29,19 +29,30 @@ pub const PLATE_HALF_THICKNESS_M: f64 = 0.05;
 pub const PLATE_HALF_SIZE_M: f64 = 1.0;
 
 /// The heights of a `course.py` / City Park heightfield, in metres.
+///
+/// The field can be rectangular: `half_extent_x_m` spans the columns (world X)
+/// and `half_extent_y_m` spans the rows (world Y). A square field sets both to
+/// the same value.
 pub struct GroundSurface {
     heights: Vec<f32>,
     nrow: usize,
     ncol: usize,
-    half_extent_m: f64,
-    spacing_m: f64,
+    half_extent_x_m: f64,
+    half_extent_y_m: f64,
+    spacing_x_m: f64,
+    spacing_y_m: f64,
 }
 
 impl GroundSurface {
     /// Reads the binary that `--terrain` already loads: two little-endian
     /// i32 (nrow, ncol), then nrow * ncol f32 heights, row-major, row along
-    /// +Y and column along +X, centred on the origin.
-    pub fn from_hfield_bin(path: &Path, half_extent_m: f64) -> std::io::Result<Self> {
+    /// +Y and column along +X, centred on the origin. `half_extent_x_m` spans
+    /// the columns and `half_extent_y_m` spans the rows.
+    pub fn from_hfield_bin(
+        path: &Path,
+        half_extent_x_m: f64,
+        half_extent_y_m: f64,
+    ) -> std::io::Result<Self> {
         let raw = std::fs::read(path)?;
         if raw.len() < 8 {
             return Err(std::io::Error::other("hfield binary has no header"));
@@ -54,20 +65,37 @@ impl GroundSurface {
             ));
         }
         let heights = raw[8..]
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
-        Ok(Self::from_heights(heights, nrow, ncol, half_extent_m))
+        Ok(Self::from_heights(
+            heights,
+            nrow,
+            ncol,
+            half_extent_x_m,
+            half_extent_y_m,
+        ))
     }
 
-    pub fn from_heights(heights: Vec<f32>, nrow: usize, ncol: usize, half_extent_m: f64) -> Self {
-        let spacing_m = 2.0 * half_extent_m / (ncol as f64 - 1.0);
+    pub fn from_heights(
+        heights: Vec<f32>,
+        nrow: usize,
+        ncol: usize,
+        half_extent_x_m: f64,
+        half_extent_y_m: f64,
+    ) -> Self {
+        let spacing_x_m = 2.0 * half_extent_x_m / (ncol as f64 - 1.0);
+        let spacing_y_m = 2.0 * half_extent_y_m / (nrow as f64 - 1.0);
         GroundSurface {
             heights,
             nrow,
             ncol,
-            half_extent_m,
-            spacing_m,
+            half_extent_x_m,
+            half_extent_y_m,
+            spacing_x_m,
+            spacing_y_m,
         }
     }
 
@@ -77,8 +105,8 @@ impl GroundSurface {
 
     /// Bilinear height at world (x, y), clamped to the grid.
     pub fn height(&self, x: f64, y: f64) -> f64 {
-        let fc = ((x + self.half_extent_m) / self.spacing_m).clamp(0.0, (self.ncol - 1) as f64);
-        let fr = ((y + self.half_extent_m) / self.spacing_m).clamp(0.0, (self.nrow - 1) as f64);
+        let fc = ((x + self.half_extent_x_m) / self.spacing_x_m).clamp(0.0, (self.ncol - 1) as f64);
+        let fr = ((y + self.half_extent_y_m) / self.spacing_y_m).clamp(0.0, (self.nrow - 1) as f64);
         let (c0, r0) = (
             (fc as usize).min(self.ncol - 2),
             (fr as usize).min(self.nrow - 2),
@@ -141,7 +169,7 @@ mod tests {
                 h.push((g * (col as f64 * sp - half)) as f32);
             }
         }
-        GroundSurface::from_heights(h, n, n, half)
+        GroundSurface::from_heights(h, n, n, half, half)
     }
 
     #[test]
@@ -174,5 +202,16 @@ mod tests {
     fn height_interpolates_between_posts() {
         let s = tilted(0.5);
         assert!((s.height(0.025, 0.3) - 0.0125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rectangular_field_uses_a_per_axis_spacing() {
+        // 3 cols over +-6 m (spacing 6 m) and 2 rows over +-2 m (spacing 4 m).
+        // z = col index, so x maps to column and y does not change the height.
+        let h = vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0];
+        let s = GroundSurface::from_heights(h, 2, 3, 6.0, 2.0);
+        assert!((s.height(0.0, 0.0) - 1.0).abs() < 1e-6);
+        assert!((s.height(6.0, -2.0) - 2.0).abs() < 1e-6);
+        assert!((s.height(-6.0, 2.0) - 0.0).abs() < 1e-6);
     }
 }

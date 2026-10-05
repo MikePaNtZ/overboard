@@ -946,7 +946,15 @@ impl SimBackend {
         else {
             return;
         };
-        plant.set_qvel_range(vadr, &[-v_m_s, 0.0, 0.0]);
+        // Along the board's heading (forward is body -X, flattened): a board
+        // spawned with a yaw was pushed sideways along world -X and fell.
+        let frame = plant
+            .body_id("frame")
+            .expect("set_forward_speed: model has no frame body");
+        let r = plant.body_xmat(frame);
+        let (fx, fy) = (-r[0], -r[3]);
+        let n = (fx * fx + fy * fy).sqrt().max(1e-9);
+        plant.set_qvel_range(vadr, &[v_m_s * fx / n, v_m_s * fy / n, 0.0]);
         // No `forward()`: the plant allows it only at t = 0, and the next
         // step recomputes everything from the new velocity.
         plant.set_qvel_range(wadr, &[v_m_s / r_wheel_m]);
