@@ -52,7 +52,7 @@ RUNS = {
         steer=[(0, 40, 0.0, 'straight')],
         cam=dict(side=True, az=90)),
     'tail_drag': dict(
-        title='Fast descent, hard brake: tail drag, then turns (45 A motor; 90 A brakes without the tail), 95 kg',
+        title='Fast descent, hard brake: tail drag to a stop (45 A motor; 90 A brakes without the tail), 95 kg', secs=13,
         # A scripted rider: leans back hard and holds it (the rider model's
         # speed loop swings its lean end to end after a hard brake).
         kg=95, amps=int(os.environ.get('TD_A', '45')), v=None, x=TOP_X, extra=['--start-speed', '8'],
@@ -94,7 +94,7 @@ def run(name, spec, out, port, render):
            *(['--rider-speed', str(spec['v'])] if spec['v'] else []), '--balance-comp', '--rider-reach', '0.10',
            '--motor-limits', '--tumble', '--pose-out', str(d / 'pose.csv'),
            '--stop-after-handoff', '4', '--schedule-csv', str(sched),
-           '--free-run', '--max-sim-secs', '40', '--duration-secs', '3600', '--stats-path', 'none',
+           '--free-run', '--max-sim-secs', str(spec.get('secs', 40)), '--duration-secs', '3600', '--stats-path', 'none',
            '--state-out-addr', f'127.0.0.1:{port}', '--input-in-addr', f'127.0.0.1:{port + 1}',
            '--trace-csv', str(d / 'trace.csv'), *spec.get('extra', [])]
     env = {**os.environ, **spec.get('env', {})}
