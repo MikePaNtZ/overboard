@@ -77,6 +77,13 @@ pub struct LeanSteerParams {
     pub yaw_servo_nms: f32,
     /// Largest curvature the rider asks for at full stick, 1/m.
     pub kappa_max_per_m: f32,
+    /// 1 = camber thrust at speed (fable-oracle, 2026-10-05): above the
+    /// self-steer speed v* the tyre's camber steer is force-limited, so the
+    /// bank that steers a turn is the bank that balances it. 0 = the old
+    /// kinematic camber steer at every speed.
+    pub camber_thrust: f32,
+    /// Largest side acceleration the rider asks for with camber thrust, m/s^2.
+    pub max_side_accel_m_s2: f32,
     /// Height of the centre of mass above the ground, metres.
     pub com_height_m: f32,
     /// Crown radius of the tire profile, metres.
@@ -101,6 +108,8 @@ impl Default for LeanSteerParams {
             relaxation_m: 0.15,
             yaw_servo_nms: 150.0,
             kappa_max_per_m: 0.25,
+            camber_thrust: 1.0,
+            max_side_accel_m_s2: 0.6 * G,
             com_height_m: 0.82,
             crown_radius_m: 0.099,
             hip_reach_m: 0.25,
@@ -134,6 +143,8 @@ impl LeanSteerParams {
                     "sigma" => p.relaxation_m = v,
                     "yaw_servo" => p.yaw_servo_nms = v,
                     "kappa_max" => p.kappa_max_per_m = v,
+                    "camber_thrust" => p.camber_thrust = v,
+                    "max_side_accel" => p.max_side_accel_m_s2 = v,
                     "balance_kp" => p.balance_kp_nm_per_rad = v,
                     "balance_kd" => p.balance_kd_nms_per_rad = v,
                     "balance_limit" => p.balance_torque_limit_nm = v,
@@ -166,6 +177,31 @@ pub fn tire_curvature(p: &LeanSteerParams, roll_rad: f32) -> f32 {
 /// Deck camber that gives curvature `kappa` (1/m, +right).
 pub fn roll_reference(p: &LeanSteerParams, kappa: f32) -> f32 {
     (kappa * p.rolling_radius_m / p.camber_efficiency).atan()
+}
+
+/// Effective camber efficiency at speed `v`. Below the self-steer speed
+/// v* = sqrt(g r_c / eta) a cambered tyre rolls like a cone (eta). Above it
+/// the tyre cannot supply the cone's side force: the contact sideslips until
+/// the side force is m g tan(phi), so kappa = g tan(phi) / v^2, which is
+/// eta * (v*/v)^2. That makes the bank that steers a turn the bank that
+/// balances it, as on a motorcycle; without it the hips had to carry about
+/// 11 deg of a 13.5 deg lean at 8 m/s, and carving at speed fell at 0.24 g.
+pub fn eta_eff(p: &LeanSteerParams, v: f32) -> f32 {
+    if p.camber_thrust <= 0.0 {
+        return p.camber_efficiency;
+    }
+    let v_star_sq = G * p.rolling_radius_m / p.camber_efficiency;
+    p.camber_efficiency * (v_star_sq / (v * v).max(1e-6)).min(1.0)
+}
+
+/// [`tire_curvature`] at speed `v` (camber thrust above v*).
+pub fn tire_curvature_at(p: &LeanSteerParams, roll_rad: f32, v: f32) -> f32 {
+    eta_eff(p, v) * roll_rad.tan() / p.rolling_radius_m
+}
+
+/// [`roll_reference`] at speed `v` (camber thrust above v*).
+pub fn roll_reference_at(p: &LeanSteerParams, kappa: f32, v: f32) -> f32 {
+    (kappa * p.rolling_radius_m / eta_eff(p, v)).atan()
 }
 
 /// What the rider senses each cycle.
@@ -212,12 +248,17 @@ impl Rider {
         let speed_frac = ((speed_m_s.abs() - NO_TURN_BELOW_M_S)
             / (FULL_TURN_SPEED_M_S - NO_TURN_BELOW_M_S))
             .clamp(0.0, 1.0);
-        let goal = steer.clamp(-1.0, 1.0) * p.kappa_max_per_m * speed_frac;
+        let mut kappa_cap = p.kappa_max_per_m;
+        if p.camber_thrust > 0.0 {
+            // The rider asks for no more than max_side_accel of turn.
+            kappa_cap = kappa_cap.min(p.max_side_accel_m_s2 / (speed_m_s * speed_m_s).max(1e-6));
+        }
+        let goal = steer.clamp(-1.0, 1.0) * kappa_cap * speed_frac;
         let b = (dt_s / p.intent_lag_s.max(dt_s)).min(1.0);
         self.kappa_intent_per_m += b * (goal - self.kappa_intent_per_m);
         // Only ask for a turn the hips can balance with headroom to spare.
         let reference = |k: f32| {
-            let phi = roll_reference(p, k);
+            let phi = roll_reference_at(p, k, speed_m_s);
             (phi, steady_turn_offset(p, speed_m_s, k, phi))
         };
         let budget = p.feasible_reach_fraction * p.hip_reach_m;
@@ -263,7 +304,7 @@ impl TireYaw {
         dt_s: f32,
     ) -> f32 {
         // + roll (lean right) at + speed turns right, which is - yaw rate.
-        let target = -speed_m_s * tire_curvature(p, roll_rad);
+        let target = -speed_m_s * tire_curvature_at(p, roll_rad, speed_m_s.abs());
         let tau = p.relaxation_m / speed_m_s.abs().max(RELAX_SPEED_FLOOR_M_S);
         let a = (dt_s / tau).min(1.0);
         self.yaw_rate_target_rad_s += a * (target - self.yaw_rate_target_rad_s);
@@ -323,9 +364,23 @@ mod tests {
                 r.command(&p, 1.0, v, &RiderObs::default(), 0.002);
             }
             let k = r.kappa_intent_per_m;
-            let d = steady_turn_offset(&p, v, k, roll_reference(&p, k));
+            let d = steady_turn_offset(&p, v, k, roll_reference_at(&p, k, v));
             assert!(d.abs() <= p.feasible_reach_fraction * p.hip_reach_m + 1e-3, "v {v}: {d}");
         }
+    }
+
+    #[test]
+    fn camber_thrust_makes_the_steering_bank_the_balancing_bank_at_speed() {
+        let p = LeanSteerParams::default();
+        // At 8 m/s a 0.35 g turn: the bank is atan(a/g) and the hips trim only.
+        let v = 8.0_f32;
+        let k = 0.35 * G / (v * v);
+        let phi = roll_reference_at(&p, k, v);
+        assert!((phi - 0.35_f32.atan()).abs() < 1e-3, "phi {phi}");
+        assert!(steady_turn_offset(&p, v, k, phi).abs() < 0.08);
+        // Below v* nothing changes.
+        assert!((eta_eff(&p, 3.0) - p.camber_efficiency).abs() < 1e-6);
+        assert!((roll_reference_at(&p, 0.1, 3.0) - roll_reference(&p, 0.1)).abs() < 1e-6);
     }
 
     #[test]
