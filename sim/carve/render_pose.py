@@ -74,8 +74,11 @@ def step_off_pose(i, since):
     """Drawn step-off: from the ballast to standing beside the board."""
     s = min(1.0, since / 0.8)
     s = s * s * (3 - 2 * s)
+    i = i_dis   # the rider steps off where they were, not where the board goes
     p0 = rider[i, :3]
-    R = D.xmat[frame_b].reshape(3, 3)
+    R = np.zeros(9)
+    mujoco.mju_quat2Mat(R, qpos[i, 3:7])
+    R = R.reshape(3, 3)
     right = R[:, 1] * np.array([1, 1, 0])
     right /= np.linalg.norm(right) + 1e-9
     ground_z = qpos[i, 2] - 0.146
@@ -91,6 +94,7 @@ proc = subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo',
                          '-pix_fmt', 'yuv420p', '-crf', '22', '-movflags', '+faststart', a.out],
                         stdin=subprocess.PIPE)
 dis_t = t[np.argmax((ev & 2) == 2)] if (ev & 2).any() else None
+i_dis = int(np.argmax((ev & 2) == 2))
 fall_t = t[np.argmax((ev & 4) == 4)] if (ev & 4).any() else None
 n_hold = int(a.hold * FPS)
 for j, i in enumerate(list(idx) + [idx[-1]] * n_hold):

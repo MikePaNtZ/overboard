@@ -116,6 +116,22 @@ fn main() -> ExitCode {
                 cfg.batt_soc0 = x;
                 i += 2;
             }
+            "--motor-limits" => {
+                cfg.motor_limits = true;
+                i += 1;
+            }
+            "--rider-target-change" => {
+                let f: Vec<f64> = args
+                    .get(i + 1)
+                    .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                    .unwrap_or_default();
+                if f.len() != 2 {
+                    eprintln!("sim-host: --rider-target-change needs T_S,V_M_S");
+                    return ExitCode::FAILURE;
+                }
+                cfg.rider_target_change = Some((f[0], f[1] as f32));
+                i += 2;
+            }
             "--tumble" => {
                 cfg.tumble = true;
                 i += 1;

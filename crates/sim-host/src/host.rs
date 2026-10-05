@@ -2052,6 +2052,10 @@ pub struct HostConfig {
     /// law is sim/carve/rider.py's lean mode (leaky PI on speed, acceleration
     /// damping, a grade lean the rider sees). Without `--speed-hold`.
     pub rider_speed_m_s: Option<f32>,
+    /// `--rider-target-change T,V`: the `--rider-speed` rider changes its
+    /// target to V m/s at sim time T s, at once, without the ease-in, and may
+    /// then use its full reach (a hard brake after a fast run).
+    pub rider_target_change: Option<(f64, f32)>,
     /// `--rider-reach M`: see `PlantVariation::rider_reach_m`.
     pub rider_reach_m: Option<f64>,
     /// `--tumble`: at a fall (the ADR-0012 handoff) the rider comes off as a
@@ -2066,6 +2070,14 @@ pub struct HostConfig {
     /// with the tumble rider, for a MuJoCo render (sim/carve/render_pose.py).
     /// The model is kept beside it as `sim/models/<stem>.generated.xml`.
     pub pose_out: Option<PathBuf>,
+    /// `--motor-limits`: the motor and the pack limit the current, as a real
+    /// controller does. Driving: the back-EMF leaves (0.95 V_pack - Ke w) /
+    /// R_eff, so the torque falls to zero near the top speed (the classic
+    /// nosedive). Braking: the pack takes at most 45 A of charge, so the
+    /// braking current falls as 1/w at speed. V_pack is the HUD pack model
+    /// (it sags under load). Off by default: the Monte Carlo results do not
+    /// include it.
+    pub motor_limits: bool,
     /// `--stop-after-handoff S`: end the run S seconds after a fall or a
     /// dismount (to record the tumble).
     pub stop_after_handoff_s: Option<f64>,
@@ -2165,6 +2177,12 @@ impl RiderSpeedModel {
 
     pub fn reset(&mut self) {
         *self = Self { bound: self.bound, ..Self::default() };
+    }
+
+    /// A sudden change of mind: the target jumps to `v` now, without the
+    /// 0.5 m/s^2 ease-in (`--rider-target-change`: a hard brake).
+    pub fn set_target_now(&mut self, v: f32) {
+        self.v_ref = Some(v);
     }
 }
 
@@ -2466,7 +2484,9 @@ impl Default for HostConfig {
             rider_reacts: false,
             rider_speed_m_s: None,
             rider_reach_m: None,
+            rider_target_change: None,
             tumble: false,
+            motor_limits: false,
             pose_out: None,
             stop_after_handoff_s: None,
             hud_out_addr: None,
@@ -2973,6 +2993,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut rider_model = RiderSpeedModel::default();
     // `--tumble`: the rider is free (fall) or off (dismount); the motor is cut.
     let mut rider_free = false;
+    let mut target_changed = false;
     let mut motor_cut = false;
     let mut handoff_at_s: Option<f64> = None;
     let mut pose_rows: Vec<String> = Vec::new();
@@ -3249,6 +3270,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                         .grade_course
                         .as_ref()
                         .map_or(0.0, |c| -(c.grade_deg(-truth_pos_x_m) as f32).to_radians());
+                    let v_target = match cfg.rider_target_change {
+                        Some((t_change, v)) if t_known_s >= t_change => {
+                            if !target_changed {
+                                target_changed = true;
+                                rider_model.set_target_now(v);
+                                // A hard brake: the rider leans as far back as they can.
+                                rider_model.bound = fore_aft_range_m / BALLAST_RANGE_M;
+                            }
+                            v
+                        }
+                        _ => v_target,
+                    };
                     let target = if rider_eased { 0.0 } else { v_target };
                     rider_model.update(last_forward_speed_m_s, target, grade_down_rad, DT_S as f32)
                         * (BALLAST_RANGE_M / fore_aft_range_m)
@@ -3791,13 +3824,33 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if motor_cut {
             proposed_amps = 0.0;
         }
+        // `--motor-limits`: what the motor and the pack can give at this speed.
+        let mut limit_clamped = false;
+        if cfg.motor_limits {
+            const DUTY_MAX: f64 = 0.95;
+            const R_EFF_OHM: f64 = 1.5 * 0.0525; // Superflux phase resistance, two phases conducting
+            const CHARGE_LIMIT_A: f64 = 45.0;
+            let w = wheel_rate_rad_s as f64;
+            let i = proposed_amps as f64;
+            let limited = if i * w > 0.0 {
+                let room = ((DUTY_MAX * battery.v - hud_kt * w.abs()) / R_EFF_OHM).max(0.0);
+                i.clamp(-room, room)
+            } else if i * w < 0.0 {
+                let room = CHARGE_LIMIT_A * battery.v / (hud_kt * w.abs()).max(1e-6);
+                i.clamp(-room, room)
+            } else {
+                i
+            };
+            limit_clamped = limited != i;
+            proposed_amps = limited as f32;
+        }
         let (bounded_cmd, saturation) = envelope.apply(
             Command::MotorCurrent {
                 amps: proposed_amps,
             },
             Faults::NONE,
         );
-        let saturated = saturation == Saturation::Yes;
+        let saturated = saturation == Saturation::Yes || limit_clamped;
         last_saturated = saturated;
         backend.apply(&bounded_cmd).map_err(HostError::Backend)?;
         // POST-envelope current, not the proposal -- the plant only ever
@@ -3887,7 +3940,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let (rider_fore_aft_m, rider_lateral_m) = backend.truth_ballast_positions();
 
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
-        let fallen = pitch_rad.abs() > FALLEN_PITCH_RAD;
+        // With `--tail-brake`, a nose-up drag on the tail pad is a brake, not a
+        // fall: the tail pad touches at about 20 deg, the same angle as this
+        // limit, so every wanted tail stop used to set FALLEN.
+        let tail_dragging = cfg.tail_brake && pitch_rad > 0.0 && backend.truth_tail_strike_n() > 0.0;
+        let fallen = pitch_rad.abs() > FALLEN_PITCH_RAD && !tail_dragging;
         if fallen {
             flags |= wire::STATE_FLAG_FALLEN;
         }
