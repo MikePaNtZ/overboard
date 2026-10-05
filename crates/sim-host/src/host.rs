@@ -2139,6 +2139,10 @@ pub struct HostConfig {
     /// (it sags under load). Off by default: the Monte Carlo results do not
     /// include it.
     pub motor_limits: bool,
+    /// `--kp-scale S`, `--kd-scale S`: study scales on the deployed balance
+    /// gains (Kp 140 N*m/rad, Kd 21 N*m*s/rad). 1 by default.
+    pub kp_scale: f32,
+    pub kd_scale: f32,
     /// `--ankle-hinge`: the rider stands on a pitch hinge at deck level (an
     /// ankle; fable-oracle, 2026-10-04). Its torque is a spring and damper on
     /// the rider's lean against GRAVITY (not against the deck), K = 1.3 m g h,
@@ -2568,6 +2572,8 @@ impl Default for HostConfig {
             motor_limits: false,
             rider_ankle: false,
             ankle_hinge: false,
+            kp_scale: 1.0,
+            kd_scale: 1.0,
             ankle_rigid: false,
             pose_out: None,
             stop_after_handoff_s: None,
@@ -2905,8 +2911,8 @@ fn request_interactive_scheduling() {
 pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     request_interactive_scheduling();
     let params = Params {
-        kp_nm_per_rad: KP_NM_PER_RAD,
-        kd_nm_per_rad_s: KD_NM_PER_RAD_S,
+        kp_nm_per_rad: KP_NM_PER_RAD * cfg.kp_scale,
+        kd_nm_per_rad_s: KD_NM_PER_RAD_S * cfg.kd_scale,
         kt_nm_per_a: KT_NM_PER_A,
         max_current_a: cfg.max_current_a.unwrap_or(MAX_CURRENT_A),
         ..Params::default()
@@ -3022,7 +3028,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut envelope = Envelope::new(params);
     envelope.arm();
 
-    let regulator = PitchRegulator::new(KP_NM_PER_RAD, KD_NM_PER_RAD_S);
+    let regulator = PitchRegulator::new(KP_NM_PER_RAD * cfg.kp_scale, KD_NM_PER_RAD_S * cfg.kd_scale);
+    if cfg.kp_scale != 1.0 || cfg.kd_scale != 1.0 {
+        eprintln!(
+            "sim-host: balance gains Kp {:.0} N*m/rad, Kd {:.1} N*m*s/rad (study scales {} and {})",
+            KP_NM_PER_RAD * cfg.kp_scale, KD_NM_PER_RAD_S * cfg.kd_scale, cfg.kp_scale, cfg.kd_scale
+        );
+    }
     let mut estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
     // Lean-to-steer banks the board, and a single-axis pitch filter then
     // reads the turn's yaw rate as pitch (see `control_core::TiltFilter`).
@@ -4001,7 +4013,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             proposed_amps = 0.0;
         }
         if pad_mode {
-            proposed_amps = (-KD_NM_PER_RAD_S * regulated_pitch_rate_rad_s)
+            proposed_amps = (-KD_NM_PER_RAD_S * cfg.kd_scale * regulated_pitch_rate_rad_s)
                 .clamp(-PAD_MODE_TORQUE_LIMIT_NM, PAD_MODE_TORQUE_LIMIT_NM)
                 / KT_NM_PER_A;
         }

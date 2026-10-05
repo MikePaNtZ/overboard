@@ -116,6 +116,15 @@ fn main() -> ExitCode {
                 cfg.batt_soc0 = x;
                 i += 2;
             }
+            "--kp-scale" | "--kd-scale" => {
+                let flag = args[i].clone();
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: {flag} needs a number");
+                    return ExitCode::FAILURE;
+                };
+                if flag == "--kp-scale" { cfg.kp_scale = x } else { cfg.kd_scale = x }
+                i += 2;
+            }
             "--ankle-hinge" => {
                 cfg.ankle_hinge = true;
                 i += 1;
