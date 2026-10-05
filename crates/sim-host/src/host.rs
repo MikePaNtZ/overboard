@@ -4124,7 +4124,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // only damping acts, limited to 12 N*m; the grade load and the
         // integral are held at zero, and the grade load is not learned for
         // 1 s after. Pitch only, so firmware can use the same rule.
-        if !pad_mode && regulated_pitch_rad >= PAD_MODE_ENTER_RAD && forward_speed_m_s.abs() < PAD_MODE_SPEED_M_S {
+        // Not while the rider asks to go: that exit left the deck past 17 deg,
+        // and pad mode chattered on and off every step for about 50 ms.
+        if !pad_mode
+            && regulated_pitch_rad >= PAD_MODE_ENTER_RAD
+            && forward_speed_m_s.abs() < PAD_MODE_SPEED_M_S
+            && corridor_enforced_fore_aft <= PAD_MODE_GO_STICK
+        {
             pad_mode = true;
             eprintln!("sim-host: pad mode at sim_t={t_known_s:.3}s (tail pad down)");
         } else if pad_mode
