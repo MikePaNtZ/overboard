@@ -108,6 +108,10 @@ def _rust_constant(name: str) -> float:
     return float(m.group(1))
 
 
+# These tests characterise the pre-2026-10-05 law (Kp 140, Kd 21); the deployed default is now Kp 420, Kd 36.3.
+LEGACY_GAIN_FLAGS = ["--kp-scale", "0.3333333", "--kd-scale", "0.5785124"]
+
+
 def _run(tmp_path: Path, name: str, scenario: str, **kw) -> list[dict]:
     out = tmp_path / f"{name}.csv"
     argv = [
@@ -119,6 +123,7 @@ def _run(tmp_path: Path, name: str, scenario: str, **kw) -> list[dict]:
         "--state-out-addr", STATE_OUT,
         "--input-in-addr", INPUT_IN,
         "--trace-csv", str(out),
+        *LEGACY_GAIN_FLAGS,
     ]
     for flag, value in kw.items():
         if value is None:

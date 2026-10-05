@@ -16,7 +16,8 @@
 //!          [--estimator-aiding command-feedforward|wheel-odometry]
 //!          [--cmd-reserve FRACTION] [--cmd-reserve-braking FRACTION]
 //!          [--incline-deg DEGREES] [--damping-scale SCALE] [--kerb [Y[,HEIGHT]]]
-//!          [--terrain HFIELD.bin]
+//!          [--terrain HFIELD.bin] [--lean-steer] [--spawn-x M] [--spawn-y M]
+//!          [--spawn-yaw DEG] [--schedule-csv PATH]
 //!          [--disturbance t0,dur,fx,fy,fz,tx,ty,tz] [--trace-csv PATH]
 //! ```
 //! With no `--duration-secs`, runs forever (Ctrl-C / SIGTERM to stop). With
@@ -84,6 +85,302 @@ fn main() -> ExitCode {
                 cfg.scripted_scenario = Some(sched);
                 i += 2;
             }
+            "--spawn-x" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --spawn-x needs a number (metres)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.spawn_x_m = Some(x);
+                i += 2;
+            }
+            "--spawn-y" => {
+                let Some(Ok(y)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --spawn-y needs a number (metres)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.spawn_y_m = Some(y);
+                i += 2;
+            }
+            "--spawn-yaw" => {
+                let Some(Ok(d)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --spawn-yaw needs a number (degrees)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.spawn_yaw_deg = Some(d);
+                i += 2;
+            }
+            "--balance-comp" => {
+                cfg.balance_comp = true;
+                i += 1;
+            }
+            "--hold-until-arm" => {
+                cfg.hold_until_arm = true;
+                i += 1;
+            }
+            "--hud-out-addr" => {
+                let Some(Ok(a)) = args.get(i + 1).map(|v| v.parse::<SocketAddr>()) else {
+                    eprintln!("sim-host: --hud-out-addr needs ADDR:PORT");
+                    return ExitCode::FAILURE;
+                };
+                cfg.hud_out_addr = Some(a);
+                i += 2;
+            }
+            "--batt-soc0" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --batt-soc0 needs a number (0..1)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.batt_soc0 = x;
+                i += 2;
+            }
+            "--sensors" => {
+                if args.get(i + 1).map(String::as_str) != Some("stage0") {
+                    eprintln!("sim-host: --sensors needs stage0");
+                    return ExitCode::FAILURE;
+                }
+                cfg.sensors_stage0 = true;
+                i += 2;
+            }
+            "--noise-scale" | "--extra-delay-ms" => {
+                let flag = args[i].clone();
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: {flag} needs a number");
+                    return ExitCode::FAILURE;
+                };
+                if flag == "--noise-scale" {
+                    cfg.noise_scale = x
+                } else {
+                    cfg.extra_delay_ms = x
+                }
+                i += 2;
+            }
+            "--kp-scale" | "--kd-scale" => {
+                let flag = args[i].clone();
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: {flag} needs a number");
+                    return ExitCode::FAILURE;
+                };
+                if flag == "--kp-scale" {
+                    cfg.kp_scale = x
+                } else {
+                    cfg.kd_scale = x
+                }
+                i += 2;
+            }
+            "--obstacles" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --obstacles needs a CSV path");
+                    return ExitCode::FAILURE;
+                };
+                cfg.obstacles = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
+            "--rider-reach-back" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --rider-reach-back needs a number (m)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_reach_back_m = Some(x);
+                i += 2;
+            }
+            "--foot-torque" => {
+                cfg.foot_torque = true;
+                i += 1;
+            }
+            "--ankle-hinge" => {
+                cfg.ankle_hinge = true;
+                i += 1;
+            }
+            "--ankle-rigid" => {
+                cfg.ankle_rigid = true;
+                i += 1;
+            }
+            "--rider-ankle" => {
+                cfg.rider_ankle = true;
+                i += 1;
+            }
+            "--motor-limits" => {
+                cfg.motor_limits = true;
+                i += 1;
+            }
+            "--rider-target-change" => {
+                let f: Vec<f64> = args
+                    .get(i + 1)
+                    .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                    .unwrap_or_default();
+                if f.len() != 2 {
+                    eprintln!("sim-host: --rider-target-change needs T_S,V_M_S");
+                    return ExitCode::FAILURE;
+                }
+                cfg.rider_target_change = Some((f[0], f[1] as f32));
+                i += 2;
+            }
+            "--tumble" => {
+                cfg.tumble = true;
+                i += 1;
+            }
+            "--pose-out" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --pose-out needs a path");
+                    return ExitCode::FAILURE;
+                };
+                cfg.pose_out = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
+            "--stop-after-handoff" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --stop-after-handoff needs a number (s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.stop_after_handoff_s = Some(x);
+                i += 2;
+            }
+            "--rider-lean-lag" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --rider-lean-lag needs a number (s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_lean_lag_s = Some(x);
+                i += 2;
+            }
+            "--rider-reach" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --rider-reach needs a number (m)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_reach_m = Some(x);
+                i += 2;
+            }
+            "--rider-speed" => {
+                let Some(Ok(v)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: --rider-speed needs a number (m/s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_speed_m_s = Some(v);
+                i += 2;
+            }
+            "--speed-hold" => {
+                let Some(Ok(v)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: --speed-hold needs a number (m/s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.speed_hold_m_s = Some(v);
+                i += 2;
+            }
+            "--max-current" => {
+                let Some(Ok(a)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {
+                    eprintln!("sim-host: --max-current needs a number (amps)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.max_current_a = Some(a);
+                i += 2;
+            }
+            "--hfield-wheel-contact" => {
+                cfg.hfield_wheel_contact = true;
+                i += 1;
+            }
+            "--authority-margin" => {
+                cfg.authority_margin = match args.get(i + 1).map(String::as_str) {
+                    Some("off") => sim_host::host::MarginMode::Off,
+                    Some("warn") => sim_host::host::MarginMode::Warn,
+                    Some("limit") => sim_host::host::MarginMode::Limit,
+                    _ => {
+                        eprintln!("sim-host: --authority-margin needs off|warn|limit");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                i += 2;
+            }
+            "--rider-reacts" => {
+                cfg.rider_reacts = true;
+                i += 1;
+            }
+            "--pad-solref" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --pad-solref needs a number (seconds)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.pad_solref_s = x;
+                i += 2;
+            }
+            "--plant" => {
+                match args.get(i + 1).map(|v| sim_host::host::parse_plant_spec(v)) {
+                    Some(Ok(p)) => cfg.plant = Some(p),
+                    Some(Err(e)) => {
+                        eprintln!("sim-host: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    None => {
+                        eprintln!("sim-host: --plant needs a spec, e.g. x7 or x7,board_kg=19");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                i += 2;
+            }
+            "--tail-brake" => {
+                cfg.tail_brake = true;
+                i += 1;
+            }
+            "--tail-friction" => {
+                let Some(Ok(mu)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --tail-friction needs a number");
+                    return ExitCode::FAILURE;
+                };
+                cfg.tail_friction = Some(mu);
+                i += 2;
+            }
+            "--grade-course" => {
+                let f: Vec<f64> = args
+                    .get(i + 1)
+                    .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                    .unwrap_or_default();
+                if f.len() != 3 {
+                    eprintln!("sim-host: --grade-course needs RUNIN_M,GRADE_PCT,RADIUS_M");
+                    return ExitCode::FAILURE;
+                }
+                cfg.grade_course = Some(sim_host::host::GradeCourse {
+                    run_in_m: f[0],
+                    grade_pct: f[1],
+                    radius_m: f[2],
+                });
+                i += 2;
+            }
+            "--rider-mass" | "--board-mass" | "--kt-scale" | "--start-speed" => {
+                let flag = args[i].clone();
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: {flag} needs a number");
+                    return ExitCode::FAILURE;
+                };
+                match flag.as_str() {
+                    "--rider-mass" => cfg.rider_mass_kg = Some(x),
+                    "--board-mass" => cfg.board_mass_kg = Some(x),
+                    "--kt-scale" => cfg.kt_scale = Some(x),
+                    _ => cfg.start_speed_m_s = Some(x),
+                }
+                i += 2;
+            }
+            "--grade-ff" => {
+                cfg.grade_feedforward = true;
+                i += 1;
+            }
+            "--lean-steer" => {
+                cfg.lean_steer = true;
+                i += 1;
+            }
+            "--schedule-csv" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --schedule-csv needs a path");
+                    return ExitCode::FAILURE;
+                };
+                match sim_host::scenario::from_csv_file(std::path::Path::new(v)) {
+                    Ok(sched) => cfg.scripted_scenario = Some(sched),
+                    Err(e) => {
+                        eprintln!("sim-host: --schedule-csv {v}: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                i += 2;
+            }
             "--state-out-addr" => {
                 let Some(v) = args.get(i + 1) else {
                     eprintln!("sim-host: --state-out-addr needs a value");
@@ -147,10 +444,11 @@ fn main() -> ExitCode {
                 cfg.estimator_aiding = match v.as_str() {
                     "command-feedforward" => sim_host::host::EstimatorAiding::CommandFeedforward,
                     "wheel-odometry" => sim_host::host::EstimatorAiding::WheelOdometry,
+                    "grade-aware" => sim_host::host::EstimatorAiding::GradeAware,
                     other => {
                         eprintln!(
                             "sim-host: unknown --estimator-aiding '{other}' \
-                             (want: command-feedforward, wheel-odometry)"
+                             (want: command-feedforward, wheel-odometry, grade-aware)"
                         );
                         return ExitCode::FAILURE;
                     }

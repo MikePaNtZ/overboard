@@ -66,6 +66,23 @@ extern "C" {
     fn plant_mujoco_set_dof_damping(model: *mut c_void, dofadr: c_int, damping: f64);
     fn plant_mujoco_set_qpos_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
+    fn plant_mujoco_body_mocapid(model: *mut c_void, body_id: c_int) -> c_int;
+    fn plant_mujoco_set_mocap(
+        data: *mut c_void,
+        mocap_id: c_int,
+        pos: *const f64,
+        quat: *const f64,
+    );
+    fn plant_mujoco_eq_id(model: *mut c_void, name: *const c_char) -> c_int;
+    fn plant_mujoco_set_eq_active(data: *mut c_void, eq_id: c_int, on: c_int);
+    fn plant_mujoco_body_mass(model: *mut c_void, body_id: c_int) -> f64;
+    fn plant_mujoco_set_body_mass(
+        model: *mut c_void,
+        data: *mut c_void,
+        body_id: c_int,
+        mass: f64,
+        inertia: *const f64,
+    );
 }
 
 /// The linked libmujoco's own `mj_versionString()`.
@@ -354,6 +371,16 @@ impl Plant {
         unsafe { plant_mujoco_set_gravity(self.model, g.as_ptr()) };
     }
 
+    /// Sets gravity at any time, including mid-run. For a grade that follows
+    /// the board's position on a flat plane (sim-host `--grade-course`): the
+    /// caller changes it a little every cycle, as the board moves along the
+    /// profile, so each change is small. [`Plant::set_gravity`] stays the
+    /// guarded setter for a constant incline.
+    pub fn set_gravity_profiled(&mut self, g: [f64; 3]) {
+        // SAFETY: see `gravity`; `g` is 3 doubles the shim only reads.
+        unsafe { plant_mujoco_set_gravity(self.model, g.as_ptr()) };
+    }
+
     /// `mj_forward` -- issue #107 (I1c) AC8, carried forward from I1b. Every
     /// CONTROLLED Python scenario calls this exactly once, right after
     /// building its `mjData` and before its first `mj_step`, to populate
@@ -434,6 +461,61 @@ impl Plant {
         } else {
             Some(id as usize)
         }
+    }
+
+    /// The index of equality constraint `name`, or `None`.
+    pub fn eq_id(&self, name: &str) -> Option<usize> {
+        let name_c = CString::new(name).expect("equality name must not contain a NUL byte");
+        // SAFETY: see `sensor_adr_dim`.
+        let id = unsafe { plant_mujoco_eq_id(self.model, name_c.as_ptr()) };
+        (id >= 0).then_some(id as usize)
+    }
+
+    /// Switches equality constraint `eq_id` on or off (`mjData::eq_active`).
+    pub fn set_eq_active(&mut self, eq_id: usize, on: bool) {
+        // SAFETY: `eq_id` came from `eq_id()`, so it is in range.
+        unsafe { plant_mujoco_set_eq_active(self.data, eq_id as c_int, on as c_int) };
+    }
+
+    /// `mjModel::body_mass[body_id]`, kg.
+    pub fn body_mass(&self, body_id: usize) -> f64 {
+        // SAFETY: `body_id` came from `body_id()`, so it is in range.
+        unsafe { plant_mujoco_body_mass(self.model, body_id as c_int) }
+    }
+
+    /// Sets a body's mass and principal inertia during a run (sim-host
+    /// `--tumble` moves the rider's mass off the board at a fall), then
+    /// recomputes the model constants.
+    pub fn set_body_mass(&mut self, body_id: usize, mass: f64, inertia: [f64; 3]) {
+        // SAFETY: `body_id` came from `body_id()`; `inertia` is 3 doubles.
+        unsafe {
+            plant_mujoco_set_body_mass(
+                self.model,
+                self.data,
+                body_id as c_int,
+                mass,
+                inertia.as_ptr(),
+            )
+        };
+    }
+
+    /// The mocap index of body `name`, or `None` if there is no such body or
+    /// it is not a mocap body.
+    pub fn mocap_id(&self, name: &str) -> Option<usize> {
+        let body = self.body_id(name)?;
+        // SAFETY: `body` was just resolved against this same model.
+        let id = unsafe { plant_mujoco_body_mocapid(self.model, body as c_int) };
+        (id >= 0).then_some(id as usize)
+    }
+
+    /// Sets a mocap body's pose (position, quaternion w-x-y-z). It takes
+    /// effect at the next step.
+    pub fn set_mocap_pose(&mut self, mocap_id: usize, pos: [f64; 3], quat: [f64; 4]) {
+        // SAFETY: `self.data` is owned; `mocap_id` came from `mocap_id()` on
+        // this model, and the shim only reads 3 + 4 doubles.
+        unsafe {
+            plant_mujoco_set_mocap(self.data, mocap_id as c_int, pos.as_ptr(), quat.as_ptr())
+        };
     }
 
     /// `mjModel`'s actuator id for `name`, or `None` if there is no such

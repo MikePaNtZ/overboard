@@ -56,6 +56,14 @@ pub const STATE_FLAG_AUTHORITY_WARNING: u16 = 1 << 3;
 /// client that misses the first packet takes over on the next one.
 pub const STATE_FLAG_HANDOFF: u16 = 1 << 4;
 
+/// `StateOut::flags` bit 5 -- rider warning, pulsed: the authority margin is
+/// above 0.70 (`control_core::AuthorityMargin`). A client plays a pulsed buzz
+/// or rumble. Set only with `--authority-margin`.
+pub const STATE_FLAG_MARGIN_PULSE: u16 = 1 << 5;
+/// `StateOut::flags` bit 6 -- rider warning, solid: margin above 0.85. When
+/// set, bit 5 is clear.
+pub const STATE_FLAG_MARGIN_SOLID: u16 = 1 << 6;
+
 /// `InputIn::flags` bit 0.
 pub const INPUT_FLAG_ARM: u16 = 1 << 0;
 /// `InputIn::flags` bit 1.

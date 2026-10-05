@@ -1,0 +1,313 @@
+{
+  "note": "CONCEPT look, proxy geometry. Colours are sRGB hex. Emission strength is Blender W/m2-style Principled strength: use it as a relative brightness.",
+  "frame": "metres, Z-up, +X nose, origin = ground point under the axle; wheel body rotates about (0, 0, 0.146) on Y",
+  "materials": {
+    "kc_chip": {
+      "base_color": "#080808",
+      "metallic": 0.0,
+      "roughness": 0.45,
+      "clearcoat": 0.15,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "kc_steel": {
+      "base_color": "#8C8F94",
+      "metallic": 1.0,
+      "roughness": 0.32,
+      "clearcoat": 0.0,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "led_amber": {
+      "base_color": "#FFB23F",
+      "metallic": 0.0,
+      "roughness": 0.4,
+      "clearcoat": 0.0,
+      "emission_color": "#FFDA88",
+      "emission_strength": 1.5
+    },
+    "sc_fender": {
+      "base_color": "#20365E",
+      "metallic": 0.2,
+      "roughness": 0.38,
+      "clearcoat": 0.15,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "sc_front": {
+      "base_color": "#FFE4C4",
+      "metallic": 0.0,
+      "roughness": 0.4,
+      "clearcoat": 0.0,
+      "emission_color": "#FFF3E3",
+      "emission_strength": 1.2
+    },
+    "sc_grip": {
+      "base_color": "#0E141B",
+      "metallic": 0.0,
+      "roughness": 0.75,
+      "clearcoat": 0.0,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "sc_led": {
+      "base_color": "#5FC4CB",
+      "metallic": 0.0,
+      "roughness": 0.4,
+      "clearcoat": 0.0,
+      "emission_color": "#A4E3E7",
+      "emission_strength": 0.9
+    },
+    "sc_lip": {
+      "base_color": "#45C9D1",
+      "metallic": 0.4,
+      "roughness": 0.35,
+      "clearcoat": 0.2,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "sc_rear": {
+      "base_color": "#FF5A4A",
+      "metallic": 0.0,
+      "roughness": 0.4,
+      "clearcoat": 0.0,
+      "emission_color": "#FFA093",
+      "emission_strength": 1.0
+    },
+    "sc_ring": {
+      "base_color": "#5FC4CB",
+      "metallic": 0.0,
+      "roughness": 0.4,
+      "clearcoat": 0.0,
+      "emission_color": "#A4E3E7",
+      "emission_strength": 0.9
+    },
+    "sc_rubber": {
+      "base_color": "#181818",
+      "metallic": 0.0,
+      "roughness": 0.85,
+      "clearcoat": 0.0,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_axle": {
+      "base_color": "#45C9D1",
+      "metallic": 0.85,
+      "roughness": 0.3,
+      "clearcoat": 0.3,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_box": {
+      "base_color": "#1B2733",
+      "metallic": 0.55,
+      "roughness": 0.42,
+      "clearcoat": 0.2,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_bumper": {
+      "base_color": "#0E141B",
+      "metallic": 0.0,
+      "roughness": 0.55,
+      "clearcoat": 0.1,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_cap": {
+      "base_color": "#93A0AD",
+      "metallic": 1.0,
+      "roughness": 0.28,
+      "clearcoat": 0.0,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_guard": {
+      "base_color": "#FFB23F",
+      "metallic": 0.3,
+      "roughness": 0.35,
+      "clearcoat": 0.3,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_hub": {
+      "base_color": "#243241",
+      "metallic": 0.85,
+      "roughness": 0.32,
+      "clearcoat": 0.3,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_killcap": {
+      "base_color": "#FFB23F",
+      "metallic": 0.0,
+      "roughness": 0.3,
+      "clearcoat": 0.6,
+      "emission_color": null,
+      "emission_strength": 0.0
+    },
+    "th_rail": {
+      "base_color": "#20365E",
+      "metallic": 0.85,
+      "roughness": 0.3,
+      "clearcoat": 0.45,
+      "emission_color": null,
+      "emission_strength": 0.0
+    }
+  },
+  "files": [
+    {
+      "file": "frame__kc_chip.stl",
+      "body": "frame",
+      "material": "kc_chip",
+      "objects": 1
+    },
+    {
+      "file": "wheel__kc_chip.stl",
+      "body": "wheel",
+      "material": "kc_chip",
+      "objects": 3
+    },
+    {
+      "file": "frame__kc_steel.stl",
+      "body": "frame",
+      "material": "kc_steel",
+      "objects": 1
+    },
+    {
+      "file": "wheel__kc_steel.stl",
+      "body": "wheel",
+      "material": "kc_steel",
+      "objects": 13
+    },
+    {
+      "file": "frame__led_amber.stl",
+      "body": "frame",
+      "material": "led_amber",
+      "objects": 4
+    },
+    {
+      "file": "frame__sc_fender.stl",
+      "body": "frame",
+      "material": "sc_fender",
+      "objects": 1
+    },
+    {
+      "file": "frame__sc_front.stl",
+      "body": "frame",
+      "material": "sc_front",
+      "objects": 1
+    },
+    {
+      "file": "frame__sc_grip.stl",
+      "body": "frame",
+      "material": "sc_grip",
+      "objects": 2
+    },
+    {
+      "file": "frame__sc_led.stl",
+      "body": "frame",
+      "material": "sc_led",
+      "objects": 6
+    },
+    {
+      "file": "frame__sc_lip.stl",
+      "body": "frame",
+      "material": "sc_lip",
+      "objects": 2
+    },
+    {
+      "file": "frame__sc_rear.stl",
+      "body": "frame",
+      "material": "sc_rear",
+      "objects": 1
+    },
+    {
+      "file": "wheel__sc_ring.stl",
+      "body": "wheel",
+      "material": "sc_ring",
+      "objects": 2
+    },
+    {
+      "file": "wheel__sc_rubber.stl",
+      "body": "wheel",
+      "material": "sc_rubber",
+      "objects": 1
+    },
+    {
+      "file": "frame__th_axle.stl",
+      "body": "frame",
+      "material": "th_axle",
+      "objects": 2
+    },
+    {
+      "file": "frame__th_box.stl",
+      "body": "frame",
+      "material": "th_box",
+      "objects": 14
+    },
+    {
+      "file": "frame__th_bumper.stl",
+      "body": "frame",
+      "material": "th_bumper",
+      "objects": 6
+    },
+    {
+      "file": "wheel__th_cap.stl",
+      "body": "wheel",
+      "material": "th_cap",
+      "objects": 2
+    },
+    {
+      "file": "frame__th_guard.stl",
+      "body": "frame",
+      "material": "th_guard",
+      "objects": 17
+    },
+    {
+      "file": "wheel__th_hub.stl",
+      "body": "wheel",
+      "material": "th_hub",
+      "objects": 1
+    },
+    {
+      "file": "frame__th_killcap.stl",
+      "body": "frame",
+      "material": "th_killcap",
+      "objects": 1
+    },
+    {
+      "file": "frame__th_rail.stl",
+      "body": "frame",
+      "material": "th_rail",
+      "objects": 6
+    }
+  ],
+  "leds": {
+    "L1": {
+      "material": "sc_front",
+      "meaning": "front bar, warm white headlight; on whenever the board is powered",
+      "present": true
+    },
+    "L2": {
+      "material": "sc_rear",
+      "meaning": "rear bar, red tail; brake flash when motor current < 0",
+      "present": true
+    },
+    "L3": {
+      "material": "sc_led",
+      "meaning": "teal underglow strip under each rail",
+      "present": true
+    },
+    "L4": {
+      "material": "sc_ring",
+      "meaning": "teal hub rings",
+      "present": true
+    },
+    "L5": {
+      "material": "led_amber",
+      "meaning": "amber segments at each end of both bars: rider warning (pulsed / solid per the controls state flags)",
+      "present": true
+    }
+  }
+}

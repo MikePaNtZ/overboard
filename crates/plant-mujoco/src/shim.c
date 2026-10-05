@@ -259,3 +259,43 @@ void plant_mujoco_set_qpos_range(void* data, int adr, const double* src, int n) 
 void plant_mujoco_set_qvel_range(void* data, int adr, const double* src, int n) {
   memcpy(((mjData*)data)->qvel + adr, src, (size_t)n * sizeof(double));
 }
+
+// Mocap body pose, for sim-host's smooth wheel contact (`wheel_ground`).
+// Returns -1 for a body that is not a mocap body.
+int plant_mujoco_body_mocapid(void* model, int body_id) {
+  return ((const mjModel*)model)->body_mocapid[body_id];
+}
+
+// Ownership: `pos` 3 doubles, `quat` 4 doubles (w, x, y, z), only read.
+void plant_mujoco_set_mocap(void* data, int mocap_id, const double* pos, const double* quat) {
+  memcpy(((mjData*)data)->mocap_pos + 3 * mocap_id, pos, 3 * sizeof(double));
+  memcpy(((mjData*)data)->mocap_quat + 4 * mocap_id, quat, 4 * sizeof(double));
+}
+
+// --- sim-host `--tumble`: release the rider as a free body after a fall ----
+int plant_mujoco_eq_id(void* model, const char* name) {
+  return mj_name2id((const mjModel*)model, mjOBJ_EQUALITY, name);
+}
+
+void plant_mujoco_set_eq_active(void* data, int eq_id, int on) {
+  ((mjData*)data)->eq_active[eq_id] = (mjtByte)(on != 0);
+}
+
+double plant_mujoco_body_mass(void* model, int body_id) {
+  return ((const mjModel*)model)->body_mass[body_id];
+}
+
+// Mass and principal inertia of one body, then mj_setConst so the derived
+// constants (subtree masses, constraint weights) follow. mj_setConst writes
+// qpos0 into the mjData it is given, so it gets a scratch mjData, never the
+// running one (that moved the board to the origin mid-run).
+void plant_mujoco_set_body_mass(void* model, void* data, int body_id, double mass,
+                                const double* inertia) {
+  (void)data;
+  mjModel* m = (mjModel*)model;
+  m->body_mass[body_id] = mass;
+  for (int k = 0; k < 3; k++) m->body_inertia[3 * body_id + k] = inertia[k];
+  mjData* scratch = mj_makeData(m);
+  mj_setConst(m, scratch);
+  mj_deleteData(scratch);
+}

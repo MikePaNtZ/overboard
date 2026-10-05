@@ -551,3 +551,93 @@ mod tests {
         );
     }
 }
+
+/// Reads a schedule from a CSV file: one row per line,
+/// `start_s,end_s,weight_shift_fore_aft,weight_shift_lateral,steer[,label]`.
+/// Blank lines and lines that start with `#` are skipped.
+///
+/// Exists so a scripted run (the downhill carve is the first) can be tuned
+/// without a rebuild per attempt. The schedule is leaked to get the
+/// `'static` lifetime [`Schedule`] requires; a process reads one schedule
+/// once, so the leak is bounded.
+pub fn from_csv_file(path: &std::path::Path) -> Result<Schedule, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    from_csv_str(&text)
+}
+
+/// The parser behind [`from_csv_file`]. Rows must be in time order, must not
+/// overlap, and every stick value must be in `[-1, 1]`.
+pub fn from_csv_str(text: &str) -> Result<Schedule, String> {
+    let mut rows: Vec<Row> = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = line.splitn(6, ',').map(str::trim).collect();
+        if f.len() < 5 {
+            return Err(format!(
+                "line {}: want 5 or 6 fields, got {}",
+                n + 1,
+                f.len()
+            ));
+        }
+        let num = |i: usize| -> Result<f64, String> {
+            f[i].parse::<f64>()
+                .map_err(|_| format!("line {}: field {} '{}' is not a number", n + 1, i + 1, f[i]))
+        };
+        let (t0, t1) = (num(0)?, num(1)?);
+        let (fa, lat, steer) = (num(2)?, num(3)?, num(4)?);
+        if t1 <= t0 {
+            return Err(format!("line {}: end {t1} is not after start {t0}", n + 1));
+        }
+        if let Some(prev) = rows.last() {
+            if t0 < prev.1 {
+                return Err(format!(
+                    "line {}: starts at {t0}, before the last row ends",
+                    n + 1
+                ));
+            }
+        }
+        for v in [fa, lat, steer] {
+            if !(-1.0..=1.0).contains(&v) {
+                return Err(format!(
+                    "line {}: stick value {v} is outside [-1, 1]",
+                    n + 1
+                ));
+            }
+        }
+        let label: &'static str = Box::leak(
+            f.get(5)
+                .copied()
+                .unwrap_or("csv row")
+                .to_string()
+                .into_boxed_str(),
+        );
+        rows.push((t0, t1, fa as f32, lat as f32, steer as f32, label));
+    }
+    if rows.is_empty() {
+        return Err("no rows".to_string());
+    }
+    Ok(Box::leak(rows.into_boxed_slice()))
+}
+
+#[cfg(test)]
+mod csv_tests {
+    use super::from_csv_str;
+
+    #[test]
+    fn parses_rows_and_skips_comments() {
+        let s =
+            from_csv_str("# t0,t1,fa,lat,steer\n0,1,0,0,0,settle\n\n1,3,0.3,-0.5,0.5\n").unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[1], (1.0, 3.0, 0.3, -0.5, 0.5, "csv row"));
+    }
+
+    #[test]
+    fn rejects_overlap_and_out_of_range_sticks() {
+        assert!(from_csv_str("0,2,0,0,0\n1,3,0,0,0\n").is_err());
+        assert!(from_csv_str("0,1,1.5,0,0\n").is_err());
+        assert!(from_csv_str("").is_err());
+    }
+}

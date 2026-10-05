@@ -245,12 +245,24 @@ pub const DEFAULT_KERB: KerbSpec = KerbSpec {
 /// The path is supplied by the operator rather than hardcoded, so this crate
 /// carries no build-time dependency on a sibling checkout -- the coupling is a
 /// data contract, exactly as the repo-boundary rule requires.
+#[derive(Debug, Clone, Copy)]
+pub struct TerrainBounds {
+    pub xmin: f64,
+    pub xmax: f64,
+    pub ymin: f64,
+    pub ymax: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerrainSpec {
     pub hfield_path: PathBuf,
     pub nrow: usize,
     pub ncol: usize,
-    pub half_extent_m: f64,
+    /// Half extent of the field, metres. `x` spans the columns (world X) and
+    /// `y` spans the rows (world Y). A square field sets both to the same
+    /// value, which is the only shape older metadata describes.
+    pub half_extent_x_m: f64,
+    pub half_extent_y_m: f64,
     /// Real-world elevation of the grid's minimum, metres. MuJoCo normalises
     /// hfield file data to [0,1], so the geom has to be placed at this value
     /// for a post to land at the height it was measured at.
@@ -261,6 +273,64 @@ pub struct TerrainSpec {
     /// on real terrain the board has to be lifted onto the surface or it
     /// starts the run embedded in the road.
     pub z_at_origin_m: f64,
+    /// Where the board spawns, metres, and the terrain height there. The frame
+    /// (and so the map to Unreal) does not move. The pose is resolved from, in
+    /// order of precedence: the `--spawn-*` flags, the metadata `"spawn"`
+    /// object, then the default (x from `--spawn-x`, y 0, yaw 0).
+    pub spawn_x_m: f64,
+    pub spawn_y_m: f64,
+    /// Spawn heading about +Z, radians. 0 is the shared model's heading
+    /// (board forward is body -X).
+    pub spawn_yaw_rad: f64,
+    pub z_at_spawn_m: f64,
+    /// Drivable area, metres, from the metadata `"bounds"` object. `Some`
+    /// replaces the corridor-clamp constants for this run; `None` keeps the
+    /// default corridor behaviour. See [`CORRIDOR_X_MIN_M`].
+    pub bounds: Option<TerrainBounds>,
+}
+
+/// Finds the object body of `"key": { ... }` in `s`, returning the text
+/// between the matching braces. Used so a flat scalar scan of a nested object
+/// (e.g. the `"x"` inside `"spawn"`) is bounded to that object and cannot pick
+/// a key of another name at the top level.
+fn find_object_body<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let at = s.find(&needle)?;
+    let rest = &s[at + needle.len()..];
+    let open = rest.find('{')?;
+    let bytes = rest.as_bytes();
+    let mut depth = 0usize;
+    for i in open..bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[open + 1..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Scans `s` for `"key": NUMBER` and parses the number. `None` when the key is
+/// absent. Deliberately a tiny scan rather than a serde dependency: a handful
+/// of scalars out of a file whose schema this crate does not own.
+fn scan_scalar(s: &str, key: &str) -> Option<f64> {
+    let needle = format!("\"{key}\"");
+    let at = s.find(&needle)?;
+    let rest = &s[at + needle.len()..];
+    let rest = rest
+        .trim_start()
+        .strip_prefix(':')
+        .unwrap_or(rest)
+        .trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
+        .unwrap_or(rest.len());
+    rest[..end].parse::<f64>().ok()
 }
 
 /// Reads `metadata.json` from the same directory as the hfield binary, and
@@ -270,7 +340,27 @@ pub struct TerrainSpec {
 /// the rasteriser's parameters while the `.bin` carries its own `nrow`/`ncol`,
 /// and a stale metadata file beside a fresh binary would otherwise place the
 /// terrain at the wrong scale with nothing to say so.
-fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
+///
+/// # Level metadata
+///
+/// Required scalars: `nrow`, `ncol`, `half_extent_m`, `z_min_m`, `z_max_m`.
+/// Optional keys, each backward compatible (absent = today's behaviour):
+/// - `half_extent_x_m`, `half_extent_y_m`: a rectangular field. `x` spans the
+///   columns (world X), `y` spans the rows (world Y). Absent = `half_extent_m`
+///   on both axes (a square field).
+/// - `spawn`: `{"x": m, "y": m, "yaw_deg": deg}`, the default spawn pose.
+///   `yaw_deg` 0 is the shared model's heading (board forward is body -X).
+/// - `bounds`: `{"xmin","xmax","ymin","ymax"}` metres, the drivable area. When
+///   present it replaces the corridor-clamp constants for this run.
+///
+/// The spawn pose precedence is: the `--spawn-*` flags, then `spawn`, then the
+/// default (x from `--spawn-x`, y 0, yaw 0).
+fn read_terrain_spec(
+    hfield_path: &Path,
+    spawn_x_cli: Option<f64>,
+    spawn_y_cli: Option<f64>,
+    spawn_yaw_deg_cli: Option<f64>,
+) -> Result<TerrainSpec, HostError> {
     let dir = hfield_path.parent().unwrap_or(Path::new("."));
     let meta_path = dir.join("metadata.json");
     let meta_raw = std::fs::read_to_string(&meta_path).map_err(|e| {
@@ -284,28 +374,12 @@ fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
         ))
     })?;
 
-    // Deliberately a tiny scan rather than a serde dependency: six scalars out
-    // of a file whose schema this crate does not own.
+    // A required scalar: like `scan_scalar`, but errors rather than returning
+    // `None`, with a message naming the file and the key.
     let pick = |key: &str| -> Result<f64, HostError> {
-        let needle = format!("\"{key}\"");
-        let at = meta_raw.find(&needle).ok_or_else(|| {
+        scan_scalar(&meta_raw, key).ok_or_else(|| {
             HostError::Io(std::io::Error::other(format!(
-                "sim-host: {} has no \"{key}\"",
-                meta_path.display()
-            )))
-        })?;
-        let rest = &meta_raw[at + needle.len()..];
-        let rest = rest
-            .trim_start()
-            .strip_prefix(':')
-            .unwrap_or(rest)
-            .trim_start();
-        let end = rest
-            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
-            .unwrap_or(rest.len());
-        rest[..end].parse::<f64>().map_err(|_| {
-            HostError::Io(std::io::Error::other(format!(
-                "sim-host: {} has a non-numeric \"{key}\"",
+                "sim-host: {} has no numeric \"{key}\"",
                 meta_path.display()
             )))
         })
@@ -314,8 +388,41 @@ fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
     let nrow = pick("nrow")? as usize;
     let ncol = pick("ncol")? as usize;
     let half_extent_m = pick("half_extent_m")?;
+    let half_extent_x_m = scan_scalar(&meta_raw, "half_extent_x_m").unwrap_or(half_extent_m);
+    let half_extent_y_m = scan_scalar(&meta_raw, "half_extent_y_m").unwrap_or(half_extent_m);
     let z_min_m = pick("z_min_m")?;
     let z_max_m = pick("z_max_m")?;
+
+    // Spawn pose: flags, then the metadata "spawn" object, then the default.
+    let spawn = find_object_body(&meta_raw, "spawn");
+    let meta_spawn = |key: &str| spawn.and_then(|b| scan_scalar(b, key));
+    let spawn_x_m = spawn_x_cli.or_else(|| meta_spawn("x")).unwrap_or(0.0);
+    let spawn_y_m = spawn_y_cli.or_else(|| meta_spawn("y")).unwrap_or(0.0);
+    let spawn_yaw_rad = spawn_yaw_deg_cli
+        .or_else(|| meta_spawn("yaw_deg"))
+        .unwrap_or(0.0)
+        .to_radians();
+
+    // Drivable bounds: all four keys are required when the object is present.
+    let bounds = match find_object_body(&meta_raw, "bounds") {
+        Some(b) => {
+            let get = |key: &str| -> Result<f64, HostError> {
+                scan_scalar(b, key).ok_or_else(|| {
+                    HostError::Io(std::io::Error::other(format!(
+                        "sim-host: {} \"bounds\" has no numeric \"{key}\"",
+                        meta_path.display()
+                    )))
+                })
+            };
+            Some(TerrainBounds {
+                xmin: get("xmin")?,
+                xmax: get("xmax")?,
+                ymin: get("ymin")?,
+                ymax: get("ymax")?,
+            })
+        }
+        None => None,
+    };
 
     let raw = std::fs::read(hfield_path).map_err(|e| {
         HostError::Io(std::io::Error::new(
@@ -360,14 +467,41 @@ fn read_terrain_spec(hfield_path: &Path) -> Result<TerrainSpec, HostError> {
     let z_at_origin_m =
         f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f64;
 
+    // The nearest post to the spawn point, per axis. A square field with
+    // y = 0 lands on the centre row, the same post the old single-axis lookup
+    // read, so a square level is unchanged.
+    let spacing_x_m = 2.0 * half_extent_x_m / (ncol as f64 - 1.0);
+    let spacing_y_m = 2.0 * half_extent_y_m / (nrow as f64 - 1.0);
+    let col = (ncol / 2) as i64 + (spawn_x_m / spacing_x_m).round() as i64;
+    let row = (nrow / 2) as i64 + (spawn_y_m / spacing_y_m).round() as i64;
+    if col < 0 || col >= ncol as i64 {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: spawn x {spawn_x_m} m is outside the terrain (half-extent {half_extent_x_m} m)"
+        ))));
+    }
+    if row < 0 || row >= nrow as i64 {
+        return Err(HostError::Io(std::io::Error::other(format!(
+            "sim-host: spawn y {spawn_y_m} m is outside the terrain (half-extent {half_extent_y_m} m)"
+        ))));
+    }
+    let off = 8 + (row as usize * ncol + col as usize) * 4;
+    let z_at_spawn_m =
+        f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as f64;
+
     Ok(TerrainSpec {
         hfield_path: hfield_path.to_path_buf(),
         nrow,
         ncol,
-        half_extent_m,
+        half_extent_x_m,
+        half_extent_y_m,
         z_min_m,
         z_max_m,
         z_at_origin_m,
+        spawn_x_m,
+        spawn_y_m,
+        spawn_yaw_rad,
+        z_at_spawn_m,
+        bounds,
     })
 }
 
@@ -401,12 +535,524 @@ const KERB_CENTRE_X_M: f64 = (CORRIDOR_X_MAX_M + CORRIDOR_X_MIN_M) / 2.0;
 /// touched; the depth exists so the board cannot clip through the far side.
 const KERB_HALF_DEPTH_M: f64 = 0.6;
 
+/// Rider centre of mass above the deck pivot (the ballast carrier), m.
+const RIDER_COM_HEIGHT_M: f32 = 0.75;
+/// Pad mode (fable-oracle, 2026-10-04): the tail pad is on the road. Entered
+/// at this nose-up deck pitch, at any speed.
+const PAD_MODE_ENTER_RAD: f32 = 17.0 * std::f32::consts::PI / 180.0;
+/// Pad mode starts only below this speed, m/s: it is for the stop. A tail
+/// drag at speed keeps full motor braking (damping only there removed the
+/// braking, and the board ran on and nose-struck after the exit).
+const PAD_MODE_SPEED_M_S: f32 = 1.0;
+/// Pad mode also ends when the rider leans forward past this stick: the
+/// rider asks to go, and the full law lifts the nose off the pad.
+const PAD_MODE_GO_STICK: f32 = 0.2;
+/// Pad mode starts only when the deck is nearly still: a board resting on
+/// its pad does not rotate. In the game a deck passing 17 deg while pitching
+/// fast nose-up (no pad contact) entered pad mode, lost the law, and fell back
+/// 28 ms later.
+const PAD_MODE_REST_RATE_RAD_S: f32 = 0.5;
+/// Pad mode ends below this pitch (hysteresis). Raise it toward 15 deg if a
+/// pull-away nose-strikes, before any gain changes.
+const PAD_MODE_EXIT_RAD: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// Pad mode: damping only, tau = -Kd * pitch rate, limited to this, N*m
+/// (about 18 A). With the rider's centre of mass near the tail pad's tipping
+/// edge, any larger nose-up torque pivots the board over the tail.
+const PAD_MODE_TORQUE_LIMIT_NM: f32 = 12.0;
+/// After pad mode, the grade load is not learned for this long, s: the deck
+/// dropping back to level is not a grade.
+const PAD_MODE_GRADE_HOLD_S: f64 = 1.0;
+
+/// Ankle pivot height above the axle, m (the deck top).
+const ANKLE_PIVOT_Z_M: f64 = 0.06;
+/// Rider centre-of-pressure reach about the ankle, m: the ankle torque limit
+/// is m g times this.
+const ANKLE_COP_M: f32 = 0.12;
+
+/// `--rider-reach-back`: the full back reach applies at or above this speed.
+const BACK_REACH_FULL_SPEED_M_S: f32 = 2.0;
+
+/// `--foot-torque`: share of the feet's torque limit that full fore/aft
+/// stick asks for as heel or toe pressure (the rest balances the body).
+const FOOT_TORQUE_SHARE: f32 = 0.8;
+
+/// `--ankle-hinge`: puts the rider's slide carrier on a pitch hinge at deck
+/// level (`rider_ankle`, joint `ankle_pitch`, torque motor `ankle_pitch`).
+fn splice_ankle_hinge(xml: &str, rigid: bool) -> Result<String, HostError> {
+    let bad = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --ankle-hinge: {what}"
+        )))
+    };
+    let open = r#"<body name="ballast_fa_carrier" pos="0 0 0.75">"#;
+    let camera = r#"<camera name="side""#;
+    if xml.matches(open).count() != 1
+        || xml.matches(camera).count() != 1
+        || xml.matches("</actuator>").count() != 1
+    {
+        return Err(bad(
+            "rider carrier, side camera or actuator block not found once",
+        ));
+    }
+    let carrier_z = 0.75 - ANKLE_PIVOT_Z_M;
+    // The bracket's stiff spring is a joint stiffness, integrated inside the
+    // step: as a host torque held for 2 ms it was unstable (deck-vs-rider mode
+    // about 450 rad/s) and blew up at once.
+    let joint_extra = if rigid {
+        r#"stiffness="1e5" damping="300""#
+    } else {
+        r#"damping="0""#
+    };
+    let mut out = xml.replace(
+        open,
+        &format!(
+            r#"<body name="rider_ankle" pos="0 0 {ANKLE_PIVOT_Z_M}">
+        <joint name="ankle_pitch" type="hinge" axis="0 1 0" pos="0 0 0" {joint_extra}/>
+        <inertial pos="0 0 0" mass="0.05" diaginertia="1e-4 1e-4 1e-4"/>
+      <body name="ballast_fa_carrier" pos="0 0 {carrier_z:.4}">"#
+        ),
+    );
+    // Close the extra body before the side camera (the carrier's sibling).
+    out = out.replace(camera, &format!("</body>\n      {camera}"));
+    out = out.replace(
+        "</actuator>",
+        r#"  <motor name="ankle_pitch" joint="ankle_pitch" gear="1" ctrllimited="false"/>
+  </actuator>"#,
+    );
+    Ok(out)
+}
+
+/// The quaternion (w, x, y, z) for intrinsic yaw (Z), then pitch (Y), then
+/// roll (X): R = Rz(yaw) * Ry(pitch) * Rx(roll). Computed here so an obstacle's
+/// orientation does not depend on a MuJoCo euler-sequence default.
+fn zyx_intrinsic_quat(yaw: f64, pitch: f64, roll: f64) -> [f64; 4] {
+    let (sy, cy) = (0.5 * yaw).sin_cos();
+    let (sp, cp) = (0.5 * pitch).sin_cos();
+    let (sr, cr) = (0.5 * roll).sin_cos();
+    [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]
+}
+
+/// `--obstacles`: fixed obstacle geoms from the CSV
+/// (type,id,x,y,lx,ly,lz,yaw_deg[,pitch_deg,roll_deg,z_m]; full sizes),
+/// standing on the terrain (or z = 0 without one). Types: `cone`, `debris`
+/// and the generic grey `box` (ramps, planks, kerbs). `z_m` is the box bottom
+/// before rotation; absent, the bottom sits on the terrain. Pitch and roll
+/// apply to `box` and `debris` only. Collision bits 1 and 2: the wheel and
+/// pads (bit 2) and the bumpers and rider (bit 1) all hit them.
+fn splice_obstacles(
+    xml: &str,
+    csv: &Path,
+    surface: Option<&crate::ground::GroundSurface>,
+) -> Result<String, HostError> {
+    let bad = |what: String| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --obstacles: {what}"
+        )))
+    };
+    if xml.matches("</worldbody>").count() != 1 {
+        return Err(bad("no single </worldbody>".into()));
+    }
+    let text = std::fs::read_to_string(csv)?;
+    let mut geoms = String::new();
+    let mut n = 0;
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        // 8 columns is the original format; columns 9-11 (pitch_deg, roll_deg,
+        // z_m) are optional and may each be empty.
+        if !(8..=11).contains(&f.len()) {
+            return Err(bad(format!("expected 8 to 11 fields: {line}")));
+        }
+        let num = |i: usize| {
+            f[i].parse::<f64>()
+                .map_err(|_| bad(format!("bad number '{}' in: {line}", f[i])))
+        };
+        // An optional numeric column: absent or empty = `None`.
+        let opt = |i: usize| -> Result<Option<f64>, HostError> {
+            match f.get(i) {
+                None | Some(&"") => Ok(None),
+                Some(_) => Ok(Some(num(i)?)),
+            }
+        };
+        let (x, y, lx, ly, lz, yaw) = (num(2)?, num(3)?, num(4)?, num(5)?, num(6)?, num(7)?);
+        let (pitch, roll, z_bottom) = (opt(8)?.unwrap_or(0.0), opt(9)?.unwrap_or(0.0), opt(10)?);
+        let z0 = surface.map_or(0.0, |g| g.height(x, y));
+        let id = if f[1].is_empty() {
+            format!("obstacle{n}")
+        } else {
+            f[1].to_string()
+        };
+        let bits = r#"contype="3" conaffinity="3" condim="3" friction="0.8 0.005 0.0001""#;
+        // The box centre z: on the terrain by default, else at z_m (the box
+        // BOTTOM before rotation) plus half the height.
+        let pos_z = z_bottom.unwrap_or(z0) + lz / 2.0;
+        // Intrinsic yaw (Z), pitch (Y) then roll (X), about the box centre, as
+        // a MuJoCo quat so the result does not depend on the model's euler
+        // sequence default.
+        let q = zyx_intrinsic_quat(yaw.to_radians(), pitch.to_radians(), roll.to_radians());
+        let quat = format!(r#"quat="{:.9} {:.9} {:.9} {:.9}""#, q[0], q[1], q[2], q[3]);
+        match f[0] {
+            "cone" => {
+                // A square base and a tapered body as a cylinder of the mean
+                // radius. Pitch, roll and z_m do not apply to a cone.
+                let base = 0.03;
+                geoms.push_str(&format!(
+                    r#"<geom name="{id}_base" type="box" pos="{x} {y} {:.4}" size="{:.4} {:.4} {:.4}" rgba="0.95 0.45 0.1 1" {bits}/>
+    <geom name="{id}" type="cylinder" pos="{x} {y} {:.4}" size="{:.4} {:.4}" rgba="0.95 0.45 0.1 1" {bits}/>
+    "#,
+                    z0 + base / 2.0, lx / 2.0, ly / 2.0, base / 2.0,
+                    z0 + base + (lz - base) / 2.0, lx * 0.3, (lz - base) / 2.0,
+                ));
+            }
+            "debris" => geoms.push_str(&format!(
+                r#"<geom name="{id}" type="box" pos="{x} {y} {:.4}" {quat} size="{:.4} {:.4} {:.4}" rgba="0.35 0.3 0.25 1" {bits}/>
+    "#,
+                pos_z, lx / 2.0, ly / 2.0, lz / 2.0,
+            )),
+            // A generic grey box: ramps, planks and kerbs. Full sizes lx/ly/lz.
+            "box" => geoms.push_str(&format!(
+                r#"<geom name="{id}" type="box" pos="{x} {y} {:.4}" {quat} size="{:.4} {:.4} {:.4}" rgba="0.55 0.55 0.55 1" {bits}/>
+    "#,
+                pos_z, lx / 2.0, ly / 2.0, lz / 2.0,
+            )),
+            other => return Err(bad(format!("unknown type '{other}'"))),
+        }
+        n += 1;
+    }
+    eprintln!(
+        "sim-host: --obstacles: {n} fixed obstacles from {}",
+        csv.display()
+    );
+    Ok(xml.replace("</worldbody>", &format!("{geoms}</worldbody>")))
+}
+
+/// `--tumble`: a free two-part rider (torso and head; legs on a ball hip),
+/// parked 50 m up on a weld until a fall. Low-resolution on purpose: it shows
+/// how a rider leaves the board and slides, not a human body. It does not
+/// touch the board (contact excluded), only the road.
+fn splice_tumble_rider(xml: &str) -> Result<String, HostError> {
+    if xml.matches("</worldbody>").count() != 1 {
+        return Err(HostError::Io(std::io::Error::other(
+            "sim-host: --tumble: no single </worldbody>",
+        )));
+    }
+    // Skin on asphalt, about 0.6.
+    let f = r#"friction="0.6 0.005 0.0001" condim="3" material="rider_mat" group="0""#;
+    let body = format!(
+        r#"<body name="rider_free" pos="0 0 50">
+      <freejoint name="rider_free_j"/>
+      <inertial pos="0 0 0.2" mass="1" diaginertia="0.1 0.1 0.02"/>
+      <geom name="rider_torso" type="capsule" fromto="0 0 0.02 0 0 0.50" size="0.15" {f}/>
+      <geom name="rider_head" type="sphere" pos="0 0 0.70" size="0.11" {f}/>
+      <body name="rider_legs" pos="0 0 0">
+        <joint name="rider_hip" type="ball" limited="true" range="0 110" damping="6"/>
+        <inertial pos="0 0 -0.33" mass="1" diaginertia="0.06 0.06 0.01"/>
+        <geom name="rider_leg_f" type="capsule" fromto="0 0 0 -0.17 0 -0.62" size="0.065" {f}/>
+        <geom name="rider_leg_r" type="capsule" fromto="0 0 0 0.17 0 -0.62" size="0.065" {f}/>
+      </body>
+    </body>
+  "#
+    );
+    let tail = r#"<equality><weld name="rider_park" body1="rider_free"/></equality>
+  <contact>
+    <exclude body1="rider_free" body2="frame"/>
+    <exclude body1="rider_legs" body2="frame"/>
+    <exclude body1="rider_free" body2="wheel"/>
+    <exclude body1="rider_legs" body2="wheel"/>
+  </contact>
+"#;
+    Ok(xml.replace("</worldbody>", &format!("{body}</worldbody>\n  {tail}")))
+}
+
+/// `--rider-lean-lag`: the fore/aft weight-shift servo's time constant, s (the
+/// model's is 0.05 s: 95 kg moved 10 cm in about 0.1 s, faster than a body).
+fn splice_rider_lean_lag(xml: &str, lag: f64) -> Result<String, HostError> {
+    let bad = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --rider-lean-lag: {what}"
+        )))
+    };
+    if !(0.01..=1.0).contains(&lag) {
+        return Err(bad("lag must be 0.01..1.0 s"));
+    }
+    let at = xml
+        .find(r#"<position name="ballast_fa""#)
+        .ok_or_else(|| bad("fore/aft servo not found"))?;
+    let end = at
+        + xml[at..]
+            .find("/>")
+            .ok_or_else(|| bad("fore/aft servo not closed"))?;
+    let tag = &xml[at..end];
+    let t0 = tag
+        .find("timeconst=\"")
+        .ok_or_else(|| bad("fore/aft servo has no timeconst"))?
+        + 11;
+    let t1 = t0 + tag[t0..].find('"').ok_or_else(|| bad("bad timeconst"))?;
+    Ok(format!("{}{lag}{}", &xml[..at + t0], &xml[at + t1..]))
+}
+
+/// `--rider-reach`: widens the fore/aft slide joint and its servo range to
+/// +-`reach` m. The servo gains do not change.
+fn splice_rider_reach(xml: &str, reach: f64) -> Result<String, HostError> {
+    let bad = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --rider-reach: {what}"
+        )))
+    };
+    if !(0.01..=0.25).contains(&reach) {
+        return Err(bad("reach must be 0.01..0.25 m"));
+    }
+    // The joint and servo allow 0.35 m: the stick spans +-reach, and the
+    // pad-rest ankle correction may move the rider further.
+    let range = format!("{:.4}", reach.max(0.35));
+    let joint = r#"<joint name="ballast_fa" type="slide" axis="-1 0 0" pos="0 0 0"
+               range="-0.05 0.05""#;
+    if xml.matches(joint).count() != 1 {
+        return Err(bad("fore/aft slide joint not found"));
+    }
+    let mut out = xml.replace(
+        joint,
+        &joint.replace("-0.05 0.05", &format!("-{range} {range}")),
+    );
+    let at = out
+        .find(r#"<position name="ballast_fa""#)
+        .ok_or_else(|| bad("fore/aft servo not found"))?;
+    let rel = out[at..]
+        .find(r#"ctrlrange="-0.05 0.05""#)
+        .ok_or_else(|| bad("fore/aft servo range not found"))?;
+    out.replace_range(
+        at + rel..at + rel + 22,
+        &format!(r#"ctrlrange="-{range} {range}""#),
+    );
+    Ok(out)
+}
+
+/// Lean-to-steer model changes (see [`crate::lean_steer`]), applied to the
+/// shared rider model text. Each replacement must match exactly once, so a
+/// change to the shared model fails loudly here rather than silently.
+///
+/// - Tire: the flat 0.30 m cylinder becomes an ellipsoid with semi-axes
+///   0.1454 / 0.12 / 0.1454 m. The rolling radius is unchanged; the tread
+///   crown radius is 0.12^2 / 0.1454 = 0.099 m, so the board can roll.
+/// - Rider: lateral reach +-0.25 m (knee, hip and body lean),
+///   and a faster lateral servo (kp 12000 N/m, 0.05 s lag): a rider balances
+///   roll with ~0.2 s reactions, which the 1 Hz fore/aft servo cannot.
+fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
+    let swaps = [
+        (
+            r#"<geom name="wheel_geom" type="cylinder" size="0.1454 0.15" euler="90 0 0""#,
+            r#"<geom name="wheel_geom" type="ellipsoid" size="0.1454 0.12 0.1454""#,
+        ),
+        (
+            r#"<joint name="ballast_lat" type="slide" axis="0 1 0" pos="0 0 0"
+                 range="-0.05 0.05""#,
+            r#"<joint name="ballast_lat" type="slide" axis="0 1 0" pos="0 0 0"
+                 range="-0.25 0.25""#,
+        ),
+        (
+            r#"<position name="ballast_fa" joint="ballast_fa" kp="3000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.15"/>"#,
+            r#"<position name="ballast_fa" joint="ballast_fa" kp="12000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.05"/>"#,
+        ),
+        (
+            r#"<position name="ballast_lat" joint="ballast_lat" kp="3000" ctrlrange="-0.05 0.05"
+              ctrllimited="true" timeconst="0.15"/>"#,
+            r#"<position name="ballast_lat" joint="ballast_lat" kp="12000" ctrlrange="-0.25 0.25"
+              ctrllimited="true" timeconst="0.05"/>"#,
+        ),
+    ];
+    let mut out = xml.to_string();
+    let keep_cylinder = std::env::var("OVERBOARD_TIRE").as_deref() == Ok("cyl");
+    for (from, to) in swaps {
+        if keep_cylinder && from.contains("wheel_geom") {
+            continue;
+        }
+        if std::env::var("OVERBOARD_TIRE").as_deref() == Ok("sphere") && from.contains("wheel_geom")
+        {
+            out = out.replace(
+                from,
+                r#"<geom name="wheel_geom" type="sphere" size="0.1454""#,
+            );
+            continue;
+        }
+        if out.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(format!(
+                "sim-host: --lean-steer could not find exactly one '{}' in the rider model -- \
+                 the shared model has changed and this splice needs updating",
+                from.lines().next().unwrap_or(from)
+            ))));
+        }
+        out = out.replace(from, to);
+    }
+    Ok(out)
+}
+
+/// The X7 build's look and pads (`--plant x7`), from the hardware track's
+/// proxy geometry (`sim/models/meshes/openwheel/x7/README.md`).
+///
+/// - Visual: the frame and wheel meshes replace the Onewheel-style visuals,
+///   which move to the hidden render group 5. The meshes' origin is the
+///   ground under the axle with +X = nose, so they sit at (0, 0, -0.146)
+///   and turn 180 deg (the model's forward is -X).
+/// - Collision: a box and a bumper at each end replace the bumper meshes.
+///   The boxes are kicked 4.2 deg with the deck; the outer bottom corner,
+///   0.346 m from the axle and 0.027 m below it, strikes first, at 20.4 deg.
+///   `pad_z` raises or lowers all four.
+/// - The nose and tail strike sensors grow to cover the new contact points.
+fn splice_x7_geometry(
+    mut xml: String,
+    pad_z: f64,
+    tail_friction: Option<f64>,
+) -> Result<String, HostError> {
+    let fail = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --plant x7 could not find {what} to splice -- the shared model has changed"
+        )))
+    };
+    // Assets.
+    // The look: materials and per-material meshes, generated from the hardware
+    // track's look.json by sim/carve/x7_look.py.
+    let frag_path = rider_model_path().with_file_name("meshes/openwheel/x7/x7_visual.xml");
+    let frag = std::fs::read_to_string(&frag_path).map_err(|e| {
+        HostError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "sim-host: --plant x7 needs {} (run sim/carve/x7_look.py): {e}",
+                frag_path.display()
+            ),
+        ))
+    })?;
+    let part = |tag: &str| -> Result<String, HostError> {
+        let a = frag.find(tag).ok_or_else(|| fail(tag))? + tag.len();
+        let b = frag[a..].find("<!-- X7 ").map_or(frag.len(), |i| a + i);
+        Ok(frag[a..b].trim().to_string())
+    };
+    let (assets, frame_geoms, wheel_geoms) = (
+        part("<!-- X7 ASSETS -->")?,
+        part("<!-- X7 FRAME -->")?,
+        part("<!-- X7 WHEEL -->")?,
+    );
+    if xml.matches("</asset>").count() != 1 {
+        return Err(fail("</asset>"));
+    }
+    xml = xml.replace("</asset>", &format!("  {assets}\n  </asset>"));
+    // Hide the old visuals (render group 5 is off by default).
+    for name in [
+        "front_enclosure_geom",
+        "rear_enclosure_geom",
+        "front_footpad_geom",
+        "rear_footpad_geom",
+        "electronics_platform_geom",
+    ] {
+        let from = format!(r#"<geom name="{name}" class="visual""#);
+        if xml.matches(&from).count() != 1 {
+            return Err(fail(name));
+        }
+        xml = xml.replace(
+            &from,
+            &format!(r#"<geom name="{name}" class="visual" group="5""#),
+        );
+    }
+    let from = r#"<geom name="wheel_geom" "#;
+    if xml.matches(from).count() != 1 {
+        return Err(fail("wheel_geom"));
+    }
+    xml = xml.replace(from, r#"<geom name="wheel_geom" group="5" "#);
+    // The new visuals.
+    let from = r#"<geom name="electronics_platform_geom""#;
+    let at = xml
+        .find(from)
+        .ok_or_else(|| fail("electronics_platform_geom"))?;
+    let end = at
+        + xml[at..]
+            .find("/>")
+            .ok_or_else(|| fail("electronics_platform_geom end"))?
+        + 2;
+    xml.insert_str(end, &format!("\n      {frame_geoms}"));
+    let from = r#"<joint name="wheel_hinge""#;
+    let at = xml.find(from).ok_or_else(|| fail("wheel_hinge"))?;
+    let end = at
+        + xml[at..]
+            .find("/>")
+            .ok_or_else(|| fail("wheel_hinge end"))?
+        + 2;
+    xml.insert_str(end, &format!("\n        {wheel_geoms}"));
+    // Pads: replace each bumper mesh geom with a box and a bumper bar.
+    // Proxy boxes (ground frame, +X = nose): box x 0.1658-0.3463, y +-0.120,
+    // z 0.106-0.1885; bumper x 0.3463-0.3719, y +-0.145, z 0.146-0.200.
+    // Here: forward is -X, and z is from the axle (0.146 above the ground).
+    let mu_rear = tail_friction
+        .map(|m| format!(r#"priority="1" friction="{m:.3} 0.005 0.0001""#))
+        .unwrap_or_else(|| r#"friction="0.6 0.005 0.0001""#.to_string());
+    for (end_name, sign, mu) in [
+        (
+            "front",
+            -1.0f64,
+            r#"friction="0.6 0.005 0.0001""#.to_string(),
+        ),
+        ("rear", 1.0, mu_rear),
+    ] {
+        let tag = format!(r#"<geom name="{end_name}_bumper_geom""#);
+        let at = xml.find(&tag).ok_or_else(|| fail(&tag))?;
+        let stop = at + xml[at..].find("/>").ok_or_else(|| fail(&tag))? + 2;
+        // Each end box is kicked 4.2 deg up with the deck: its bottom runs
+        // from 0.040 m below the axle at the inner end (0.166 m out) to 0.027 m
+        // below at the outer end (0.346 m out), and the outer corner strikes
+        // first, at 20.4 deg (hardware track). Box 0.180 x 0.240 x 0.0695 m.
+        let bx = sign * 0.2535;
+        let bb = sign * 0.3591;
+        let tilt = -sign * 4.2; // the outer end up
+        let boxes = format!(
+            "<geom name=\"{end_name}_box_geom\" type=\"box\" pos=\"{bx:.5} 0 {:.5}\" \
+             euler=\"0 {tilt:.1} 0\" size=\"0.0900 0.120 0.03475\" condim=\"3\" {mu} group=\"5\"/>\n      \
+             <geom name=\"{end_name}_bumper_geom\" type=\"box\" pos=\"{bb:.5} 0 {:.5}\" \
+             size=\"0.0128 0.145 0.027\" condim=\"3\" {mu} group=\"5\"/>",
+            0.0012 + pad_z,
+            0.027 + pad_z
+        );
+        xml.replace_range(at..stop, &boxes);
+    }
+    // Strike sensors: cover the box edge (0.346 m, -0.040 m) and the bumper.
+    for (site, x) in [("nose_strike", -0.30f64), ("tail_strike", 0.30)] {
+        let from = if x < 0.0 {
+            r#"<site name="nose_strike" pos="-0.4072 0 0.0122" size="0.075 0.125 0.050""#
+        } else {
+            r#"<site name="tail_strike" pos="+0.4072 0 0.0122" size="0.075 0.125 0.050""#
+        };
+        if xml.matches(from).count() != 1 {
+            return Err(fail(site));
+        }
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<site name="{site}" pos="{x:.3} 0 {:.4}" size="0.095 0.165 0.075""#,
+                0.005 + pad_z
+            ),
+        );
+    }
+    Ok(xml)
+}
+
 /// Writes `overboard_rider.xml` with `kerb` spliced into its `<worldbody>` to
 /// a temporary file, and returns that path. The original file is never
 /// modified.
 fn write_model_with_kerb(
     kerb: Option<&KerbSpec>,
     terrain: Option<&TerrainSpec>,
+    lean_steer: bool,
+    max_current_a: Option<f32>,
+    variation: PlantVariation,
+    smooth_wheel_contact: bool,
+    pad_solref_s: f64,
 ) -> Result<PathBuf, HostError> {
     let src = rider_model_path();
     let xml = std::fs::read_to_string(&src).map_err(|e| {
@@ -432,8 +1078,8 @@ fn write_model_with_kerb(
         let asset = format!(
             "\n    <hfield name=\"citypark\" file=\"{}\" size=\"{:.6} {:.6} {:.6} {:.6}\"/>\n  ",
             t.hfield_path.display(),
-            t.half_extent_m,
-            t.half_extent_m,
+            t.half_extent_x_m,
+            t.half_extent_y_m,
             elevation,
             base
         );
@@ -469,7 +1115,9 @@ fn write_model_with_kerb(
         //
         // The extra clearance means it settles DOWN onto the road over the
         // first few steps rather than being pushed up out of it.
-        let spawn_z = FRAME_SPAWN_Z_M + t.z_at_origin_m + TERRAIN_SPAWN_CLEARANCE_M;
+        let spawn_z = variation.wheel_radius_m.unwrap_or(FRAME_SPAWN_Z_M)
+            + t.z_at_spawn_m
+            + TERRAIN_SPAWN_CLEARANCE_M;
         let spawn_from = format!("<body name=\"frame\" pos=\"0 0 {FRAME_SPAWN_Z_M}\">");
         if !xml.contains(&spawn_from) {
             return Err(HostError::Io(std::io::Error::other(format!(
@@ -477,10 +1125,23 @@ fn write_model_with_kerb(
                  terrain -- the shared model has changed and this splice needs updating"
             ))));
         }
-        xml = xml.replace(
-            &spawn_from,
-            &format!("<body name=\"frame\" pos=\"0 0 {spawn_z:.6}\">"),
-        );
+        // The spawn pose: x, y and a heading rotation about +Z. A level that
+        // sets neither y nor yaw keeps the exact single-axis form the old
+        // runs used, so a square course is unchanged. yaw rotates the frame
+        // body quat: q = [cos(yaw/2), 0, 0, sin(yaw/2)].
+        let spawn_to = if t.spawn_y_m == 0.0 && t.spawn_yaw_rad == 0.0 {
+            format!(
+                "<body name=\"frame\" pos=\"{:.6} 0 {spawn_z:.6}\">",
+                t.spawn_x_m
+            )
+        } else {
+            let (sh, ch) = (0.5 * t.spawn_yaw_rad).sin_cos();
+            format!(
+                "<body name=\"frame\" pos=\"{:.6} {:.6} {spawn_z:.6}\" quat=\"{ch:.9} 0 0 {sh:.9}\">",
+                t.spawn_x_m, t.spawn_y_m,
+            )
+        };
+        xml = xml.replace(&spawn_from, &spawn_to);
 
         xml = xml.replace(
             plane,
@@ -494,6 +1155,239 @@ fn write_model_with_kerb(
     }
 
     // --- Kerb: an authored box, for runs without the real terrain ----------
+    if lean_steer {
+        xml = splice_lean_steer(&xml)?;
+    }
+    if let Some(reach) = variation.rider_reach_m {
+        xml = splice_rider_reach(&xml, reach)?;
+    }
+    if let Some(lag) = variation.rider_lean_lag_s {
+        xml = splice_rider_lean_lag(&xml, lag)?;
+    }
+    if let Some(amps) = max_current_a {
+        // Sizing studies: the motor torque limit follows the current limit.
+        let from = r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-28 28""#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --max-current could not find the wheel motor ctrlrange to splice",
+            )));
+        }
+        let nm = amps * KT_NM_PER_A;
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-{nm} {nm}""#
+            ),
+        );
+    }
+
+    if variation.touches_frame() {
+        // Board = frame body + rotating wheel + 0.5 kg shift carrier.
+        let wheel = variation.wheel_rot_kg.unwrap_or(4.5);
+        let board = variation.board_mass_kg.unwrap_or(13.0);
+        let frame = board - wheel - 0.5;
+        if frame <= 0.5 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: the board mass leaves no frame mass (board - wheel - 0.5 kg <= 0.5 kg)",
+            )));
+        }
+        let from = r#"<inertial pos="0 0 -0.03" mass="8.0" diaginertia="0.040 0.400 0.420"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --board-mass/--plant could not find the frame inertial to splice",
+            )));
+        }
+        let k = variation.frame_inertia_scale.unwrap_or(frame / 8.0);
+        let (cx, cz) = variation.frame_com_m.unwrap_or((0.0, -0.03));
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<inertial pos="{cx:.4} 0 {cz:.4}" mass="{frame:.3}" diaginertia="{:.4} {:.4} {:.4}"/>"#,
+                0.040 * k,
+                0.400 * k,
+                0.420 * k
+            ),
+        );
+    }
+    if variation.wheel_rot_kg.is_some() || variation.wheel_spin_kgm2.is_some() {
+        let from = r#"<inertial pos="0 0 0" mass="4.5" diaginertia="0.0635 0.0595 0.0635"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --plant could not find the wheel inertial to splice",
+            )));
+        }
+        let m = variation.wheel_rot_kg.unwrap_or(4.5);
+        let spin = variation.wheel_spin_kgm2.unwrap_or(0.0595);
+        // Keep the model's ratio of the transverse to the spin inertia.
+        let side = spin * 0.0635 / 0.0595;
+        xml = xml.replace(
+            from,
+            &format!(r#"<inertial pos="0 0 0" mass="{m:.3}" diaginertia="{side:.5} {spin:.5} {side:.5}"/>"#),
+        );
+    }
+    if let Some(r) = variation.wheel_radius_m {
+        let mut n = 0;
+        for (from, to) in [
+            (
+                r#"<geom name="wheel_geom" type="ellipsoid" size="0.1454 0.12 0.1454""#.to_string(),
+                format!(r#"<geom name="wheel_geom" type="ellipsoid" size="{r:.4} 0.12 {r:.4}""#),
+            ),
+            (
+                r#"<geom name="wheel_geom" type="cylinder" size="0.1454 0.15""#.to_string(),
+                format!(r#"<geom name="wheel_geom" type="cylinder" size="{r:.4} 0.15""#),
+            ),
+            (
+                r#"<geom name="wheel_geom" type="sphere" size="0.1454""#.to_string(),
+                format!(r#"<geom name="wheel_geom" type="sphere" size="{r:.4}""#),
+            ),
+        ] {
+            if xml.contains(&from) {
+                xml = xml.replace(&from, &to);
+                n += 1;
+            }
+        }
+        if n != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --plant radius could not find exactly one wheel geom to splice",
+            )));
+        }
+        // Spawn on the ground, not inside it: on the plane the frame sits at
+        // the axle height. (On terrain the spawn splice above uses the radius.)
+        let plane_spawn = format!(r#"<body name="frame" pos="0 0 {FRAME_SPAWN_Z_M}">"#);
+        if xml.contains(&plane_spawn) {
+            xml = xml.replace(
+                &plane_spawn,
+                &format!(r#"<body name="frame" pos="0 0 {r:.4}">"#),
+            );
+        }
+    }
+    if let Some(m) = variation.rider_mass_kg {
+        // Same inertia formula as the model's 70 kg ballast (mass * 0.15, 0.15, 0.08).
+        let from = r#"<inertial pos="0 0 0" mass="70.0" diaginertia="10.5000 10.5000 5.6000"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --rider-mass could not find the ballast inertial to splice",
+            )));
+        }
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<inertial pos="0 0 0" mass="{m:.3}" diaginertia="{:.4} {:.4} {:.4}"/>"#,
+                m * 0.15,
+                m * 0.15,
+                m * 0.08
+            ),
+        );
+    }
+    if let Some(mu) = variation.tail_friction {
+        // priority 1: this geom's friction wins over the road's.
+        let from = r#"<geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" material="bumper_mat"
+            group="2" condim="3" friction="0.6 0.005 0.0001"/>"#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --tail-friction could not find the rear bumper geom to splice",
+            )));
+        }
+        xml = xml.replace(
+            from,
+            &format!(
+                r#"<geom name="rear_bumper_geom" type="mesh" mesh="rear_bumper" material="bumper_mat"
+            group="2" condim="3" priority="1" friction="{mu:.3} 0.005 0.0001"/>"#
+            ),
+        );
+    }
+    if variation.x7_geometry {
+        xml = splice_x7_geometry(
+            xml,
+            variation.pad_z_m.unwrap_or(0.0),
+            variation.tail_friction,
+        )?;
+    }
+    if let Some(k) = variation.kt_scale {
+        // The true torque per commanded amp. ctrl stays the commanded current
+        // times the NOMINAL Kt, so the current limit is unchanged.
+        let from = r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" "#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --kt-scale could not find the wheel motor gear to splice",
+            )));
+        }
+        xml = xml.replace(
+            from,
+            &format!(r#"<motor name="wheel_motor" joint="wheel_hinge" gear="{k:.4}" "#),
+        );
+    }
+
+    if let (Some(t), true) = (terrain, smooth_wheel_contact) {
+        // Smooth wheel contact (crate::ground): the tire collides with a
+        // mocap plate only (bit 2), and everything else with the heightfield
+        // (bit 1). The host moves the plate under the tire every cycle.
+        let from = r#"<geom name="wheel_geom" "#;
+        if xml.matches(from).count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: smooth wheel contact could not find the wheel geom to splice",
+            )));
+        }
+        xml = xml.replace(
+            from,
+            r#"<geom name="wheel_geom" contype="2" conaffinity="2" "#,
+        );
+        // The nose and tail pads ride the same plate. On the heightfield a
+        // dragged pad caught every grid seam: touch, jump, touch, with 10 kN
+        // spikes under a 100 kg rider. The pads sit 0.41 m from the axle, and
+        // on a 60 m vertical curve the plate is within 1.3 mm of the road
+        // there. Cost: the pads no longer hit kerbs; --hfield-wheel-contact
+        // restores both for kerb studies.
+        for pad in [
+            "front_bumper_geom",
+            "rear_bumper_geom",
+            "front_box_geom",
+            "rear_box_geom",
+        ] {
+            let from = format!(r#"<geom name="{pad}" "#);
+            if pad.ends_with("_box_geom") && !xml.contains(&from) {
+                continue; // only the X7 pads have boxes
+            }
+            if xml.matches(&from).count() != 1 {
+                return Err(HostError::Io(std::io::Error::other(format!(
+                    "sim-host: smooth contact could not find {pad} to splice"
+                ))));
+            }
+            // Pad contact time constant (`--pad-solref`): MuJoCo's default 0.02 s
+            // is a near-rigid pad, and a dragged tail then taps at about 16 Hz
+            // with 8.6 kN spikes. 0.05 s stands in for a plastic or urethane
+            // pad (spikes 4 kN). The stopping distance is the same for both.
+            xml = xml.replace(
+                &from,
+                &format!(
+                    r#"<geom name="{pad}" contype="2" conaffinity="2" solref="{pad_solref_s} 1" "#
+                ),
+            );
+        }
+        let th = crate::ground::PLATE_HALF_THICKNESS_M;
+        let half = crate::ground::PLATE_HALF_SIZE_M;
+        let plate = format!(
+            "\n    <!-- sim-host smooth wheel contact, NOT part of the shared model. -->\n    \
+             <body name=\"wheel_ground\" mocap=\"true\" pos=\"{:.6} {} {:.6}\">\
+             <geom name=\"wheel_ground_geom\" type=\"box\" size=\"{half} {half} {th}\" \
+             contype=\"2\" conaffinity=\"2\" condim=\"3\" friction=\"0.8 0.005 0.0001\" \
+             rgba=\"0 0 0 0\" group=\"3\"/></body>\n  ",
+            t.spawn_x_m,
+            if t.spawn_y_m == 0.0 {
+                "0".to_string()
+            } else {
+                format!("{:.6}", t.spawn_y_m)
+            },
+            t.z_at_spawn_m - th,
+        );
+        if xml.matches("</worldbody>").count() != 1 {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: expected exactly one </worldbody> to splice the wheel plate into",
+            )));
+        }
+        xml = xml.replace("</worldbody>", &format!("{plate}</worldbody>"));
+    }
+
     if let Some(kerb) = kerb {
         let hz = kerb.height_m / 2.0;
         let mut geom = String::from(
@@ -540,8 +1434,17 @@ fn write_model_with_kerb(
 // file's header) -- the inner-loop gains and estimator config below are
 // reused unchanged regardless, because they are the closest available
 // precedent for THIS plant's mass/inertia, not for the outer loop's absence.
-const KP_NM_PER_RAD: f32 = 140.0;
-const KD_NM_PER_RAD_S: f32 = 21.0;
+//
+// 2026-10-05: the gains are 3x and 1.73x the shuttle_run values (140, 21).
+// The old Kp was below the rider's gravity stiffness (m g h about 660
+// N*m/rad), so the law made torque only by letting the deck droop, which
+// works only with a rider rigid with the deck. The VESC float package's
+// Angle P (about 20 A/deg, about 800 N*m/rad here) is stiffer still. Rider-law
+// Monte Carlo, X7, 200 runs: x1 191 PASS / 6 FALL; x3 196 PASS / 0 FALL;
+// x3 with stage0 sensors at 2x noise and +5 ms delay 199 PASS / 0 FALL (x1
+// there: 5 nose strikes); x3 with an upright (ankle) rider 0 FALL.
+const KP_NM_PER_RAD: f32 = 420.0;
+const KD_NM_PER_RAD_S: f32 = 36.3;
 const KT_NM_PER_A: f32 = 0.7;
 const MAX_CURRENT_A: f32 = 40.0;
 const ESTIMATOR_TAU_S: f32 = 2.0;
@@ -559,6 +1462,8 @@ const ACCEL_FF_GAIN_M_S2_PER_A: f32 = 0.0584;
 /// Duplicated here for the same reason `ACCEL_FF_GAIN_M_S2_PER_A` above is:
 /// this host does not link `control-ffi`.
 const WHEEL_ACCEL_TAU_S: f32 = 0.05;
+/// Time constant of the grade load learned by [`control_core::GradeAwareAiding`], s.
+const GRADE_LOAD_TAU_S: f32 = 0.3;
 
 /// `weight_shift_fore_aft` / `weight_shift_lateral`, both clamped to
 /// `[-1, 1]` on the wire, map linearly onto this range -- the SAME +/-0.05 m
@@ -813,6 +1718,7 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// | pitch reserve vs the 11.46 deg ceiling | 13% | **31%** |
 ///
 /// The ceiling is `MAX_CURRENT_A * KT / KP` = 28/140 = 0.2 rad = 11.46 deg.
+/// (Measured with the old Kp 140; at Kp 420 the ceiling is a third of that.)
 ///
 /// # What it costs, measured
 ///
@@ -1137,6 +2043,10 @@ pub const INPUT_STALENESS_TIMEOUT: Duration = Duration::from_millis(100);
 /// Rust binding to that geometry query, so this is a fixed proxy near that
 /// value, not the real contact test -- good enough to prove "the board is
 /// clearly down", not precise enough to gate a published claim.
+/// Sign of the `--grade-course` gyro fix-up in the IMU pitch axis.
+const GRADE_GYRO_SIGN: f32 = 1.0;
+/// Sim time at which `--start-speed` is applied, s (see `start_speed_pending`).
+const START_SPEED_AT_S: f64 = 1.0;
 const FALLEN_PITCH_RAD: f32 = 20.0 * std::f32::consts::PI / 180.0;
 
 /// Soft, host-side drivable-corridor bounds, checked against **MuJoCo's own
@@ -1510,6 +2420,423 @@ pub struct HostConfig {
     /// flat ground plane with the real City Park surface; `None` (the default)
     /// leaves the shared model untouched. See [`TerrainSpec`].
     pub terrain: Option<PathBuf>,
+
+    /// Lean-to-steer (see [`crate::lean_steer`]). `true` swaps the flat
+    /// cylinder tire for a rounded-crown one, gives the rider a +-0.25 m
+    /// lateral reach, and replaces the commanded-yaw law with camber steer:
+    /// the board turns because it rolls. `steer` becomes the rider's
+    /// curvature intent, and a rider model balances the roll.
+    pub lean_steer: bool,
+
+    /// Spawn point along MuJoCo X, metres, on the `--terrain` heightmap
+    /// (`--spawn-x`). Lets a run start on flatter road uphill of the origin
+    /// without moving the frame. `None` uses the level metadata `"spawn".x`,
+    /// then 0. A flag always wins over the metadata.
+    pub spawn_x_m: Option<f64>,
+    /// Spawn point along MuJoCo Y, metres (`--spawn-y`). Precedence as
+    /// [`HostConfig::spawn_x_m`]: flag, then metadata `"spawn".y`, then 0. The
+    /// spawn z is read from the terrain at (x, y).
+    pub spawn_y_m: Option<f64>,
+    /// Spawn heading about +Z, degrees (`--spawn-yaw`). 0 is the shared
+    /// model's heading (board forward is body -X). Precedence as
+    /// [`HostConfig::spawn_x_m`]: flag, then metadata `"spawn".yaw_deg`, then 0.
+    pub spawn_yaw_deg: Option<f64>,
+
+    /// Add the learned grade current (`--grade-ff`) to the regulator output.
+    /// Needs `EstimatorAiding::GradeAware`, which learns the grade.
+    pub grade_feedforward: bool,
+
+    /// Motor current limit for sizing studies (`--max-current A`). Sets the
+    /// safety envelope, the utilisation reference and the model's motor
+    /// torque limit together. `None` is the stock 40 A.
+    pub max_current_a: Option<f32>,
+
+    /// Outer speed loop target, m/s (`--speed-hold`). `None`: no outer loop.
+    pub speed_hold_m_s: Option<f32>,
+
+    /// Monte Carlo study inputs. Each one changes the PLANT only; the
+    /// controller keeps its nominal 70 kg and Kt = 0.7 N.m/A design.
+    /// Rider (ballast) mass, kg (`--rider-mass`). `None`: the model's 70 kg.
+    pub rider_mass_kg: Option<f64>,
+    /// Board mass without rider, kg (`--board-mass`). `None`: the model's 13 kg.
+    pub board_mass_kg: Option<f64>,
+    /// `--plant SPEC` (see [`parse_plant_spec`]); its values apply first, then
+    /// `--board-mass`, `--kt-scale` and `--rider-mass` override them.
+    pub plant: Option<PlantVariation>,
+    /// True motor Kt as a fraction of the nominal 0.7 N.m/A (`--kt-scale`).
+    pub kt_scale: Option<f64>,
+    /// Forward speed set at t = 1 s, m/s (`--start-speed`). `None`: from rest.
+    pub start_speed_m_s: Option<f64>,
+    /// `--hfield-wheel-contact`: let the tire touch the `--terrain`
+    /// heightfield directly, as before the smooth contact (see
+    /// [`crate::ground`]). Only for kerb studies, where the tire must hit
+    /// the kerb face; the heightfield contact chatters.
+    pub hfield_wheel_contact: bool,
+    /// `--pad-solref S`: contact time constant of the nose and tail pads on
+    /// the smooth plate, s (default 0.05: a plastic or urethane pad).
+    pub pad_solref_s: f64,
+    /// `--tail-brake`: a tail-pad strike does not end the run. Leaning back
+    /// onto the tail is a deliberate, safe way to brake; only a nose strike
+    /// (the rider goes over the front) or a large tilt is a terminating event.
+    pub tail_brake: bool,
+    /// `--tail-friction MU`: the tail pad's own friction sets the pad-road
+    /// contact (MuJoCo geom priority). Without it the larger of the pad (0.6)
+    /// and the road (0.8 heightfield, 1.0 plane) is used.
+    pub tail_friction: Option<f64>,
+    /// `--authority-margin warn|limit`: the rider warning (D1) and, with
+    /// `limit`, the forward-acceleration limit (D2). See
+    /// `control_core::AuthorityMargin`.
+    pub authority_margin: MarginMode,
+    /// `--balance-comp`: the deployed balance law gets grade compensation
+    /// (control_core::GradeCompensator: learned-load feedforward and a slow
+    /// pitch integral). Ignored with `--speed-hold`, whose law has its own.
+    pub balance_comp: bool,
+    /// `--hold-until-arm`: hold the board still at its spawn pose until the
+    /// first input arm bit, as a rider's foot holds it on a hill. For live
+    /// play: without it the board rolls away on a slope before the player
+    /// moves. Off by default (scripted and Monte Carlo runs have no arm bit).
+    pub hold_until_arm: bool,
+    /// `--hud-out-addr ADDR`: also send a HUD packet (crate::hud::HudOut,
+    /// 56 B) at 50 Hz: speed, torque and its limit, battery, rider warning.
+    pub hud_out_addr: Option<SocketAddr>,
+    /// `--batt-soc0`: the pack's starting charge for the HUD, 0..1 (0.9).
+    pub batt_soc0: f64,
+    /// `--rider-speed V`: a rider model (test harness, not firmware) that sets
+    /// the fore/aft lean to ride at V m/s, while the DEPLOYED balance law (the
+    /// pitch regulator) balances: the path a person takes in the game. The
+    /// law is sim/carve/rider.py's lean mode (leaky PI on speed, acceleration
+    /// damping, a grade lean the rider sees). Without `--speed-hold`.
+    pub rider_speed_m_s: Option<f32>,
+    /// `--rider-target-change T,V`: the `--rider-speed` rider changes its
+    /// target to V m/s at sim time T s, at once, without the ease-in, and may
+    /// then use its full reach (a hard brake after a fast run).
+    pub rider_target_change: Option<(f64, f32)>,
+    /// `--rider-reach M`: see `PlantVariation::rider_reach_m`.
+    pub rider_reach_m: Option<f64>,
+    /// `--rider-lean-lag S`: see `PlantVariation::rider_lean_lag_s`.
+    pub rider_lean_lag_s: Option<f64>,
+    /// `--tumble`: at a fall (the ADR-0012 handoff) the rider comes off as a
+    /// free two-part body (torso, legs on a ball hip) and MuJoCo goes on
+    /// computing the board and the rider sliding on the road; the motor is
+    /// cut, as the firmware does at a fall. At a `--rider-reacts` dismount the
+    /// board only loses the rider's mass. The wire still freezes at the
+    /// handoff (Unreal's ragdoll does not change). Scripted runs only: a
+    /// reset does not put the rider's mass back.
+    pub tumble: bool,
+    /// `--pose-out PATH`: the full MuJoCo pose at 50 Hz for the whole run,
+    /// with the tumble rider, for a MuJoCo render (sim/carve/render_pose.py).
+    /// The model is kept beside it as `sim/models/<stem>.generated.xml`.
+    pub pose_out: Option<PathBuf>,
+    /// `--motor-limits`: the motor and the pack limit the current, as a real
+    /// controller does. Driving: the back-EMF leaves (0.95 V_pack - Ke w) /
+    /// R_eff, so the torque falls to zero near the top speed (the classic
+    /// nosedive). Braking: the pack takes at most 45 A of charge, so the
+    /// braking current falls as 1/w at speed. V_pack is the HUD pack model
+    /// (it sags under load). Off by default: the Monte Carlo results do not
+    /// include it.
+    pub motor_limits: bool,
+    /// `--sensors stage0`: see the backend construction in `run`.
+    pub sensors_stage0: bool,
+    /// `--noise-scale S`: scales the stage0 noise and bias (1 by default).
+    pub noise_scale: f64,
+    /// `--extra-delay-ms D`: added to the stage0 actuation delay.
+    pub extra_delay_ms: f64,
+    /// `--kp-scale S`, `--kd-scale S`: study scales on the deployed balance
+    /// gains (Kp 420 N*m/rad, Kd 36.3 N*m*s/rad). 1 by default.
+    pub kp_scale: f32,
+    pub kd_scale: f32,
+    /// `--ankle-hinge`: the rider stands on a pitch hinge at deck level (an
+    /// ankle; fable-oracle, 2026-10-04). Its torque is a spring and damper on
+    /// the rider's lean against GRAVITY (not against the deck), K = 1.3 m g h,
+    /// zeta 0.7, limited to m g * 0.12 m (the feet's centre-of-pressure
+    /// reach). The limit lets the body stay near vertical when the deck sits
+    /// on a pad. The slide still carries the stick's lean intent.
+    pub ankle_hinge: bool,
+    /// `--obstacles CSV`: fixed obstacles on the road, from the game's course
+    /// elements (sim/carve/obstacles.py): cones and debris, placed on the
+    /// terrain surface. They are hard posts (they do not move); the game draws
+    /// them at the same place.
+    pub obstacles: Option<PathBuf>,
+    /// `--rider-reach-back M`: the backward stick range, m (default: the
+    /// reach). Needs `--rider-reach` (the slide allows 0.35 m). The rider
+    /// model in the Monte Carlo does not use it.
+    pub rider_reach_back_m: Option<f64>,
+    /// `--foot-torque` (with `--ankle-hinge`): fore/aft stick also presses the
+    /// heels or toes, a torque on the deck up to 80 % of the feet's limit.
+    /// A real rider tilts a stiff board mostly this way; it is what drags the
+    /// tail under a hard lean back.
+    pub foot_torque: bool,
+    /// `--ankle-rigid`: the hinge with a 1e5 N*m/rad spring on the hinge angle
+    /// (against the deck) and no limit: it must reproduce the rigid rider
+    /// (the bracket test).
+    pub ankle_rigid: bool,
+    /// `--rider-ankle`: the rider stays upright as the deck pitches (the
+    /// slide moves by 0.75 m * sin(pitch)); otherwise the rider is rigid
+    /// with the deck. Needs `--rider-reach` (it widens the slide to 0.35 m).
+    /// DO NOT USE with the deployed law: 145 of 200 Monte Carlo runs fell
+    /// (its gains assume the rigid rider). Pad mode uses the same correction
+    /// on its own.
+    pub rider_ankle: bool,
+    /// `--stop-after-handoff S`: end the run S seconds after a fall or a
+    /// dismount (to record the tumble).
+    pub stop_after_handoff_s: Option<f64>,
+    /// `--rider-reacts` (speed-hold harness only): a rider model that answers
+    /// the warning. Pulsed for 0.5 s: the rider eases off (target 0). Solid
+    /// for 0.5 s while driving: the rider steps off and the run ends (DISMOUNT).
+    /// Eased and stopped (below 0.3 m/s) on a climb with the warning on: the
+    /// rider steps off (DISMOUNT). Solid while braking: the rider stays on and
+    /// leans onto the tail.
+    pub rider_reacts: bool,
+    /// A grade profile on the flat plane, by gravity (`--grade-course`).
+    /// Replaces a `--terrain` heightfield for grade studies: MuJoCo's
+    /// sphere-on-heightfield contact chatters at every grid edge (measured:
+    /// specific force sd 3.2 m/s^2 at 4 m/s, with lift-off), and the IMU
+    /// gate turns that chatter into a pitch bias (2.6 deg flat, ~7 deg on
+    /// a 10 % climb). A plane has one clean contact.
+    pub grade_course: Option<GradeCourse>,
+}
+
+/// Flat run-in, then a vertical curve, then a constant grade -- the same
+/// profile `sim/carve/course.py` builds for its `steady_*` presets. The board
+/// starts at x = 0 and travels along -X, so s = -x.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradeCourse {
+    pub run_in_m: f64,
+    /// Percent, positive uphill.
+    pub grade_pct: f64,
+    /// Vertical-curve length scale, m: the grade changes over
+    /// `radius * |grade|`, centred on the end of the run-in, by a cosine
+    /// blend (the mean radius is `radius`; the tightest is `2 radius / pi`).
+    pub radius_m: f64,
+}
+
+impl GradeCourse {
+    /// Grade at distance `s` along the course, degrees, positive uphill.
+    pub fn grade_deg(&self, s_m: f64) -> f64 {
+        let g = self.grade_pct / 100.0;
+        let half = 0.5 * self.radius_m * g.abs();
+        let frac = if half <= 0.0 {
+            if s_m >= self.run_in_m {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            // Cosine blend, not linear: the grade RATE must start and end at
+            // zero. The plane model turns gravity, so a board held vertical
+            // rotates against the plane at the grade rate, and a rate step
+            // leaves its angular momentum behind (no Euler torque in the
+            // model). Measured with the linear blend: a nose-down drift at
+            // every curve end that saturated the motor (103 kg, 14.8 %).
+            let u = ((s_m - (self.run_in_m - half)) / (2.0 * half)).clamp(0.0, 1.0);
+            0.5 - 0.5 * (std::f64::consts::PI * u).cos()
+        };
+        (g * frac).atan().to_degrees()
+    }
+}
+
+/// `--rider-speed`: a rider who rides at a target speed by leaning, the way
+/// sim/carve/rider.py's lean mode does (its gains, at 500 Hz instead of
+/// 50 Hz). Output is the fore/aft stick, -1..1 (full stick = 5 cm of lean).
+#[derive(Debug, Clone, Copy)]
+pub struct RiderSpeedModel {
+    /// Lean bound, in units of the model's 5 cm stick (`LEAN_BOUND` = 3 cm).
+    pub bound: f32,
+    v_ref: Option<f32>,
+    integral: f32,
+    acc_f: f32,
+    v_prev: Option<f32>,
+}
+
+impl RiderSpeedModel {
+    /// The rider eases the target in at this rate, m/s^2.
+    pub const TARGET_RATE_M_S2: f32 = 0.5;
+    /// Default lean bound, in 5 cm stick units: 0.6 = 3 cm.
+    pub const LEAN_BOUND: f32 = 0.6;
+    /// Grade lean per unit sin(downhill grade), stick units (rider.py).
+    pub const GRADE_LEAN: f32 = 3.08;
+
+    /// One cycle. `grade_down_rad` is the slope the rider sees, downhill
+    /// positive (0 when the course is unknown).
+    pub fn update(&mut self, v: f32, target: f32, grade_down_rad: f32, dt: f32) -> f32 {
+        let r = self.v_ref.get_or_insert(v);
+        let step = Self::TARGET_RATE_M_S2 * dt;
+        *r += (target - *r).clamp(-step, step);
+        let err = *r - v;
+        // Leaky (1/s): the grade lean carries the slope; the integral trims.
+        self.integral = (self.integral * (1.0 - dt) + err * dt).clamp(-3.0, 3.0);
+        let acc = self.v_prev.map_or(0.0, |p| (v - p) / dt);
+        self.v_prev = Some(v);
+        // rider.py filters acceleration by 0.1 per 20 ms: tau about 0.19 s.
+        self.acc_f += dt / (0.19 + dt) * (acc - self.acc_f);
+        let raw = -Self::GRADE_LEAN * grade_down_rad.sin() + 0.30 * err + 0.10 * self.integral
+            - 0.45 * self.acc_f;
+        let fa = raw.clamp(-self.bound, self.bound);
+        if fa != raw {
+            self.integral -= err * dt; // do not integrate into a bound
+        }
+        fa
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self {
+            bound: self.bound,
+            ..Self::default()
+        };
+    }
+
+    /// A sudden change of mind: the target jumps to `v` now, without the
+    /// 0.5 m/s^2 ease-in (`--rider-target-change`: a hard brake).
+    pub fn set_target_now(&mut self, v: f32) {
+        self.v_ref = Some(v);
+    }
+}
+
+impl Default for RiderSpeedModel {
+    fn default() -> Self {
+        Self {
+            bound: Self::LEAN_BOUND,
+            v_ref: None,
+            integral: 0.0,
+            acc_f: 0.0,
+            v_prev: None,
+        }
+    }
+}
+
+/// `--authority-margin`: off, warn only (D1), or warn and limit (D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginMode {
+    Off,
+    Warn,
+    Limit,
+}
+
+/// Pack voltage for the duty estimate, V: 20S at 3.6 V nominal. The sim has
+/// no pack in the loop, so sag is not in the estimate.
+const MARGIN_PACK_V: f32 = 72.0;
+/// Motor back-EMF constant and phase resistance for the duty estimate
+/// (`sim/carve/battery.py` defaults).
+const MARGIN_KE_V_S: f32 = 0.7;
+const MARGIN_R_PHASE_OHM: f32 = 0.12;
+/// `--rider-reacts`: the rider's reaction time to a warning, s.
+const RIDER_REACTION_S: f64 = 0.5;
+
+/// The plant-only changes a Monte Carlo run splices into the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlantVariation {
+    /// Whole board without rider, kg (`--board-mass`). The model's board is
+    /// 13 kg (frame 8, wheel 4.5, carrier 0.5); the extra goes into the frame
+    /// at its own centre of mass (battery and controller in the deck), and
+    /// the frame inertia scales with it.
+    pub board_mass_kg: Option<f64>,
+    pub rider_mass_kg: Option<f64>,
+    pub kt_scale: Option<f64>,
+    pub tail_friction: Option<f64>,
+    /// `--plant`: the rotating part of the wheel (rotor can and tyre), kg.
+    pub wheel_rot_kg: Option<f64>,
+    /// `--plant`: wheel spin inertia about the axle, kg m^2.
+    pub wheel_spin_kgm2: Option<f64>,
+    /// `--plant`: frame centre of mass from the axle, m: x positive BEHIND
+    /// (board forward is -X), z positive up.
+    pub frame_com_m: Option<(f64, f64)>,
+    /// `--plant`: frame inertia, as a scale on the model's
+    /// diag(0.040, 0.400, 0.420) kg m^2. `None` scales with the frame mass.
+    pub frame_inertia_scale: Option<f64>,
+    /// `--plant`: tyre rolling radius, m (model 0.1454). The controller keeps
+    /// its 0.1454 m belief, so a different value is a plant error.
+    pub wheel_radius_m: Option<f64>,
+    /// `--plant x7`: the build's look (proxy meshes) and its nose and tail
+    /// collision pads (a box and a bumper at each end) in place of the
+    /// Onewheel-style meshes.
+    pub x7_geometry: bool,
+    /// `--plant`: raise (+) or lower (-) the nose and tail pads, m. 1 cm is
+    /// about 1.6 deg of strike angle. The proxy pads give 20.4 deg.
+    pub pad_z_m: Option<f64>,
+    /// `--rider-reach M` (or plant key `reach`): the rider's fore/aft reach,
+    /// m (model 0.05). A real rider moves the body over the feet with the
+    /// ankles and knees, well past 5 cm; the stick maps onto +-M.
+    pub rider_reach_m: Option<f64>,
+    /// `--rider-lean-lag S`: the weight-shift servo's time constant, s.
+    pub rider_lean_lag_s: Option<f64>,
+}
+
+impl PlantVariation {
+    /// True when the frame inertial must be rewritten.
+    fn touches_frame(&self) -> bool {
+        self.board_mass_kg.is_some()
+            || self.wheel_rot_kg.is_some()
+            || self.frame_com_m.is_some()
+            || self.frame_inertia_scale.is_some()
+    }
+}
+
+/// The Fungineers X7 / Superflux HT / Thor301 build (hardware track,
+/// 2026-10-04; V = vendor, M = measured by others, I = inferred). The board
+/// is 18.4 kg (I: 17.9 kg vendor kit + 0.5 kg of our parts). Of the 7.5 kg
+/// wheel assembly (I), the rotor can and tyre (4.5 kg, I) turn; the stator
+/// stays with the frame. Frame CoM 0.03 m behind the axle (heavier rear
+/// pack) and 0.15 m above the ground (I); with the stator at the axle that
+/// is (0.0244, 0.003) m from the axle for the 13.4 kg frame body. Frame
+/// pitch inertia 0.47 kg m^2 (I). Tyre radius 0.146 m (V). Kt 0.658 N.m/A
+/// (M, motor wizard), i.e. 0.94 of the controller's 0.7 belief.
+pub fn plant_x7() -> PlantVariation {
+    PlantVariation {
+        board_mass_kg: Some(18.4),
+        rider_mass_kg: None,
+        kt_scale: Some(0.658 / 0.7),
+        tail_friction: None,
+        wheel_rot_kg: Some(4.5),
+        wheel_spin_kgm2: Some(0.045),
+        frame_com_m: Some((0.0244, 0.003)),
+        frame_inertia_scale: Some(0.47 / 0.400),
+        wheel_radius_m: Some(0.146),
+        x7_geometry: true,
+        pad_z_m: None,
+        rider_reach_m: None,
+        rider_lean_lag_s: None,
+    }
+}
+
+/// Parses `--plant SPEC`: `x7`, optionally followed by `,key=value`
+/// overrides (board_kg, wheel_kg, wheel_spin, com_x, com_z, frame_i, radius,
+/// kt). A spec without `x7` overrides the shared model's values.
+pub fn parse_plant_spec(spec: &str) -> Result<PlantVariation, String> {
+    let mut v = PlantVariation::default();
+    for (i, part) in spec
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .enumerate()
+    {
+        if part == "x7" {
+            if i != 0 {
+                return Err("--plant: 'x7' must come first".into());
+            }
+            v = plant_x7();
+            continue;
+        }
+        let (k, val) = part
+            .split_once('=')
+            .ok_or(format!("--plant: '{part}' is not key=value"))?;
+        let x: f64 = val
+            .parse()
+            .map_err(|_| format!("--plant: '{val}' is not a number"))?;
+        match k {
+            "board_kg" => v.board_mass_kg = Some(x),
+            "wheel_kg" => v.wheel_rot_kg = Some(x),
+            "wheel_spin" => v.wheel_spin_kgm2 = Some(x),
+            "com_x" => v.frame_com_m = Some((x, v.frame_com_m.map_or(-0.03, |c| c.1))),
+            "com_z" => v.frame_com_m = Some((v.frame_com_m.map_or(0.0, |c| c.0), x)),
+            "frame_i" => v.frame_inertia_scale = Some(x),
+            "radius" => v.wheel_radius_m = Some(x),
+            "kt" => v.kt_scale = Some(x),
+            "pad_z" => v.pad_z_m = Some(x),
+            "reach" => v.rider_reach_m = Some(x),
+            _ => return Err(format!("--plant: unknown key '{k}'")),
+        }
+    }
+    Ok(v)
 }
 
 /// Where the regulator's attitude comes from -- ADR-0011 exit criterion (f).
@@ -1568,6 +2895,10 @@ pub enum EstimatorAiding {
     /// Not pinned before issue #227; see
     /// `tests/test_cmd_envelope_reserve.py` for the coverage this adds.
     WheelOdometry,
+    /// [`control_core::GradeAwareAiding`]: the command prediction, corrected
+    /// by a slow grade load learned from wheel odometry. Unbiased on grades,
+    /// and robust to wheel spikes on rough ground.
+    GradeAware,
 }
 
 /// A scheduled external force/torque disturbance, world frame, applied to the
@@ -1658,6 +2989,48 @@ impl Default for HostConfig {
             trace_path: None,
             kerb: None,
             terrain: None,
+            lean_steer: false,
+            spawn_x_m: None,
+            spawn_y_m: None,
+            spawn_yaw_deg: None,
+            grade_feedforward: false,
+            max_current_a: None,
+            speed_hold_m_s: None,
+            rider_mass_kg: None,
+            board_mass_kg: None,
+            plant: None,
+            kt_scale: None,
+            start_speed_m_s: None,
+            grade_course: None,
+            hfield_wheel_contact: false,
+            tail_brake: false,
+            pad_solref_s: 0.05,
+            tail_friction: None,
+            authority_margin: MarginMode::Off,
+            rider_reacts: false,
+            rider_speed_m_s: None,
+            rider_reach_m: None,
+            rider_lean_lag_s: None,
+            rider_target_change: None,
+            tumble: false,
+            motor_limits: false,
+            rider_ankle: false,
+            ankle_hinge: false,
+            kp_scale: 1.0,
+            foot_torque: false,
+            rider_reach_back_m: None,
+            obstacles: None,
+            sensors_stage0: false,
+            noise_scale: 1.0,
+            extra_delay_ms: 0.0,
+            kd_scale: 1.0,
+            ankle_rigid: false,
+            pose_out: None,
+            stop_after_handoff_s: None,
+            hud_out_addr: None,
+            batt_soc0: 0.9,
+            hold_until_arm: false,
+            balance_comp: false,
         }
     }
 }
@@ -1701,6 +3074,14 @@ struct TraceRow {
     /// carry elsewhere in this file -- see [`write_stats`].
     pos_x_m: f32,
     pos_y_m: f32,
+    /// Bumper contact forces, N (ADR-0012 touch sensors).
+    nose_strike_n: f32,
+    tail_strike_n: f32,
+    /// `--authority-margin`: margin and level (0 none, 1 pulse, 2 solid).
+    margin: f32,
+    margin_level: u8,
+    /// Truth roll, deg (body roll; positive = deck leans right).
+    truth_roll_deg: f32,
     /// `|proposed_amps| / MAX_CURRENT_A`, unfiltered.
     utilisation: f32,
     /// ... and low-passed at [`AUTHORITY_UTILISATION_TAU_S`].
@@ -1913,26 +3294,154 @@ pub fn spawn(cfg: HostConfig) -> std::thread::JoinHandle<Result<RunSummary, Host
 /// `None`), or until a backend/I-O error stops it. Blocking -- call this
 /// from a spawned thread, not the process's main thread, unless the caller
 /// has nothing else to do on main either.
+/// Asks macOS to schedule the loop thread as real-time (Mach time-constraint
+/// policy, plus user-interactive QoS), so the
+/// 2 ms cycle and its state packets come out in fewer bursts under load. Live
+/// play needs this; a scripted run does not, but it does no harm. It does
+/// nothing on other targets (the RT target uses PREEMPT_RT, not this host).
+/// The last part of each paced wait that the loop spins instead of sleeping.
+const SPIN_WINDOW: Duration = Duration::from_millis(1);
+
+fn request_interactive_scheduling() {
+    #[cfg(target_os = "macos")]
+    {
+        // <mach/thread_policy.h> and <pthread/qos.h>. libSystem is always
+        // linked on macOS.
+        #[repr(C)]
+        struct TimeConstraint {
+            period: u32,
+            computation: u32,
+            constraint: u32,
+            preemptible: i32,
+        }
+        #[repr(C)]
+        struct Timebase {
+            numer: u32,
+            denom: u32,
+        }
+        extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+            fn mach_thread_self() -> u32;
+            fn mach_timebase_info(info: *mut Timebase) -> i32;
+            fn thread_policy_set(thread: u32, flavor: u32, policy: *const i32, count: u32) -> i32;
+        }
+        const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+        const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
+        // SAFETY: plain libSystem calls on the current thread; the pointers
+        // are to live, correctly laid-out locals.
+        unsafe {
+            let _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            let mut tb = Timebase { numer: 0, denom: 0 };
+            if mach_timebase_info(&mut tb) != 0 || tb.numer == 0 {
+                eprintln!("sim-host: no Mach timebase; real-time policy not set");
+                return;
+            }
+            let abs = |ns: u64| (ns * tb.denom as u64 / tb.numer as u64) as u32;
+            // One 2 ms cycle; a tick computes in about 20 us. Ask for 0.5 ms
+            // of CPU, delivered within 1 ms of the period start.
+            let policy = TimeConstraint {
+                period: abs(2_000_000),
+                computation: abs(500_000),
+                constraint: abs(1_000_000),
+                preemptible: 1,
+            };
+            let rc = thread_policy_set(
+                mach_thread_self(),
+                THREAD_TIME_CONSTRAINT_POLICY,
+                &policy as *const TimeConstraint as *const i32,
+                4,
+            );
+            if rc != 0 {
+                eprintln!("sim-host: real-time thread policy refused (kern {rc}); QoS only");
+            }
+        }
+    }
+}
+
 pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
+    request_interactive_scheduling();
     let params = Params {
-        kp_nm_per_rad: KP_NM_PER_RAD,
-        kd_nm_per_rad_s: KD_NM_PER_RAD_S,
+        kp_nm_per_rad: KP_NM_PER_RAD * cfg.kp_scale,
+        kd_nm_per_rad_s: KD_NM_PER_RAD_S * cfg.kd_scale,
         kt_nm_per_a: KT_NM_PER_A,
-        max_current_a: MAX_CURRENT_A,
+        max_current_a: cfg.max_current_a.unwrap_or(MAX_CURRENT_A),
         ..Params::default()
     };
 
     // ADR-0012: a kerb run opens a spliced copy; every other run opens the
     // shared model itself, unchanged.
     let terrain = match &cfg.terrain {
-        Some(path) => Some(read_terrain_spec(path)?),
+        Some(path) => Some(read_terrain_spec(
+            path,
+            cfg.spawn_x_m,
+            cfg.spawn_y_m,
+            cfg.spawn_yaw_deg,
+        )?),
         None => None,
     };
-    let generated_model = if cfg.kerb.is_some() || terrain.is_some() {
-        Some(write_model_with_kerb(cfg.kerb.as_ref(), terrain.as_ref())?)
+    let base = cfg.plant.unwrap_or_default();
+    let variation = PlantVariation {
+        board_mass_kg: cfg.board_mass_kg.or(base.board_mass_kg),
+        rider_mass_kg: cfg.rider_mass_kg.or(base.rider_mass_kg),
+        kt_scale: cfg.kt_scale.or(base.kt_scale),
+        tail_friction: cfg.tail_friction.or(base.tail_friction),
+        rider_reach_m: cfg.rider_reach_m.or(base.rider_reach_m),
+        rider_lean_lag_s: cfg.rider_lean_lag_s.or(base.rider_lean_lag_s),
+        ..base
+    };
+    let generated_model = if cfg.kerb.is_some()
+        || terrain.is_some()
+        || cfg.lean_steer
+        || cfg.max_current_a.is_some()
+        || variation != PlantVariation::default()
+    {
+        Some(write_model_with_kerb(
+            cfg.kerb.as_ref(),
+            terrain.as_ref(),
+            cfg.lean_steer,
+            cfg.max_current_a,
+            variation,
+            !cfg.hfield_wheel_contact,
+            cfg.pad_solref_s,
+        )?)
     } else {
         None
     };
+    if cfg.ankle_hinge || cfg.ankle_rigid {
+        let Some(path) = &generated_model else {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --ankle-hinge needs a generated model (use --lean-steer)",
+            )));
+        };
+        let xml = std::fs::read_to_string(path)?;
+        std::fs::write(path, splice_ankle_hinge(&xml, cfg.ankle_rigid)?)?;
+    }
+    if let Some(csv) = &cfg.obstacles {
+        let Some(path) = &generated_model else {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --obstacles needs a generated model (use --lean-steer)",
+            )));
+        };
+        let surface = match &terrain {
+            Some(t) => Some(crate::ground::GroundSurface::from_hfield_bin(
+                &t.hfield_path,
+                t.half_extent_x_m,
+                t.half_extent_y_m,
+            )?),
+            None => None,
+        };
+        let xml = std::fs::read_to_string(path)?;
+        std::fs::write(path, splice_obstacles(&xml, csv, surface.as_ref())?)?;
+    }
+    if cfg.tumble {
+        let Some(path) = &generated_model else {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --tumble needs a generated model (use --lean-steer)",
+            )));
+        };
+        let xml = std::fs::read_to_string(path)?;
+        std::fs::write(path, splice_tumble_rider(&xml)?)?;
+    }
     let model_path = generated_model.clone().unwrap_or_else(rider_model_path);
     if let Some(kerb) = &cfg.kerb {
         eprintln!(
@@ -1946,13 +3455,58 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             HANDOFF_TILT_RAD.to_degrees(),
         );
     }
-    let mut backend = SimBackend::with_model_path(params, model_path);
+    // The backend's chain clamps at its own limit (IDEAL: 40 A); it must be
+    // the host's limit, or a larger --max-current is a silent 40 A cap.
+    let mut backend = SimBackend::with_model_path(params, model_path)
+        .with_current_limit(cfg.max_current_a.unwrap_or(MAX_CURRENT_A) as f64);
+    // `--sensors stage0`: the placeholder sensor and actuation imperfections
+    // (gyro and accelerometer noise and bias, wheel-speed quantisation, 1 ms
+    // delay, 1 ms current loop), with `--noise-scale` and `--extra-delay-ms`.
+    // Without it the run is ideal: no noise, no delay.
+    if cfg.sensors_stage0 {
+        let base = sim_backend::imperfections::STAGE0_PLACEHOLDER;
+        let k = cfg.noise_scale;
+        let profile = sim_backend::imperfections::ImperfectionProfile {
+            gyro_noise_rad_s: base.gyro_noise_rad_s * k,
+            gyro_bias_rad_s: base.gyro_bias_rad_s * k,
+            accel_noise_m_s2: base.accel_noise_m_s2 * k,
+            actuation_delay_s: base.actuation_delay_s + cfg.extra_delay_ms / 1000.0,
+            ..base
+        };
+        eprintln!(
+            "sim-host: sensors stage0 x{k}: gyro noise {:.4} rad/s, accel noise {:.3} m/s^2, delay {:.1} ms",
+            profile.gyro_noise_rad_s, profile.accel_noise_m_s2, profile.actuation_delay_s * 1000.0
+        );
+        backend = backend.with_imperfections(profile);
+    }
     // Before `open()`, which is where the tilt is applied -- see
     // `HostConfig::incline_deg`.
     backend.set_incline_deg(cfg.incline_deg);
     // Before `open()`, same reason -- see `HostConfig::damping_scale`.
     backend.set_damping_scale(cfg.damping_scale);
     backend.open().map_err(HostError::Backend)?;
+    // Smooth wheel contact: the heights the plate follows (crate::ground).
+    let ground = match (&terrain, cfg.hfield_wheel_contact) {
+        (Some(t), false) => Some(
+            crate::ground::GroundSurface::from_hfield_bin(
+                &t.hfield_path,
+                t.half_extent_x_m,
+                t.half_extent_y_m,
+            )
+            .map_err(HostError::Io)?,
+        ),
+        _ => None,
+    };
+    let place_wheel_ground = |backend: &mut SimBackend| {
+        if let Some(g) = &ground {
+            let (pos, quat) = g.plate_pose(backend.truth_frame_xpos(), DEFAULT_R_EFF_M as f64);
+            backend.set_wheel_ground(pos, quat);
+        }
+    };
+    place_wheel_ground(&mut backend);
+    // `--hold-until-arm`: the spawn pose to hold, and whether a player has armed.
+    let spawn_qpos = backend.truth_qpos();
+    let mut armed_seen = !cfg.hold_until_arm;
     // Armed unconditionally at startup, the same way every other Rust-hosted
     // harness in this repo arms (`impulse-response-rust`, `sim-backend`'s own
     // tests): there is no synthetic Unreal client during a verification run,
@@ -1975,8 +3529,21 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut envelope = Envelope::new(params);
     envelope.arm();
 
-    let regulator = PitchRegulator::new(KP_NM_PER_RAD, KD_NM_PER_RAD_S);
+    let regulator =
+        PitchRegulator::new(KP_NM_PER_RAD * cfg.kp_scale, KD_NM_PER_RAD_S * cfg.kd_scale);
+    if cfg.kp_scale != 1.0 || cfg.kd_scale != 1.0 {
+        eprintln!(
+            "sim-host: balance gains Kp {:.0} N*m/rad, Kd {:.1} N*m*s/rad (study scales {} and {})",
+            KP_NM_PER_RAD * cfg.kp_scale,
+            KD_NM_PER_RAD_S * cfg.kd_scale,
+            cfg.kp_scale,
+            cfg.kd_scale
+        );
+    }
     let mut estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
+    // Lean-to-steer banks the board, and a single-axis pitch filter then
+    // reads the turn's yaw rate as pitch (see `control_core::TiltFilter`).
+    let mut tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
     let accel_ff = CommandFeedforward::new(ACCEL_FF_GAIN_M_S2_PER_A);
     // Only advanced when `cfg.estimator_aiding` selects it (issue #227) --
     // built unconditionally anyway, since a `WheelAccelEstimator` is cheap
@@ -1988,6 +3555,109 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // `control-ffi`'s doc recommends for hardware). One cycle old by
     // construction, same as `control-ffi::ObController::last_amps`.
     let mut last_amps: f32 = 0.0;
+    let mut grade_aid =
+        control_core::GradeAwareAiding::new(ACCEL_FF_GAIN_M_S2_PER_A, GRADE_LOAD_TAU_S);
+    // Same gains as hill.py / shuttle_run.py's outer loop.
+    // Tuning only: OVERBOARD_SPEED_LOOP="kp,ki,max_ref_deg".
+    let (sl_kp, sl_ki, sl_max_deg) = std::env::var("OVERBOARD_SPEED_LOOP")
+        .ok()
+        .and_then(|v| {
+            let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (f.len() == 3).then(|| (f[0], f[1], f[2]))
+        })
+        .unwrap_or((0.05, 0.02, 5.0));
+    let mut speed_loop = control_core::VelocityLoop::new(
+        sl_kp,
+        sl_ki,
+        sl_max_deg.to_radians(),
+        control_core::PlantCoupling::ComAboveAxle,
+    );
+    // `--speed-hold` law: full-state LQR from sim/carve/lqr_design.py.
+    // Tuning only: OVERBOARD_SPEED_LQR="k_pitch,k_rate,k_speed,k_int,accel".
+    let lqr_gains = std::env::var("OVERBOARD_SPEED_LQR")
+        .ok()
+        .and_then(|v| {
+            let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (f.len() == 5).then(|| (f[0], f[1], f[2], f[3], f[4]))
+        })
+        .unwrap_or((376.8, 88.4, 28.35, 8.06, 0.5));
+    let new_speed_lqr = || {
+        control_core::SpeedHoldLqr::new(
+            lqr_gains.0,
+            lqr_gains.1,
+            lqr_gains.2,
+            lqr_gains.3,
+            lqr_gains.4,
+        )
+        // Steady lean and current per m/s^2, from lqr_design.py's linear model.
+        .with_feedforward(-0.1261, 17.82)
+    };
+    let mut speed_lqr = new_speed_lqr();
+    // OVERBOARD_SPEED_HOLD_BASELINE: the law without grade feedforward or
+    // governor, kept so the 2026-10-04 Monte Carlo baseline can be re-taken.
+    let speed_hold_baseline = std::env::var_os("OVERBOARD_SPEED_HOLD_BASELINE").is_some();
+    // `--start-speed`: applied once the board has settled, not at t = 0. A
+    // board that is moving on its first IMU sample has its estimator start
+    // from a deceleration it reads as tilt (measured: -4.2 deg, 27 A), and on
+    // terrain the spawn drop makes that worse. A real board also starts its
+    // estimator at rest.
+    let mut start_speed_pending = cfg.start_speed_m_s;
+    let mut margin = control_core::AuthorityMargin::new();
+    let mut rider_model = RiderSpeedModel::default();
+    // `--tumble`: the rider is free (fall) or off (dismount); the motor is cut.
+    let mut rider_free = false;
+    // Pad rest (see the loop): stopped on a pad, motor off until the deck is level.
+    let mut pad_mode = false;
+    // `--ankle-hinge` (see HostConfig::ankle_hinge).
+    let ankle_m = variation.rider_mass_kg.unwrap_or(70.0) as f32;
+    let ankle_h = 0.75 - ANKLE_PIVOT_Z_M as f32;
+    let ankle_mgh = ankle_m * 9.81 * ankle_h;
+    let ankle_j = ankle_m * ankle_h * ankle_h + 0.15 * ankle_m;
+    let ankle_k = 1.3 * ankle_mgh;
+    let ankle_c = 2.0 * 0.7 * (ankle_j * (ankle_k - ankle_mgh)).sqrt();
+    let ankle_cap = ankle_m * 9.81 * ANKLE_COP_M;
+    let mut ankle_lean_prev: Option<f32> = None;
+    let mut ankle_rate_f = 0.0_f32;
+    let mut ankle_peak_nm = 0.0_f32;
+    if cfg.ankle_hinge {
+        eprintln!(
+            "sim-host: --ankle-hinge: K {ankle_k:.0} N*m/rad, C {ankle_c:.0} N*m*s/rad, limit {ankle_cap:.0} N*m"
+        );
+    }
+    let mut pad_grade_hold_s = 0.0_f64;
+    let mut last_pitch_rad = 0.0_f32;
+    let mut target_changed = false;
+    let mut motor_cut = false;
+    let mut handoff_at_s: Option<f64> = None;
+    let mut pose_rows: Vec<String> = Vec::new();
+    // `--rider-reach`: the stick spans the rider's reach, and the rider model
+    // uses the same share of it (60 %) as of the model's 5 cm.
+    let fore_aft_range_m = variation
+        .rider_reach_m
+        .map_or(BALLAST_RANGE_M, |r| r as f32);
+    // `--rider-reach-back M`: how far back the stick takes the rider. A rider
+    // who stops hard bends the knees and leans back with the deck, far past
+    // the forward lean: stopping from 6.5 m/s in 7 m needs the centre of
+    // mass about 0.28 m behind the wheel; 0.10 m allows about 1.1 m/s^2.
+    let fore_aft_back_range_m = cfg
+        .rider_reach_back_m
+        .map_or(fore_aft_range_m, |r| r as f32);
+    rider_model.bound = RiderSpeedModel::LEAN_BOUND * fore_aft_range_m / BALLAST_RANGE_M;
+    let mut grade_comp = control_core::GradeCompensator::new();
+    let mut battery = crate::hud::BatteryModel::new(cfg.batt_soc0);
+    let mut hud_seq: u64 = 0;
+    let hud_kt = KT_NM_PER_A as f64 * variation.kt_scale.unwrap_or(1.0);
+    let hud_mass =
+        variation.board_mass_kg.unwrap_or(13.0) + variation.rider_mass_kg.unwrap_or(70.0);
+    let hud_i_limit = cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
+    let mut margin_level = control_core::MarginLevel::None;
+    let mut margin_level_since_s = 0.0f64;
+    let mut rider_eased = false;
+    let mut dismount_at_s: Option<f64> = None;
+    // `--grade-course`: last cycle's grade and its rate (see the gyro fix-up).
+    let mut grade_rad_prev: Option<f32> = None;
+    let mut grade_rate_rad_s: f32 = 0.0;
+    let mut last_saturated = false;
 
     let out_socket = UdpSocket::bind("127.0.0.1:0")?;
     let in_socket = UdpSocket::bind(cfg.input_in_addr)?;
@@ -2025,24 +3695,52 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // The heightfield is finite. Outside its extent there is no geom at all --
     // not flat ground, NOTHING, because the terrain splice replaces the plane
     // rather than overlaying it (see write_model_with_kerb for why). A board
-    // that leaves the grid falls forever. The corridor is therefore clamped
-    // inside the grid with a margin, so the existing soft lean-arrest turns
-    // the board back before it reaches an edge that has no floor beyond it.
-    let (corridor_x_min_m, corridor_x_max_m, corridor_half_width_m) = match &terrain {
-        Some(t) => {
-            let limit = t.half_extent_m - TERRAIN_EDGE_MARGIN_M;
-            (
-                CORRIDOR_X_MIN_M.max(-limit),
-                CORRIDOR_X_MAX_M.min(limit),
-                corridor_half_width_m.min(limit),
-            )
-        }
-        None => (CORRIDOR_X_MIN_M, CORRIDOR_X_MAX_M, corridor_half_width_m),
-    };
+    // that leaves the grid falls forever.
+    //
+    // Three cases. On the flat game plane the corridor is active and symmetric
+    // in Y, as it always was. On a `--terrain` heightmap WITHOUT a `"bounds"`
+    // object the corridor is OFF (an authored course may sit anywhere in the
+    // frame, so the fixed corridor would brake it the whole way) -- unchanged
+    // from before. A `"bounds"` object turns the corridor back ON with the
+    // level's own rectangle, so a board that leaves a bounded level is braked
+    // rather than driven off the grid. Every rectangle is clamped inside the
+    // grid with a margin, so the soft lean-arrest turns the board back before
+    // an edge that has no floor beyond it.
+    let (corridor_x_min_m, corridor_x_max_m, corridor_y_min_m, corridor_y_max_m, corridor_active) =
+        match &terrain {
+            Some(t) => {
+                let lx = t.half_extent_x_m - TERRAIN_EDGE_MARGIN_M;
+                let ly = t.half_extent_y_m - TERRAIN_EDGE_MARGIN_M;
+                match t.bounds {
+                    Some(b) => (
+                        b.xmin.max(-lx),
+                        b.xmax.min(lx),
+                        b.ymin.max(-ly),
+                        b.ymax.min(ly),
+                        true,
+                    ),
+                    None => (
+                        CORRIDOR_X_MIN_M.max(-lx),
+                        CORRIDOR_X_MAX_M.min(lx),
+                        -corridor_half_width_m.min(ly),
+                        corridor_half_width_m.min(ly),
+                        false,
+                    ),
+                }
+            }
+            None => (
+                CORRIDOR_X_MIN_M,
+                CORRIDOR_X_MAX_M,
+                -corridor_half_width_m,
+                corridor_half_width_m,
+                true,
+            ),
+        };
     if terrain.is_some() {
         eprintln!(
-            "sim-host: drivable corridor clamped to the heightfield: \
-             x[{corridor_x_min_m:.1},{corridor_x_max_m:.1}] y+-{corridor_half_width_m:.1} m"
+            "sim-host: drivable corridor {} the heightfield: \
+             x[{corridor_x_min_m:.1},{corridor_x_max_m:.1}] y[{corridor_y_min_m:.1},{corridor_y_max_m:.1}] m",
+            if corridor_active { "from \"bounds\", clamped to" } else { "OFF (no \"bounds\"); grid is" }
         );
     }
 
@@ -2064,8 +3762,27 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // continuous running total (see `wire::StateOut::yaw_rad`), and the
     // attitude de-rotation below, which needs to know how much world-frame
     // yaw is currently baked into MuJoCo's own quaternion before it can read
-    // body pitch and roll back out of it.
+    // body pitch and roll back out of it. It starts at the spawn heading,
+    // which the terrain splice has baked into the frame body quat, so the
+    // de-rotation reads the true baked-in yaw from cycle one. A run with no
+    // spawn yaw keeps the literal-0.0 start the old runs used, so its trace is
+    // unchanged.
+    let spawn_yaw_rad = terrain.as_ref().map_or(0.0, |t| t.spawn_yaw_rad as f32);
     let mut yaw_rad: f32 = 0.0;
+    if spawn_yaw_rad != 0.0 {
+        yaw_rad = spawn_yaw_rad;
+    }
+    // Lean-to-steer state (only used with `cfg.lean_steer`). Roll and roll
+    // rate are last tick's: the rider reacts one 2 ms cycle late.
+    let lean_params = crate::lean_steer::LeanSteerParams::from_env();
+    let mut tire_yaw = crate::lean_steer::TireYaw::default();
+    let mut lean_roll_rad: f32 = 0.0;
+    let mut lean_roll_rate_rad_s: f32 = 0.0;
+    let mut rider = crate::lean_steer::Rider::default();
+    let lean_debug = std::env::var("OVERBOARD_LEAN_DEBUG").is_ok();
+    let mut lean_balance_torque_nm: f32 = 0.0;
+    let mut lean_balance_peak_nm: f32 = 0.0;
+    let mut lean_yaw_torque_nm: f64 = 0.0;
     let mut wheel_angle_rad: f32 = 0.0;
     // Previous tick's ground speed, m/s, signed (positive = forward) -- used
     // to gate THIS tick's `weight_shift_fore_aft` against MAX_GROUND_SPEED_M_S
@@ -2152,6 +3869,15 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 break;
             }
         }
+        // `--rider-reacts`: the rider has stepped off; the run is over.
+        if dismount_at_s.is_some_and(|t| t_known_s > t + cfg.stop_after_handoff_s.unwrap_or(0.2)) {
+            break;
+        }
+        if let (Some(s), Some(t0)) = (cfg.stop_after_handoff_s, handoff_at_s) {
+            if t_known_s > t0 + s {
+                break;
+            }
+        }
 
         // Drain every pending datagram; only the most recent VALID one
         // matters (issue #161: "Use the most recent packet received").
@@ -2212,6 +3938,36 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 latest_input.weight_shift_lateral,
             ),
         };
+        // `--rider-speed`: the rider model leans; the deployed law balances.
+        let stick_fore_aft = match cfg.rider_speed_m_s {
+            Some(v_target) => {
+                if start_speed_pending.is_some() {
+                    rider_model.reset();
+                    0.0
+                } else {
+                    let grade_down_rad = cfg
+                        .grade_course
+                        .as_ref()
+                        .map_or(0.0, |c| -(c.grade_deg(-truth_pos_x_m) as f32).to_radians());
+                    let v_target = match cfg.rider_target_change {
+                        Some((t_change, v)) if t_known_s >= t_change => {
+                            if !target_changed {
+                                target_changed = true;
+                                rider_model.set_target_now(v);
+                                // A hard brake: the rider leans as far back as they can.
+                                rider_model.bound = fore_aft_range_m / BALLAST_RANGE_M;
+                            }
+                            v
+                        }
+                        _ => v_target,
+                    };
+                    let target = if rider_eased { 0.0 } else { v_target };
+                    rider_model.update(last_forward_speed_m_s, target, grade_down_rad, DT_S as f32)
+                        * (BALLAST_RANGE_M / fore_aft_range_m)
+                }
+            }
+            None => stick_fore_aft,
+        };
 
         // --- COMMAND-ENVELOPE RESERVE (ADR-0011 exit criterion (b)) ------
         //
@@ -2246,6 +4002,25 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // there is no reset implementation to wire `reset` into. `stale`
         // zeroes both the same way it zeroes weight_shift/steer.
         let input_armed_bit = !stale && latest_input.armed_bit;
+        if !armed_seen && input_armed_bit {
+            armed_seen = true;
+            eprintln!("sim-host: armed at sim_t={t_known_s:.3}s -- the board is released");
+        }
+        // `--hold-until-arm`: the host puts the held board back every step, so
+        // a controller that runs meanwhile winds up against it (the game saw
+        // +310 A of demand and a SOLID warning after 50 s held, and a nose
+        // strike 1.6 s after a late arm). While held: no current, and the
+        // loops and filters start from zero at release. The attitude
+        // estimator runs on, so it is settled at release.
+        if !armed_seen {
+            grade_aid.reset();
+            grade_comp.reset();
+            speed_loop.reset();
+            speed_lqr.reset();
+            utilisation_filtered = 0.0;
+            margin = control_core::AuthorityMargin::new();
+            last_amps = 0.0;
+        }
         let input_reset_bit = !stale && latest_input.reset_bit;
         if input_reset_bit && !prev_reset_bit {
             // ADR-0012 gave this bit its first real job: it is the ONLY way
@@ -2268,9 +4043,23 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             backend.reset();
             handoff_latched = false;
             handoff_state = None;
-            yaw_rad = 0.0;
+            // `backend.reset()` returns the plant to the spawn pose, which
+            // carries the spawn heading in its frame quat; `yaw_rad` must match
+            // it, not snap to zero, or the de-rotation would read a false yaw.
+            yaw_rad = spawn_yaw_rad;
+            tire_yaw = crate::lean_steer::TireYaw::default();
+            lean_roll_rad = 0.0;
+            lean_roll_rate_rad_s = 0.0;
+            lean_yaw_torque_nm = 0.0;
+            rider = crate::lean_steer::Rider::default();
+            lean_balance_torque_nm = 0.0;
             estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
+            tilt_estimator = control_core::TiltFilter::new(ESTIMATOR_TAU_S);
             last_amps = 0.0;
+            grade_aid.reset();
+            grade_comp.reset();
+            speed_loop.reset();
+            speed_lqr.reset();
             last_forward_speed_m_s = 0.0;
             utilisation_filtered = 0.0;
             prev_outside_corridor = false;
@@ -2319,8 +4108,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // as of the END of the PREVIOUS tick (issue #163: this used to read
         // the dead-reckoned path, which no longer exists) -- the same
         // one-cycle lag the speed cap above uses, and for the same reason.
-        let outside_corridor = !(corridor_x_min_m..=corridor_x_max_m).contains(&truth_pos_x_m)
-            || truth_pos_y_m.abs() > corridor_half_width_m;
+        // The corridor bounds the flat game plane, and a `--terrain` level that
+        // declares a `"bounds"` rectangle (see `corridor_active` above). A
+        // terrain level WITHOUT `"bounds"` keeps the corridor off -- a course
+        // may sit anywhere in the frame (one started at x = +88 m), and the
+        // terrain itself bounds the run.
+        let outside_corridor = corridor_active
+            && (!(corridor_x_min_m..=corridor_x_max_m).contains(&truth_pos_x_m)
+                || !(corridor_y_min_m..=corridor_y_max_m).contains(&truth_pos_y_m));
         if outside_corridor && !prev_outside_corridor {
             eprintln!(
                 "sim-host: LEFT THE DRIVABLE CORRIDOR at ({truth_pos_x_m:.1}, \
@@ -2352,9 +4147,91 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // PHYSICALLY (see this file's header). Set every cycle, mirroring
         // apply_external_force's own "call every cycle or a stale value
         // persists" convention.
+        // With lean-to-steer the rider model owns the hips and the balance
+        // torque: it cambers the board for the curvature `steer` asks for
+        // and keeps it balanced (see `lean_steer`).
+        let lateral_target_m = if cfg.lean_steer {
+            let obs = crate::lean_steer::RiderObs {
+                roll_rad: lean_roll_rad,
+                roll_rate_rad_s: lean_roll_rate_rad_s,
+            };
+            let cmd = rider.command(
+                &lean_params,
+                steer,
+                last_forward_speed_m_s,
+                &obs,
+                DT_S as f32,
+            );
+            lean_balance_torque_nm = cmd.roll_torque_nm;
+            lean_balance_peak_nm = lean_balance_peak_nm.max(cmd.roll_torque_nm.abs());
+            if lean_debug && ticks.is_multiple_of(125) {
+                eprintln!(
+                    "LEAN t={t_known_s:6.2} v={last_forward_speed_m_s:5.2} steer={steer:+.2} \
+                     kappa={:+.3} phi_ref={:+5.1} phi={:+5.1} d={:+.3} tau={:+6.1}",
+                    rider.kappa_intent_per_m,
+                    crate::lean_steer::roll_reference(&lean_params, rider.kappa_intent_per_m)
+                        .to_degrees(),
+                    obs.roll_rad.to_degrees(),
+                    cmd.offset_m,
+                    cmd.roll_torque_nm
+                );
+            }
+            cmd.offset_m
+        } else {
+            weight_shift_lateral * BALLAST_RANGE_M
+        };
+        // `--rider-ankle`: a person stays upright with the ankles and knees as
+        // the deck pitches; the model's rider is otherwise rigid with the deck.
+        // Without it, on the tail pad the rider's mass swings back to the pad's
+        // tipping edge and the board pivots over (fable-oracle, 2026-10-04).
+        let upright_m = if cfg.rider_ankle {
+            (RIDER_COM_HEIGHT_M * last_pitch_rad.sin()).clamp(-0.30, 0.30)
+        } else {
+            0.0
+        };
+        if cfg.ankle_hinge || cfg.ankle_rigid {
+            if let Some(lean) = backend.truth_rider_body_lean() {
+                let lean = lean as f32;
+                let rate = ankle_lean_prev.map_or(0.0, |p| (lean - p) / DT_S as f32);
+                ankle_lean_prev = Some(lean);
+                ankle_rate_f += (DT_S as f32 / (0.005 + DT_S as f32)) * (rate - ankle_rate_f);
+                // A positive hinge angle tilts the body back (axis +Y, forward
+                // is -X), so the restoring torque for a forward lean is +.
+                // `--ankle-rigid` (the bracket): a stiff joint spring against
+                // the DECK, which must reproduce the rigid rider.
+                let tau = if cfg.ankle_rigid {
+                    0.0 // the joint's own stiffness (splice_ankle_hinge)
+                } else {
+                    // `--foot-torque`: heel and toe pressure. Fore/aft stick s also
+                    // pushes the deck through the feet: s = -1 (heels down)
+                    // tips the deck nose-up, and the stiff law brakes to the
+                    // tail. A positive hinge torque pushes the deck nose-up
+                    // (measured: the other sign sped the board up).
+                    let foot = if cfg.foot_torque {
+                        -corridor_enforced_fore_aft * FOOT_TORQUE_SHARE * ankle_cap
+                    } else {
+                        0.0
+                    };
+                    (ankle_k * lean + ankle_c * ankle_rate_f + foot).clamp(-ankle_cap, ankle_cap)
+                };
+                ankle_peak_nm = ankle_peak_nm.max(tau.abs());
+                backend.set_ankle_pitch_torque(tau as f64);
+            }
+        }
         backend.set_ballast_targets(
-            corridor_enforced_fore_aft * BALLAST_RANGE_M,
-            weight_shift_lateral * BALLAST_RANGE_M,
+            corridor_enforced_fore_aft
+                * if corridor_enforced_fore_aft < 0.0 {
+                    // The back lean fades out below 2 m/s: a rider stands up as
+                    // the board stops on its tail. Held at a standstill, even a
+                    // 0.10 m lean-back put the (deck-rigid) rider's mass at the
+                    // tail pad's tipping edge and the board went over.
+                    let k = (last_forward_speed_m_s.abs() / BACK_REACH_FULL_SPEED_M_S).min(1.0);
+                    k * fore_aft_back_range_m
+                } else {
+                    fore_aft_range_m
+                }
+                + upright_m,
+            lateral_target_m,
         );
 
         // One-time startup kick, only when explicitly enabled (issue #169)
@@ -2394,8 +4271,45 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             in_kick_window,
             in_fall_kick_window,
         );
+        let mut torque = torque;
+        if cfg.lean_steer {
+            // Tire turn-slip moment (see `crate::lean_steer`), about world +Z.
+            if !rider_free {
+                torque[2] += lean_yaw_torque_nm;
+            }
+            // Rider balance skill, about the board's forward axis. Forward is
+            // body -X, and + rolls the board right (top towards body +Y),
+            // which is a rotation about body -X.
+            let xm = backend.truth_frame_xmat();
+            let tau = if rider_free {
+                0.0
+            } else {
+                lean_balance_torque_nm as f64
+            };
+            torque[0] -= tau * xm[0];
+            torque[1] -= tau * xm[3];
+            torque[2] -= tau * xm[6];
+        }
         backend.apply_external_force(force, torque);
 
+        place_wheel_ground(&mut backend);
+        if !armed_seen {
+            backend.hold_pose(&spawn_qpos);
+        }
+        if let Some(course) = &cfg.grade_course {
+            let grade_deg = course.grade_deg(-truth_pos_x_m);
+            backend.set_grade_deg(grade_deg);
+            let grade_rad = grade_deg.to_radians() as f32;
+            grade_rate_rad_s = (grade_rad - grade_rad_prev.unwrap_or(grade_rad)) / DT_S as f32;
+            grade_rad_prev = Some(grade_rad);
+        }
+        if let Some(v) = start_speed_pending.filter(|_| t_known_s >= START_SPEED_AT_S) {
+            backend.set_forward_speed(v, DEFAULT_R_EFF_M as f64);
+            // The reference and the grade aid restart from the new speed.
+            speed_lqr = new_speed_lqr();
+            grade_aid.reset();
+            start_speed_pending = None;
+        }
         let obs = backend.wait_observe().map_err(HostError::Backend)?;
         t_known_s = obs.t_recv_ns as f64 * 1e-9;
 
@@ -2404,7 +4318,14 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // matching `shuttle_run.py`'s tuned ridden config -- "the
         // recommended configuration" per that scenario's own comment).
         // `pitch_ref` is always 0: no outer loop (see this file's header).
-        let sample = obs.newest_imu().copied().unwrap_or(ImuSample::ZERO);
+        let mut sample = obs.newest_imu().copied().unwrap_or(ImuSample::ZERO);
+        // `--grade-course` turns gravity, not the road. A board held vertical
+        // then rotates against the plane, and the gyro reads that; on a real
+        // vertical curve the body stays vertical and the gyro reads ~0. Add
+        // the frame rate back (nose-up positive), or the complementary filter
+        // lags the curve by rate x tau: measured 2.6 deg at 2 m/s, R = 100 m,
+        // which saturated the motor at the curve end.
+        sample.gyro_rad_s[1] += GRADE_GYRO_SIGN * grade_rate_rad_s;
         let wheel_rate_rad_s = obs.erpm * RAD_S_PER_ERPM;
         // Real forward ground speed, m/s, signed -- computed here (rather
         // than only down in the dead-reckoning block that used to be its
@@ -2420,6 +4341,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // never reads it.
         let aiding = match cfg.estimator_aiding {
             EstimatorAiding::CommandFeedforward => accel_ff.predict(last_amps),
+            EstimatorAiding::GradeAware => {
+                let f = sample.accel_m_s2;
+                let mag = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+                grade_aid.update(last_amps, forward_speed_m_s, mag, DT_S as f32)
+            }
             EstimatorAiding::WheelOdometry => wheel_accel.update(forward_speed_m_s, DT_S as f32),
         };
         // The estimator runs on EVERY run, including a `PitchSource::
@@ -2427,7 +4353,26 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // it -- it is the only signal path a real board has, and an
         // acceptance trace that stopped recording it would stop being able to
         // show how big the bias criterion (f) is neutralising actually is.
-        let attitude = estimator.update(std::slice::from_ref(&sample), aiding);
+        if lean_debug && ticks.is_multiple_of(250) {
+            let f = sample.accel_m_s2;
+            eprintln!(
+                "IMU t={t_known_s:6.2} f=({:+.3},{:+.3},{:+.3}) aid={aiding:+.3} \
+                 accel_pitch={:+.2}deg gyro_y={:+.4}",
+                f[0],
+                f[1],
+                f[2],
+                (f[0] - aiding)
+                    .atan2((f[1] * f[1] + f[2] * f[2]).sqrt())
+                    .to_degrees(),
+                sample.gyro_rad_s[1]
+            );
+        }
+        let attitude = if cfg.lean_steer && std::env::var("OVERBOARD_TILT").as_deref() != Ok("0") {
+            tilt_estimator.set_speed(last_forward_speed_m_s);
+            tilt_estimator.update(std::slice::from_ref(&sample), aiding)
+        } else {
+            estimator.update(std::slice::from_ref(&sample), aiding)
+        };
 
         // Ground truth, never fed to the controller on a DEPLOYED run
         // (DR-OBS-1) -- reported because "the board is actually up" is what
@@ -2444,6 +4389,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // -- `backend.apply` only buffers a current for the next step -- so
         // the values are bit-identical to the ones the old ordering read.
         let xmat = backend.truth_frame_xmat();
+        if cfg.lean_steer {
+            // The plant turns itself: read the heading back, kept continuous.
+            let h = crate::lean_steer::heading_from_xmat(&xmat);
+            let d = (h - yaw_rad + std::f32::consts::PI).rem_euclid(2.0 * std::f32::consts::PI)
+                - std::f32::consts::PI;
+            yaw_rad += d;
+        }
         // ATTITUDE MUST BE DE-YAWED BEFORE PITCH/ROLL COME OUT OF IT (issue
         // #163). Both readings below are `atan2` on the frame's world z-axis,
         // and that derivation assumes the world x/y axes still line up with
@@ -2479,10 +4431,196 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Zero on any deployed run, so this whole line is a no-op there --
         // see HostConfig::pitch_bias_deg.
         let regulated_pitch_rad = source_pitch_rad + pitch_bias_rad;
-        let proposed_torque_nm =
-            regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, 0.0);
+        last_pitch_rad = regulated_pitch_rad;
+        // Optional outer speed loop (`--speed-hold`): sets the pitch
+        // reference from the speed error, as a Segway does. Off by default:
+        // the deployed board leaves speed to the rider.
+        // Rider warning (D1) and drive limit (D2), from LAST cycle's applied
+        // current, the wheel speed and the learned grade load.
+        if cfg.authority_margin != MarginMode::Off {
+            let duty = (MARGIN_KE_V_S * wheel_rate_rad_s.abs()
+                + MARGIN_R_PHASE_OHM * last_amps.abs())
+                / MARGIN_PACK_V;
+            let i_max = cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
+            let level = margin.update(
+                last_amps,
+                duty,
+                grade_aid.load_m_s2(),
+                ACCEL_FF_GAIN_M_S2_PER_A,
+                i_max,
+                DT_S as f32,
+            );
+            if level != margin_level {
+                eprintln!(
+                    "sim-host: rider warning {level:?} at sim_t={t_known_s:.3}s (margin {:.2}, \
+                     {last_amps:+.1} A, duty {duty:.2}, grade load {:+.2} m/s^2)",
+                    margin.margin(),
+                    grade_aid.load_m_s2(),
+                );
+                margin_level = level;
+                margin_level_since_s = t_known_s;
+            }
+            if cfg.authority_margin == MarginMode::Limit {
+                speed_lqr.set_drive_scale(margin.drive_scale());
+            }
+            if cfg.rider_reacts {
+                let held = t_known_s - margin_level_since_s >= RIDER_REACTION_S;
+                if !rider_eased && level >= control_core::MarginLevel::Pulse && held {
+                    rider_eased = true;
+                    eprintln!("sim-host: rider eases off at sim_t={t_known_s:.3}s (target 0 m/s)");
+                }
+                // Braking at the limit (negative current) is not a reason to step off:
+                // the rider leans back onto the tail, which is a safe brake.
+                // An eased rider who has come to a stop on a climb with the warning
+                // still on steps off: nobody balances in place on a 20 % hill. Without
+                // this the model rocks the board at 0 m/s until the nose strikes.
+                let stopped_on_climb = rider_eased
+                    && last_forward_speed_m_s.abs() < 0.3
+                    && level >= control_core::MarginLevel::Pulse
+                    && last_amps > 0.0;
+                if dismount_at_s.is_none()
+                    && (stopped_on_climb
+                        || (level == control_core::MarginLevel::Solid && held && last_amps > 0.0))
+                {
+                    dismount_at_s = Some(t_known_s);
+                    if cfg.tumble && backend.release_rider(false) {
+                        motor_cut = true;
+                        eprintln!("sim-host: --tumble: the rider steps off; the motor is cut");
+                    }
+                    eprintln!("sim-host: rider dismount at sim_t={t_known_s:.3}s");
+                }
+            }
+        }
+        if handoff_state.is_none() {
+            battery.step(
+                last_amps as f64,
+                wheel_rate_rad_s as f64,
+                hud_kt,
+                hud_mass,
+                DT_S,
+            );
+        }
+        if let Some(addr) = cfg.hud_out_addr {
+            if ticks.is_multiple_of(10) {
+                let pkt = crate::hud::HudOut {
+                    flags: margin_level as u16,
+                    seq: hud_seq,
+                    t_s: t_known_s,
+                    speed_m_s: wheel_rate_rad_s * DEFAULT_R_EFF_M,
+                    current_a: last_amps,
+                    torque_nm: (hud_kt as f32) * last_amps,
+                    torque_limit_nm: (hud_kt as f32) * hud_i_limit,
+                    batt_soc: battery.soc as f32,
+                    batt_v: battery.v as f32,
+                    batt_i_a: battery.i as f32,
+                    margin: margin.margin(),
+                };
+                let _ = out_socket.send_to(&pkt.to_bytes(), addr);
+                hud_seq += 1;
+            }
+        }
+        let pitch_ref_rad = match cfg.speed_hold_m_s {
+            Some(v_ref) => speed_loop.update(forward_speed_m_s, v_ref, DT_S as f32, last_saturated),
+            None => 0.0,
+        };
+        let proposed_torque_nm = regulator.update(
+            regulated_pitch_rad,
+            regulated_pitch_rate_rad_s,
+            pitch_ref_rad,
+        );
         // The single kt division -- the actuation boundary (issue #137).
-        let proposed_amps = proposed_torque_nm / KT_NM_PER_A;
+        let mut proposed_amps = proposed_torque_nm / KT_NM_PER_A;
+        // `--speed-hold` uses ONE full-state law for balance and speed (the
+        // cascade above overshot 2-3 m/s at grade changes). The legacy
+        // cascade stays only behind OVERBOARD_SPEED_LOOP for reproduction.
+        if let Some(v_ref) = cfg.speed_hold_m_s {
+            if std::env::var_os("OVERBOARD_SPEED_LOOP").is_none() {
+                // Stand still until `--start-speed` is applied.
+                let target = if start_speed_pending.is_some() || rider_eased {
+                    0.0
+                } else {
+                    v_ref
+                };
+                proposed_amps = if speed_hold_baseline {
+                    speed_lqr.update(
+                        regulated_pitch_rad,
+                        regulated_pitch_rate_rad_s,
+                        forward_speed_m_s,
+                        target,
+                        DT_S as f32,
+                        last_saturated,
+                    )
+                } else {
+                    // The learned grade load (zero unless `--estimator-aiding
+                    // grade-aware`) and the envelope limit: see
+                    // `SpeedHoldLqr::update_with_grade`.
+                    speed_lqr.update_with_grade(
+                        regulated_pitch_rad,
+                        regulated_pitch_rate_rad_s,
+                        forward_speed_m_s,
+                        target,
+                        DT_S as f32,
+                        last_saturated,
+                        grade_aid.load_m_s2(),
+                        cfg.max_current_a.unwrap_or(MAX_CURRENT_A),
+                    )
+                };
+            }
+        }
+        // Grade feedforward: the current that holds the board on the learned
+        // grade, so the proportional regulator does not have to droop
+        // nose-up to make it (3.8 deg on an 8 % descent, measured). The same
+        // idea as the VESC Float package's adaptive torque response.
+        if cfg.grade_feedforward {
+            proposed_amps += grade_aid.load_m_s2() / ACCEL_FF_GAIN_M_S2_PER_A;
+        }
+        // Pad mode (fable-oracle, 2026-10-04): the tail pad is on the road (a
+        // tail drag or a tail stop). The PD law would ask 75-90 A against the
+        // pad and drive the board over its tail; the grade estimate and the
+        // integral would learn the pad's support and dump it nose-down at the
+        // pull-away (the game: 3 of 3 tail stops ended in a fall). In pad mode
+        // only damping acts, limited to 12 N*m; the grade load and the
+        // integral are held at zero, and the grade load is not learned for
+        // 1 s after. Pitch only, so firmware can use the same rule.
+        // Not while the rider asks to go: that exit left the deck past 17 deg,
+        // and pad mode chattered on and off every step for about 50 ms.
+        if !pad_mode
+            && regulated_pitch_rad >= PAD_MODE_ENTER_RAD
+            && forward_speed_m_s.abs() < PAD_MODE_SPEED_M_S
+            && corridor_enforced_fore_aft <= PAD_MODE_GO_STICK
+            && regulated_pitch_rate_rad_s.abs() < PAD_MODE_REST_RATE_RAD_S
+        {
+            pad_mode = true;
+            eprintln!("sim-host: pad mode at sim_t={t_known_s:.3}s (tail pad down)");
+        } else if pad_mode
+            && (regulated_pitch_rad <= PAD_MODE_EXIT_RAD
+                || corridor_enforced_fore_aft > PAD_MODE_GO_STICK)
+        {
+            pad_mode = false;
+            pad_grade_hold_s = PAD_MODE_GRADE_HOLD_S;
+            eprintln!("sim-host: pad mode ends at sim_t={t_known_s:.3}s -- full balance");
+        }
+        if pad_mode || pad_grade_hold_s > 0.0 {
+            grade_aid.reset();
+            grade_comp.reset();
+            pad_grade_hold_s = (pad_grade_hold_s - DT_S).max(0.0);
+        }
+        // `--balance-comp`: grade compensation for the deployed law.
+        if cfg.balance_comp && cfg.speed_hold_m_s.is_none() {
+            proposed_amps += grade_comp.update(
+                regulated_pitch_rad - pitch_ref_rad,
+                grade_aid.load_m_s2(),
+                ACCEL_FF_GAIN_M_S2_PER_A,
+                KT_NM_PER_A,
+                last_saturated,
+                DT_S as f32,
+            );
+        }
+        // WARNING (measured 2026-10-04): `--grade-ff` is physically wrong for
+        // a balancing board and runs away (7-14 m/s on 6-12 % descents). A
+        // sustained torque needs a matching centre-of-mass offset (rider
+        // lean or board tilt); added current only makes the pitch loop fight
+        // it. Kept only so the result can be reproduced; do not use it.
         // --- ADR-0011 criterion (c): the saturation bit STOPS being thrown
         // --- away here ---------------------------------------------------
         //
@@ -2491,13 +4629,42 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // out of authority" signal existed, was computed every cycle, and was
         // dropped on the floor, while `FALLEN` -- which trips about a second
         // AFTER the outcome is decided -- was the only thing anyone was told.
+        if motor_cut || !armed_seen {
+            proposed_amps = 0.0;
+        }
+        if pad_mode {
+            proposed_amps = (-KD_NM_PER_RAD_S * cfg.kd_scale * regulated_pitch_rate_rad_s)
+                .clamp(-PAD_MODE_TORQUE_LIMIT_NM, PAD_MODE_TORQUE_LIMIT_NM)
+                / KT_NM_PER_A;
+        }
+        // `--motor-limits`: what the motor and the pack can give at this speed.
+        let mut limit_clamped = false;
+        if cfg.motor_limits {
+            const DUTY_MAX: f64 = 0.95;
+            const R_EFF_OHM: f64 = 1.5 * 0.0525; // Superflux phase resistance, two phases conducting
+            const CHARGE_LIMIT_A: f64 = 45.0;
+            let w = wheel_rate_rad_s as f64;
+            let i = proposed_amps as f64;
+            let limited = if i * w > 0.0 {
+                let room = ((DUTY_MAX * battery.v - hud_kt * w.abs()) / R_EFF_OHM).max(0.0);
+                i.clamp(-room, room)
+            } else if i * w < 0.0 {
+                let room = CHARGE_LIMIT_A * battery.v / (hud_kt * w.abs()).max(1e-6);
+                i.clamp(-room, room)
+            } else {
+                i
+            };
+            limit_clamped = limited != i;
+            proposed_amps = limited as f32;
+        }
         let (bounded_cmd, saturation) = envelope.apply(
             Command::MotorCurrent {
                 amps: proposed_amps,
             },
             Faults::NONE,
         );
-        let saturated = saturation == Saturation::Yes;
+        let saturated = saturation == Saturation::Yes || limit_clamped;
+        last_saturated = saturated;
         backend.apply(&bounded_cmd).map_err(HostError::Backend)?;
         // POST-envelope current, not the proposal -- the plant only ever
         // sees the clamped value (same reasoning `control-ffi`'s own
@@ -2512,7 +4679,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // the post-envelope command -- the clamped value can never exceed
         // 1.0 and so can never warn about anything. Low-passed at
         // AUTHORITY_UTILISATION_TAU_S.
-        let utilisation = proposed_amps.abs() / MAX_CURRENT_A;
+        let utilisation = proposed_amps.abs() / cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
         utilisation_filtered += (utilisation - utilisation_filtered) * utilisation_alpha;
         // The discriminator is the SPEED (see AUTHORITY_UTILISATION_WARN):
         // saturation above the speed cap's onset is survivable, because the
@@ -2523,9 +4690,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             eprintln!(
                 "sim-host: LOSS OF PITCH AUTHORITY IMMINENT at sim_t={t_known_s:.3}s -- \
                  filtered authority utilisation {:.0}% (demand {proposed_amps:+.1} A of \
-                 {MAX_CURRENT_A:.0} A) at {forward_speed_m_s:+.2} m/s, below the \
+                 {:.0} A) at {forward_speed_m_s:+.2} m/s, below the \
                  {SPEED_CAP_ONSET_M_S:.2} m/s speed-cap onset. Pitch {:+.1} deg.",
                 utilisation_filtered * 100.0,
+                cfg.max_current_a.unwrap_or(MAX_CURRENT_A),
                 pitch_rad.to_degrees(),
             );
         } else if prev_authority_warning && !authority_warning {
@@ -2585,9 +4753,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let (rider_fore_aft_m, rider_lateral_m) = backend.truth_ballast_positions();
 
         let mut flags = wire::STATE_FLAG_ARMED | wire::STATE_FLAG_VALID;
-        let fallen = pitch_rad.abs() > FALLEN_PITCH_RAD;
+        // With `--tail-brake`, a nose-up drag on the tail pad is a brake, not a
+        // fall: the tail pad touches at about 20 deg, the same angle as this
+        // limit, so every wanted tail stop used to set FALLEN.
+        let tail_dragging =
+            cfg.tail_brake && pitch_rad > 0.0 && backend.truth_tail_strike_n() > 0.0;
+        let fallen = pitch_rad.abs() > FALLEN_PITCH_RAD && !tail_dragging;
         if fallen {
             flags |= wire::STATE_FLAG_FALLEN;
+        }
+        match margin_level {
+            control_core::MarginLevel::Pulse => flags |= wire::STATE_FLAG_MARGIN_PULSE,
+            control_core::MarginLevel::Solid => flags |= wire::STATE_FLAG_MARGIN_SOLID,
+            control_core::MarginLevel::None => {}
         }
 
         // --- ADR-0012 PHYSICS-AUTHORITY HANDOFF -------------------------
@@ -2606,7 +4784,10 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // having it on non-kerb runs too is what let the threshold be set from
         // a measured carve envelope instead of a guess.
         let tilt_rad = (xmat[8].clamp(-1.0, 1.0) as f32).acos();
-        let strike_n = backend.truth_nose_strike_n() + backend.truth_tail_strike_n();
+        let nose_n = backend.truth_nose_strike_n();
+        let tail_n = backend.truth_tail_strike_n();
+        // `--tail-brake`: the tail pad is a brake, not a terminating event.
+        let strike_n = nose_n + if cfg.tail_brake { 0.0 } else { tail_n };
         // OB_HANDOFF_DEBUG=1 prints every 250 ticks (2 Hz); OB_HANDOFF_DEBUG=<n>
         // prints every n ticks, which is what makes a sub-second event like a
         // post-reset transient actually observable.
@@ -2626,11 +4807,19 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Armed by EITHER an authored kerb or real terrain. Terrain was
         // missing from this condition at first, which meant the whole point of
         // loading City Park -- striking its real kerbs -- could not fire.
-        if (cfg.kerb.is_some() || cfg.terrain.is_some()) && !handoff_latched {
+        if (cfg.kerb.is_some() || cfg.terrain.is_some() || cfg.grade_course.is_some())
+            && !handoff_latched
+        {
             let by_strike = strike_n > STRIKE_FORCE_N;
             let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
             if by_strike || by_tilt {
                 handoff_latched = true;
+                handoff_at_s = Some(t_known_s);
+                if cfg.tumble && !motor_cut && backend.release_rider(true) {
+                    rider_free = true;
+                    motor_cut = true;
+                    eprintln!("sim-host: --tumble: the rider comes off at t={t_known_s:.3}s; the motor is cut");
+                }
                 // The state handed over is the state at the instant of the
                 // strike, captured BEFORE the freeze below stops it reaching
                 // the wire -- everything sent from here on is this snapshot.
@@ -2642,10 +4831,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 });
                 eprintln!(
                     "sim-host: ADR-0012 handoff at t={:.3}s -- {} \
-                     (bumper {strike_n:.0} N, tilt {:.1} deg); \
+                     (bumper {strike_n:.0} N: nose {:.0} N, tail {:.0} N, tilt {:.1} deg); \
                      MuJoCo has stopped propagating, Unreal owns the board",
                     t_known_s,
                     if by_strike { "bumper strike" } else { "tilt" },
+                    backend.truth_nose_strike_n(),
+                    backend.truth_tail_strike_n(),
                     tilt_rad.to_degrees(),
                 );
             }
@@ -2655,6 +4846,33 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             flags |= wire::STATE_FLAG_HANDOFF;
         }
 
+        if cfg.pose_out.is_some() && ticks.is_multiple_of(10) {
+            // Before the rider is free, the rider pose is drawn at the ballast,
+            // upright with the deck.
+            let rider = if rider_free {
+                backend.truth_body_pose("rider_free")
+            } else {
+                match (
+                    backend.truth_body_pose("ballast"),
+                    backend.truth_body_pose("frame"),
+                ) {
+                    (Some((p, _)), Some((_, q))) => Some((p, q)),
+                    _ => None,
+                }
+            };
+            let (rp, rq) = rider.unwrap_or(([0.0; 3], [1.0, 0.0, 0.0, 0.0]));
+            let ev = (rider_free as u8)
+                | ((dismount_at_s.is_some() as u8) << 1)
+                | ((handoff_latched as u8) << 2);
+            let mut row = format!(
+                "{t_known_s:.4},{ev},{:.3},{:.4},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
+                forward_speed_m_s, last_amps, rp[0], rp[1], rp[2], rq[0], rq[1], rq[2], rq[3]
+            );
+            for x in backend.truth_qpos() {
+                row.push_str(&format!(",{x:.6}"));
+            }
+            pose_rows.push(row);
+        }
         if cfg.trace_path.is_some() {
             trace.push(TraceRow {
                 seq: ticks,
@@ -2672,6 +4890,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 saturated,
                 pos_x_m: truth_pos_x_m as f32,
                 pos_y_m: truth_pos_y_m as f32,
+                nose_strike_n: nose_n,
+                tail_strike_n: tail_n,
+                margin: margin.margin(),
+                margin_level: margin_level as u8,
+                truth_roll_deg: roll_rad.to_degrees(),
                 utilisation,
                 utilisation_filtered,
                 authority_warning,
@@ -2794,7 +5017,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // re-checks the same condition; the gate is repeated here so that
         // `yaw_rad` and the plant can never disagree about whether a tick's
         // increment was applied.
-        if dyaw_rad != 0.0 {
+        if cfg.lean_steer {
+            lean_roll_rate_rad_s = (roll_rad - lean_roll_rad) / DT_S as f32;
+            lean_roll_rad = roll_rad;
+            let yaw_rate_meas = backend.truth_frame_angvel()[2] as f32;
+            lean_yaw_torque_nm = tire_yaw.step(
+                &lean_params,
+                forward_speed_m_s,
+                roll_rad,
+                yaw_rate_meas,
+                DT_S as f32,
+            ) as f64;
+        } else if dyaw_rad != 0.0 {
             yaw_rad += dyaw_rad;
             backend.inject_kinematic_yaw(dyaw_rad as f64);
         }
@@ -2828,7 +5062,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                     pacer.missed_deadlines()
                 );
             } else {
-                std::thread::sleep(sleep_for);
+                // macOS coalesces timers: a 2 ms sleep can take 16 ms, and the
+                // loop then runs the missed ticks back to back (issue #168),
+                // so state packets leave in bursts. Sleep to 1 ms before the
+                // deadline, then spin. Paced runs only; free runs never wait.
+                let deadline = Instant::now() + sleep_for;
+                if let Some(coarse) = sleep_for.checked_sub(SPIN_WINDOW) {
+                    std::thread::sleep(coarse);
+                }
+                while Instant::now() < deadline {
+                    std::hint::spin_loop();
+                }
             }
         }
     }
@@ -2844,6 +5088,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         );
     }
 
+    if cfg.lean_steer {
+        eprintln!(
+            "sim-host: lean-steer rider balance torque peak {lean_balance_peak_nm:.1} N*m \
+             (limit {:.0} N*m)",
+            lean_params.balance_torque_limit_nm
+        );
+    }
     if let Some(path) = &cfg.trace_path {
         write_trace(path, &trace)?;
         eprintln!(
@@ -2853,6 +5104,35 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         );
     }
 
+    if cfg.ankle_hinge || cfg.ankle_rigid {
+        eprintln!("sim-host: ankle torque peak {ankle_peak_nm:.0} N*m");
+    }
+    if let Some(path) = &cfg.pose_out {
+        let model_note = match &generated_model {
+            Some(g) => {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("pose");
+                let keep = rider_model_path().with_file_name(format!("{stem}.generated.xml"));
+                std::fs::copy(g, &keep)?;
+                std::fs::canonicalize(&keep)?.display().to_string()
+            }
+            None => std::fs::canonicalize(rider_model_path())?
+                .display()
+                .to_string(),
+        };
+        let mut out = format!(
+            "# model={model_note}\n# t,event(bit0 rider free, bit1 dismount, bit2 handoff),speed,amps,rider_x,rider_y,rider_z,rider_qw,rider_qx,rider_qy,rider_qz,qpos...\n"
+        );
+        for r in &pose_rows {
+            out.push_str(r);
+            out.push('\n');
+        }
+        std::fs::write(path, out)?;
+        eprintln!(
+            "sim-host: wrote {} pose rows to {}",
+            pose_rows.len(),
+            path.display()
+        );
+    }
     let _ = backend.close();
     // The spliced model is a per-process scratch file; leaving it behind
     // would litter `sim/models/` with generated XML that looks committed.
@@ -2885,12 +5165,13 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
     out.push_str(
         "seq,sim_time_s,stick_fore_aft,shaped_fore_aft,applied_fore_aft,truth_pitch_deg,\
          est_pitch_deg,est_pitch_rate_deg_s,truth_pitch_rate_deg_s,forward_speed_m_s,proposed_amps,applied_amps,\
-         saturated,utilisation,utilisation_filtered,authority_warning,fallen,pos_x_m,pos_y_m\n",
+         saturated,utilisation,utilisation_filtered,authority_warning,fallen,pos_x_m,pos_y_m,\
+         nose_strike_n,tail_strike_n,margin,margin_level,truth_roll_deg\n",
     );
     for r in rows {
         let _ = writeln!(
             out,
-            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?}",
+            "{},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{},{:?},{:?},{},{},{:?},{:?},{:?},{:?},{:?},{},{:?}",
             r.seq,
             r.sim_time_s,
             r.stick_fore_aft,
@@ -2910,6 +5191,11 @@ fn write_trace(path: &std::path::Path, rows: &[TraceRow]) -> Result<(), HostErro
             r.fallen as u8,
             r.pos_x_m,
             r.pos_y_m,
+            r.nose_strike_n,
+            r.tail_strike_n,
+            r.margin,
+            r.margin_level,
+            r.truth_roll_deg,
         );
     }
     std::fs::write(path, out).map_err(HostError::Io)
@@ -3460,5 +5746,126 @@ mod tests {
             previous = rate;
         }
         assert_eq!(yaw_rate_rad_s(1.0, 0.0, 1.0), 0.0);
+    }
+
+    /// The nested-object scanner must find a key's object body by matching
+    /// braces, so a flat scalar scan inside it cannot reach the top level.
+    #[test]
+    fn find_object_body_bounds_a_nested_scan() {
+        let s = r#"{"a": 1, "spawn": {"x": -10.0, "y": -5.0}, "x": 999}"#;
+        let body = find_object_body(s, "spawn").unwrap();
+        assert_eq!(scan_scalar(body, "x"), Some(-10.0));
+        assert_eq!(scan_scalar(body, "y"), Some(-5.0));
+        // The top-level "x": 999 is outside the spawn body.
+        assert!(!body.contains("999"));
+        assert_eq!(find_object_body(s, "bounds"), None);
+    }
+
+    /// Writes a metadata.json and a matching 3x3 flat hfield binary to a fresh
+    /// temp directory, and returns the hfield path.
+    fn write_level(meta: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "overboard_level_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("metadata.json"), meta).unwrap();
+        let (nrow, ncol) = (3usize, 3usize);
+        let mut bin = Vec::new();
+        bin.extend_from_slice(&(nrow as i32).to_le_bytes());
+        bin.extend_from_slice(&(ncol as i32).to_le_bytes());
+        for _ in 0..nrow * ncol {
+            bin.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        let path = dir.join("course_hfield.bin");
+        std::fs::write(&path, bin).unwrap();
+        path
+    }
+
+    /// city_hill-style metadata (no new keys) keeps a square field, a spawn at
+    /// (spawn-x, 0) heading 0, and no bounds.
+    #[test]
+    fn metadata_without_new_keys_is_unchanged() {
+        let path = write_level(
+            r#"{"nrow": 3, "ncol": 3, "half_extent_m": 10.0, "z_min_m": -1.0, "z_max_m": 1.0}"#,
+        );
+        let t = read_terrain_spec(&path, Some(4.0), None, None).unwrap();
+        assert_eq!(t.half_extent_x_m, 10.0);
+        assert_eq!(t.half_extent_y_m, 10.0);
+        assert_eq!(t.spawn_x_m, 4.0);
+        assert_eq!(t.spawn_y_m, 0.0);
+        assert_eq!(t.spawn_yaw_rad, 0.0);
+        assert!(t.bounds.is_none());
+    }
+
+    /// Every new key present: a rectangular field, a spawn object, and bounds.
+    /// A flag still wins over the metadata spawn.
+    #[test]
+    fn metadata_with_all_new_keys_parses() {
+        let path = write_level(
+            r#"{"nrow": 3, "ncol": 3, "half_extent_m": 10.0,
+                "half_extent_x_m": 30.0, "half_extent_y_m": 20.0,
+                "z_min_m": -1.0, "z_max_m": 1.0,
+                "spawn": {"x": -8.0, "y": -5.0, "yaw_deg": 90.0},
+                "bounds": {"xmin": -29.0, "xmax": 29.0, "ymin": -19.0, "ymax": 19.0}}"#,
+        );
+        let t = read_terrain_spec(&path, None, None, None).unwrap();
+        assert_eq!(t.half_extent_x_m, 30.0);
+        assert_eq!(t.half_extent_y_m, 20.0);
+        assert_eq!(t.spawn_x_m, -8.0);
+        assert_eq!(t.spawn_y_m, -5.0);
+        assert!((t.spawn_yaw_rad - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        let b = t.bounds.unwrap();
+        assert_eq!((b.xmin, b.xmax, b.ymin, b.ymax), (-29.0, 29.0, -19.0, 19.0));
+        // A flag overrides the metadata spawn.
+        let t2 = read_terrain_spec(&path, Some(1.0), Some(2.0), Some(0.0)).unwrap();
+        assert_eq!(
+            (t2.spawn_x_m, t2.spawn_y_m, t2.spawn_yaw_rad),
+            (1.0, 2.0, 0.0)
+        );
+    }
+
+    /// Key order must not matter: the same keys in a different order parse the
+    /// same, because the reader scans by name.
+    #[test]
+    fn metadata_key_order_does_not_matter() {
+        let path = write_level(
+            r#"{"bounds": {"ymax": 19.0, "xmin": -29.0, "ymin": -19.0, "xmax": 29.0},
+                "spawn": {"yaw_deg": 45.0, "y": 3.0, "x": 7.0},
+                "z_max_m": 1.0, "half_extent_y_m": 20.0, "ncol": 3,
+                "z_min_m": -1.0, "half_extent_x_m": 30.0, "nrow": 3,
+                "half_extent_m": 10.0}"#,
+        );
+        let t = read_terrain_spec(&path, None, None, None).unwrap();
+        assert_eq!((t.half_extent_x_m, t.half_extent_y_m), (30.0, 20.0));
+        assert_eq!((t.spawn_x_m, t.spawn_y_m), (7.0, 3.0));
+        assert!((t.spawn_yaw_rad - 45.0f64.to_radians()).abs() < 1e-12);
+        let b = t.bounds.unwrap();
+        assert_eq!((b.xmin, b.xmax, b.ymin, b.ymax), (-29.0, 29.0, -19.0, 19.0));
+    }
+
+    /// A "box" obstacle gets a grey rgba and a quat; a raised plank (z_m) sits
+    /// its bottom at z_m, not on the terrain.
+    #[test]
+    fn splice_obstacles_box_and_raised_plank() {
+        let dir = std::env::temp_dir().join(format!("overboard_obst_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("obstacles.csv");
+        std::fs::write(
+            &csv,
+            "box,ramp,5,0,2.0,1.0,0.05,0,8,0,\nbox,plank,10,0,3.0,1.0,0.05,0,0,0,0.3\n",
+        )
+        .unwrap();
+        let xml = "<worldbody></worldbody>";
+        let out = splice_obstacles(xml, &csv, None).unwrap();
+        assert!(out.contains(r#"name="ramp""#));
+        assert!(out.contains(r#"rgba="0.55 0.55 0.55 1""#));
+        assert!(out.contains("quat="));
+        // The plank bottom is at z_m = 0.3, so its centre is 0.3 + 0.05/2.
+        assert!(out.contains(r#"name="plank""#));
+        assert!(out.contains("0.3250"), "plank centre z missing: {out}");
     }
 }

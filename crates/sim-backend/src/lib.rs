@@ -137,6 +137,16 @@ pub struct SimBackend {
     /// which has no ballast at all. Resolved once in `open()`.
     ballast_fa_actuator: Option<usize>,
     ballast_lateral_actuator: Option<usize>,
+    /// Lean-to-steer rider's ankle roll servo (only on a model that declares
+    /// `ankle_roll`); see [`SimBackend::set_ankle_target`].
+    ankle_actuator: Option<usize>,
+    ankle_qposadr: Option<usize>,
+    ankle_dofadr: Option<usize>,
+    ankle_target_rad: f32,
+    /// sim-host `--ankle-hinge`: the rider's pitch hinge at deck level and its
+    /// torque motor (`ankle_pitch`), N*m.
+    ankle_pitch_actuator: Option<usize>,
+    ankle_pitch_torque_nm: f64,
     /// Commanded ballast actuator targets, metres -- see
     /// [`SimBackend::set_ballast_targets`]. Zero (centred) until set, and
     /// reset to zero on every `open()`.
@@ -238,6 +248,28 @@ impl SimBackend {
             model_path_override: Some(model_path),
             ..SimBackend::default()
         }
+    }
+
+    /// Sets the drive's current limit in the imperfection chain, amps. The
+    /// chain clamps every command at its profile's `max_current_a`, and
+    /// `IDEAL` holds 40 A. A host with a larger limit (`sim-host
+    /// --max-current`) must pass it here, or the motor is silently capped at
+    /// 40 A while the host logs the larger command (found 2026-10-04: every
+    /// Monte Carlo run above 40 A ran at 40 A). Call before `open()`.
+    /// Replaces the imperfection profile (sensor noise, delays), keeping the
+    /// current limit already set. Takes effect at `open()`.
+    pub fn with_imperfections(mut self, profile: ImperfectionProfile) -> Self {
+        let limit = self.imperfection_profile.max_current_a;
+        self.imperfection_profile = ImperfectionProfile {
+            max_current_a: limit,
+            ..profile
+        };
+        self
+    }
+
+    pub fn with_current_limit(mut self, max_current_a: f64) -> Self {
+        self.imperfection_profile.max_current_a = max_current_a;
+        self
     }
 
     /// Sets the two ballast position-actuator targets, metres, taking effect
@@ -437,6 +469,67 @@ impl SimBackend {
         (fore_aft, lateral)
     }
 
+    /// Target angle, rad, of the lean-to-steer rider's ankle roll servo: the
+    /// rider's body lean RELATIVE TO THE DECK (+ = body right of the deck
+    /// normal). Same buffering as [`SimBackend::set_ballast_targets`]; a
+    /// no-op on a model without an `ankle_roll` actuator.
+    /// The rider's pitch hinge angle and rate (rad, rad/s; + tilts the body
+    /// back), or `None` without the hinge.
+    pub fn truth_ankle_pitch(&self) -> Option<(f64, f64)> {
+        let plant = self.plant.as_ref()?;
+        let q = plant.joint_qposadr("ankle_pitch")?;
+        let v = plant.joint_dofadr("ankle_pitch")?;
+        Some((plant.qpos()[q], plant.qvel()[v]))
+    }
+
+    pub fn set_ankle_pitch_torque(&mut self, torque_nm: f64) {
+        self.ankle_pitch_torque_nm = torque_nm;
+    }
+
+    /// sim-host `--ankle-hinge`: the rider's lean against gravity, rad, + =
+    /// forward (toward the board's nose), from the slide carrier above the
+    /// ankle pivot, so the stick's lean intent is not in it. `None` on a model
+    /// without the hinge.
+    pub fn truth_rider_body_lean(&self) -> Option<f64> {
+        let plant = self.plant.as_ref()?;
+        let pivot = plant.body_id("rider_ankle")?;
+        let carrier = plant.body_id("ballast_fa_carrier")?;
+        let frame = plant.body_id("frame")?;
+        let a = plant.body_xpos(pivot);
+        let b = plant.body_xpos(carrier);
+        let r = plant.body_xmat(frame);
+        // Board forward is body -X, flattened to the horizontal.
+        let (fx, fy) = (-r[0], -r[3]);
+        let n = (fx * fx + fy * fy).sqrt().max(1e-9);
+        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        Some(((d[0] * fx + d[1] * fy) / n).atan2(d[2]))
+    }
+
+    pub fn set_ankle_target(&mut self, angle_rad: f32) {
+        self.ankle_target_rad = angle_rad;
+    }
+
+    /// Ankle roll joint angle and rate (rad, rad/s), or zeros on a model
+    /// without the joint.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn truth_ankle(&self) -> (f32, f32) {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("truth_ankle: backend is not open");
+        let a = self
+            .ankle_qposadr
+            .map(|i| plant.qpos()[i] as f32)
+            .unwrap_or(0.0);
+        let r = self
+            .ankle_dofadr
+            .map(|i| plant.qvel()[i] as f32)
+            .unwrap_or(0.0);
+        (a, r)
+    }
+
     /// Puts the plant back to the model's initial state -- `mj_resetData`,
     /// then the same `mj_forward` prime `open()` does.
     ///
@@ -505,6 +598,8 @@ impl SimBackend {
         self.applied_current_a = 0.0;
         self.ballast_fa_target_m = 0.0;
         self.ballast_lateral_target_m = 0.0;
+        self.ankle_target_rad = 0.0;
+        self.ankle_pitch_torque_nm = 0.0;
         self.last_wheel_rate_rad_s = 0.0;
     }
 
@@ -700,6 +795,172 @@ impl SimBackend {
     /// IMMEDIATELY on the state vector rather than being buffered, so it is
     /// applied ONCE per call and must not be re-issued for the same tick.
     ///
+    /// Sets the grade under the board, degrees, positive uphill: rotates
+    /// gravity about world Y, as [`SimBackend::set_incline_deg`] does, but at
+    /// any time. sim-host `--grade-course` calls it every cycle with the grade
+    /// at the board's position. MuJoCo truth pitch is then against the road
+    /// normal, and the IMU measures true gravity.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn set_grade_deg(&mut self, grade_deg: f64) {
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("set_grade_deg: backend is not open");
+        let (s, c) = grade_deg.to_radians().sin_cos();
+        plant.set_gravity_profiled([9.81 * s, 0.0, -9.81 * c]);
+    }
+
+    /// World position and orientation of body `name`, or `None`.
+    pub fn truth_body_pose(&self, name: &str) -> Option<([f64; 3], [f64; 4])> {
+        let plant = self.plant.as_ref()?;
+        let id = plant.body_id(name)?;
+        Some((plant.body_xpos(id), plant.body_xquat(id)))
+    }
+
+    /// sim-host `--tumble`. Moves the rider's mass from the ballast (a slide on
+    /// the board) to the free `rider_free` body. With `free`, the rider comes
+    /// off at the ballast's place, upright with the deck, at the ballast's
+    /// velocity, and its parking weld is released. Without `free` (a step-off),
+    /// the rider stays parked: the board only loses the rider's mass.
+    /// Returns false if the model has no tumble rider.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn release_rider(&mut self, free: bool) -> bool {
+        let linvel = self.truth_frame_linvel();
+        let angvel = self.truth_frame_angvel();
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("release_rider: backend is not open");
+        let (
+            Some(ballast),
+            Some(frame),
+            Some(upper),
+            Some(legs),
+            Some(park),
+            Some(free_q),
+            Some(hip_q),
+        ) = (
+            plant.body_id("ballast"),
+            plant.body_id("frame"),
+            plant.body_id("rider_free"),
+            plant.body_id("rider_legs"),
+            plant.eq_id("rider_park"),
+            plant.joint_qposadr("rider_free_j"),
+            plant.joint_qposadr("rider_hip"),
+        )
+        else {
+            return false;
+        };
+        let (Some(free_v), Some(hip_v)) = (
+            plant.joint_dofadr("rider_free_j"),
+            plant.joint_dofadr("rider_hip"),
+        ) else {
+            return false;
+        };
+        // 5 kg stays on the ballast slide: its joint damping (600 N*s/m) on a
+        // lighter mass is unstable under RK4 at 2 ms (rate x step > 1), which
+        // launched the board. 5 kg gives 0.24.
+        const KEEP_KG: f64 = 5.0;
+        let m = plant.body_mass(ballast) - KEEP_KG;
+        plant.set_body_mass(ballast, KEEP_KG, [0.01; 3]);
+        // A standing body: about 60 % above the hips, 40 % in the legs.
+        let (mu, ml) = (0.6 * m, 0.4 * m);
+        plant.set_body_mass(upper, mu, [0.10 * mu, 0.10 * mu, 0.02 * mu]);
+        plant.set_body_mass(legs, ml, [0.06 * ml, 0.06 * ml, 0.01 * ml]);
+        if free {
+            let p = plant.body_xpos(ballast);
+            let f = plant.body_xpos(frame);
+            // The rider's own orientation (with --ankle-hinge it differs from the
+            // deck's); the angular velocity is still the deck's.
+            let q = plant.body_xquat(ballast);
+            let r = plant.body_xmat(ballast);
+            let d = [p[0] - f[0], p[1] - f[1], p[2] - f[2]];
+            let v = [
+                linvel[0] + angvel[1] * d[2] - angvel[2] * d[1],
+                linvel[1] + angvel[2] * d[0] - angvel[0] * d[2],
+                linvel[2] + angvel[0] * d[1] - angvel[1] * d[0],
+            ];
+            // The free joint's angular velocity is in the body frame: R^T w.
+            let w = [
+                r[0] * angvel[0] + r[3] * angvel[1] + r[6] * angvel[2],
+                r[1] * angvel[0] + r[4] * angvel[1] + r[7] * angvel[2],
+                r[2] * angvel[0] + r[5] * angvel[1] + r[8] * angvel[2],
+            ];
+            plant.set_qpos_range(free_q, &[p[0], p[1], p[2], q[0], q[1], q[2], q[3]]);
+            plant.set_qpos_range(hip_q, &[1.0, 0.0, 0.0, 0.0]);
+            plant.set_qvel_range(free_v, &[v[0], v[1], v[2], w[0], w[1], w[2]]);
+            plant.set_qvel_range(hip_v, &[0.0; 3]);
+            plant.set_eq_active(park, false);
+        }
+        true
+    }
+
+    /// Puts the plant back to `qpos` with every velocity at zero: sim-host
+    /// `--hold-until-arm` holds the board at its spawn pose this way until a
+    /// player arms it. It takes effect at the next step.
+    ///
+    /// # Panics
+    /// If called before `open()`, or if `qpos` is not `nq` long.
+    pub fn hold_pose(&mut self, qpos: &[f64]) {
+        let plant = self.plant.as_mut().expect("hold_pose: backend is not open");
+        assert_eq!(qpos.len(), plant.nq(), "hold_pose: qpos must be nq long");
+        plant.set_qpos_range(0, qpos);
+        let zeros = vec![0.0; plant.nv()];
+        plant.set_qvel_range(0, &zeros);
+        self.last_wheel_rate_rad_s = 0.0;
+    }
+
+    /// Puts the `wheel_ground` mocap plate (sim-host smooth wheel contact)
+    /// at `pos` with orientation `quat` (w, x, y, z). A no-op on a model
+    /// without that body.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn set_wheel_ground(&mut self, pos: [f64; 3], quat: [f64; 4]) {
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("set_wheel_ground: backend is not open");
+        if let Some(id) = plant.mocap_id("wheel_ground") {
+            plant.set_mocap_pose(id, pos, quat);
+        }
+    }
+
+    /// Starts the board rolling forward (-X) at `v_m_s`: the frame's world
+    /// velocity and a matching wheel rate, so the wheel does not skid on the
+    /// first step. For Monte Carlo start-speed variation, on a settled board.
+    /// A no-op on a model without `frame_free` or `wheel_hinge`.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn set_forward_speed(&mut self, v_m_s: f64, r_wheel_m: f64) {
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("set_forward_speed: backend is not open");
+        let (Some(vadr), Some(wadr)) = (self.frame_free_dofadr, plant.joint_dofadr("wheel_hinge"))
+        else {
+            return;
+        };
+        // Along the board's heading (forward is body -X, flattened): a board
+        // spawned with a yaw was pushed sideways along world -X and fell.
+        let frame = plant
+            .body_id("frame")
+            .expect("set_forward_speed: model has no frame body");
+        let r = plant.body_xmat(frame);
+        let (fx, fy) = (-r[0], -r[3]);
+        let n = (fx * fx + fy * fy).sqrt().max(1e-9);
+        plant.set_qvel_range(vadr, &[v_m_s * fx / n, v_m_s * fy / n, 0.0]);
+        // No `forward()`: the plant allows it only at t = 0, and the next
+        // step recomputes everything from the new velocity.
+        plant.set_qvel_range(wadr, &[v_m_s / r_wheel_m]);
+        self.last_wheel_rate_rad_s = v_m_s / r_wheel_m;
+    }
+
     /// A no-op on a model that declares no `frame_free` joint, the same
     /// tolerance [`SimBackend::set_ballast_targets`] has.
     ///
@@ -853,6 +1114,11 @@ impl BoardObserve for SimBackend {
         // actuator that happens to drive it (issue #161 wire v2).
         self.ballast_fa_qposadr = plant.joint_qposadr("ballast_fa");
         self.ballast_lateral_qposadr = plant.joint_qposadr("ballast_lat");
+        self.ankle_actuator = plant.actuator_id("ankle_roll");
+        self.ankle_pitch_actuator = plant.actuator_id("ankle_pitch");
+        self.ankle_pitch_torque_nm = 0.0;
+        self.ankle_qposadr = plant.joint_qposadr("ankle_roll");
+        self.ankle_dofadr = plant.joint_dofadr("ankle_roll");
         // The board's own free joint -- both models declare it (`frame_free`).
         // Resolved leniently (`Option`, not `expect`) for the same reason the
         // ballast lookups are: this backend must keep opening a model that
@@ -885,6 +1151,7 @@ impl BoardObserve for SimBackend {
         self.applied_current_a = 0.0;
         self.ballast_fa_target_m = 0.0;
         self.ballast_lateral_target_m = 0.0;
+        self.ankle_target_rad = 0.0;
         self.last_wheel_rate_rad_s = 0.0;
         self.open = true;
         self.seq.reset();
@@ -952,6 +1219,12 @@ impl BoardObserve for SimBackend {
         }
         if let Some(idx) = self.ballast_lateral_actuator {
             ctrl[idx] = self.ballast_lateral_target_m as f64;
+        }
+        if let Some(idx) = self.ankle_actuator {
+            ctrl[idx] = self.ankle_target_rad as f64;
+        }
+        if let Some(idx) = self.ankle_pitch_actuator {
+            ctrl[idx] = self.ankle_pitch_torque_nm;
         }
 
         // AC3: sim time comes from mjData::time, read after stepping, never

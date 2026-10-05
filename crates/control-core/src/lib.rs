@@ -115,6 +115,10 @@ pub trait Estimator {
 /// below the ~9.5 m/s² floor of grounded, in-envelope operation.
 pub const MIN_TRUSTED_ACCEL_MAG_M_S2: f32 = 9.81 / 2.0;
 
+/// [`TiltFilter`] ignores an accelerometer sample whose magnitude is further
+/// than this from g, m/s^2.
+pub const MAX_ACCEL_DEVIATION_M_S2: f32 = 2.5;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ComplementaryFilter {
     tau_s: f32,
@@ -294,6 +298,232 @@ impl Estimator for ComplementaryFilter {
 /// error may be small enough that an integrator only adds windup risk. That is
 /// an open question to settle with data, not on a whiteboard — and adding one
 /// requires the anti-windup path (ICD §7.6) to be wired to `Saturation` first.
+/// Longitudinal-acceleration aiding that stays unbiased on a grade.
+///
+/// [`CommandFeedforward`] predicts `a = K i`. That is the flat-ground model:
+/// on a grade the motor also holds the board against gravity, so
+/// `K i = a - g sin(alpha)` and an estimator aided by it is biased by about
+/// the grade angle (measured: +4.3 deg on a 12 % descent). Wheel odometry
+/// measures `a` without that bias, but `dv/dt` of the wheel spikes when the
+/// wheel unloads on rough ground under a saturated brake.
+///
+/// So: the command supplies the fast part and wheel odometry the slow part.
+///
+/// ```text
+/// load  <- LPF_tau_b(K i - dv/dt)       only while the sample is trusted
+/// a_aid  = K i - load
+/// ```
+///
+/// `load` is the grade load (`-g sin(alpha)` + rolling loss + model error),
+/// in m/s^2: negative going downhill, positive climbing. It is also the
+/// current needed to hold the grade (`load / K`), which the regulator can use
+/// as a feedforward so the board does not droop nose-up on a descent.
+#[derive(Debug, Clone, Copy)]
+pub struct GradeAwareAiding {
+    k_m_s2_per_a: f32,
+    tau_b_s: f32,
+    load_m_s2: f32,
+    last_v: Option<f32>,
+}
+
+impl GradeAwareAiding {
+    /// Largest |load| believed, m/s^2 (about g sin 20 deg plus rolling loss).
+    pub const LOAD_LIMIT_M_S2: f32 = 3.5;
+    /// A wheel acceleration beyond this is a slip or bounce, not the board.
+    pub const MAX_ODOMETRY_ACCEL_M_S2: f32 = 6.0;
+
+    pub const fn new(k_m_s2_per_a: f32, tau_b_s: f32) -> Self {
+        GradeAwareAiding {
+            k_m_s2_per_a,
+            tau_b_s,
+            load_m_s2: 0.0,
+            last_v: None,
+        }
+    }
+
+    /// Grade load, m/s^2 (negative downhill).
+    pub fn load_m_s2(&self) -> f32 {
+        self.load_m_s2
+    }
+
+    /// Grade estimate, rad (positive = downhill ahead).
+    pub fn grade_rad(&self) -> f32 {
+        libm::asinf((-self.load_m_s2 / 9.81).clamp(-1.0, 1.0))
+    }
+
+    /// One step. `amps` is the current applied last cycle, `v_m_s` the wheel
+    /// speed, `accel_mag_m_s2` the IMU specific-force magnitude (for the
+    /// impact gate). Returns the aiding acceleration, m/s^2.
+    pub fn update(&mut self, amps: f32, v_m_s: f32, accel_mag_m_s2: f32, dt_s: f32) -> f32 {
+        let a_cmd = self.k_m_s2_per_a * amps;
+        let prev = self.last_v.replace(v_m_s);
+        if let Some(prev) = prev {
+            if dt_s > 0.0 {
+                let a_odo = (v_m_s - prev) / dt_s;
+                let trusted = libm::fabsf(accel_mag_m_s2 - 9.81) < MAX_ACCEL_DEVIATION_M_S2
+                    && libm::fabsf(a_odo) < Self::MAX_ODOMETRY_ACCEL_M_S2;
+                if trusted {
+                    let alpha = dt_s / (self.tau_b_s + dt_s);
+                    self.load_m_s2 += alpha * ((a_cmd - a_odo) - self.load_m_s2);
+                    self.load_m_s2 = self
+                        .load_m_s2
+                        .clamp(-Self::LOAD_LIMIT_M_S2, Self::LOAD_LIMIT_M_S2);
+                }
+            }
+        }
+        a_cmd - self.load_m_s2
+    }
+
+    pub fn reset(&mut self) {
+        self.load_m_s2 = 0.0;
+        self.last_v = None;
+    }
+}
+
+/// Pitch AND roll, for a board that leans to steer.
+///
+/// [`ComplementaryFilter`] integrates the pitch-axis gyro alone. That is right
+/// while the board stays level in roll, and wrong in a banked turn: the body
+/// pitch gyro then reads `q = theta_dot * cos(phi) + psi_dot * sin(phi) *
+/// cos(theta)`, so the yaw rate of the turn leaks into the pitch estimate.
+/// Measured in sim: with lean-to-steer the leak drives the board nose-down
+/// until the motor saturates and it falls in the first turn.
+///
+/// This filter runs the same complementary structure on both tilt angles with
+/// ZYX Euler kinematics, in the ICD's forward-right-down body frame
+/// (`f = [g sin(theta), -g sin(phi) cos(theta), -g cos(phi) cos(theta)]` at rest):
+///
+/// ```text
+/// phi_dot   = p + (q sin(phi) + r cos(phi)) tan(theta)
+/// theta_dot = q cos(phi) - r sin(phi)
+/// ```
+///
+/// The accelerometer is aided for the two accelerations the board knows from
+/// its wheel: longitudinal (`forward_accel_m_s2`, as before) and centripetal,
+/// `v * psi_dot` towards the turn, with `v` from [`TiltFilter::set_speed`].
+/// Without the centripetal term a balanced (coordinated) turn reads as zero
+/// roll.
+///
+/// With `phi = 0` and no yaw rate this reduces to [`ComplementaryFilter`].
+#[derive(Debug, Clone, Copy)]
+pub struct TiltFilter {
+    tau_s: f32,
+    pitch_rad: f32,
+    roll_rad: f32,
+    pitch_rate_rad_s: f32,
+    speed_m_s: f32,
+    last_t_ns: Option<u64>,
+    initialised: bool,
+}
+
+impl TiltFilter {
+    pub const fn new(tau_s: f32) -> Self {
+        TiltFilter {
+            tau_s,
+            pitch_rad: 0.0,
+            roll_rad: 0.0,
+            pitch_rate_rad_s: 0.0,
+            speed_m_s: 0.0,
+            last_t_ns: None,
+            initialised: false,
+        }
+    }
+
+    /// Forward ground speed from wheel odometry, m/s. Call before `update`.
+    pub fn set_speed(&mut self, speed_m_s: f32) {
+        self.speed_m_s = speed_m_s;
+    }
+
+    /// Roll estimate, rad, positive = right side down (ICD body frame).
+    pub fn roll_rad(&self) -> f32 {
+        self.roll_rad
+    }
+
+    /// Tilt implied by one accelerometer sample after removing the known
+    /// accelerations. `None` if what is left is too small to have a direction.
+    fn accel_tilt(
+        &self,
+        s: &ImuSample,
+        forward_accel_m_s2: f32,
+        yaw_rate: f32,
+    ) -> Option<(f32, f32)> {
+        let (sp, cp) = (libm::sinf(self.roll_rad), libm::cosf(self.roll_rad));
+        let a_c = self.speed_m_s * yaw_rate; // centripetal, + towards the right
+        let fx = s.accel_m_s2[0] - forward_accel_m_s2;
+        let fy = s.accel_m_s2[1] - a_c * cp;
+        let fz = s.accel_m_s2[2] - a_c * sp;
+        let mag = libm::sqrtf(fx * fx + fy * fy + fz * fz);
+        if mag < MIN_TRUSTED_ACCEL_MAG_M_S2 {
+            return None;
+        }
+        // Impacts (a wheel bouncing on rough ground) are not "which way is
+        // down": take the gyro alone through them. Measured on the authored
+        // courses: f_z spikes to -16..-20 m/s^2.
+        if libm::fabsf(mag - 9.81) > MAX_ACCEL_DEVIATION_M_S2 {
+            return None;
+        }
+        let roll = libm::atan2f(-fy, -fz);
+        let pitch = libm::atan2f(fx, libm::sqrtf(fy * fy + fz * fz));
+        Some((pitch, roll))
+    }
+}
+
+impl Estimator for TiltFilter {
+    fn update(&mut self, samples: &[ImuSample], forward_accel_m_s2: f32) -> Attitude {
+        for s in samples {
+            let [p, q, r] = s.gyro_rad_s;
+            let (sp, cp) = (libm::sinf(self.roll_rad), libm::cosf(self.roll_rad));
+            let ct = libm::cosf(self.pitch_rad).max(0.2);
+            let tt = libm::tanf(self.pitch_rad).clamp(-5.0, 5.0);
+            let theta_dot = q * cp - r * sp;
+            let phi_dot = p + (q * sp + r * cp) * tt;
+            let yaw_rate = (q * sp + r * cp) / ct;
+            self.pitch_rate_rad_s = theta_dot;
+
+            let acc = self.accel_tilt(s, forward_accel_m_s2, yaw_rate);
+            if !self.initialised {
+                if let Some((pitch, roll)) = acc {
+                    self.pitch_rad = pitch;
+                    self.roll_rad = roll;
+                    self.initialised = true;
+                    self.last_t_ns = Some(s.t_sample_ns);
+                }
+                continue;
+            }
+            let dt = match self.last_t_ns {
+                Some(prev) => s.t_sample_ns.saturating_sub(prev) as f32 * 1e-9,
+                None => 0.0,
+            };
+            self.last_t_ns = Some(s.t_sample_ns);
+            if dt <= 0.0 {
+                continue;
+            }
+            let pitch_pred = self.pitch_rad + theta_dot * dt;
+            let roll_pred = self.roll_rad + phi_dot * dt;
+            match acc {
+                Some((pitch_acc, roll_acc)) => {
+                    let alpha = self.tau_s / (self.tau_s + dt);
+                    self.pitch_rad = alpha * pitch_pred + (1.0 - alpha) * pitch_acc;
+                    self.roll_rad = alpha * roll_pred + (1.0 - alpha) * roll_acc;
+                }
+                None => {
+                    self.pitch_rad = pitch_pred;
+                    self.roll_rad = roll_pred;
+                }
+            }
+        }
+        Attitude {
+            pitch_rad: self.pitch_rad,
+            pitch_rate_rad_s: self.pitch_rate_rad_s,
+        }
+    }
+
+    fn reset(&mut self) {
+        let tau = self.tau_s;
+        *self = TiltFilter::new(tau);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PitchRegulator {
     kp_nm_per_rad: f32,
@@ -565,6 +795,563 @@ impl VelocityLoop {
 
         let out = proportional + sign * self.ki_rad_per_m * self.integral;
         out.clamp(-limit, limit)
+    }
+}
+
+/// Full-state speed hold: one law for balance and speed, for a board whose
+/// rider stays passive (the sim's authority sweep).
+///
+/// `amps = -k_pitch·θ - k_rate·θ̇ + k_speed·e + k_int·∫e`, with θ
+/// nose-up-positive, e = v − v_ref and forward current positive.
+///
+/// This replaces a slow [`VelocityLoop`] cascaded on a fixed
+/// [`PitchRegulator`]. That pair overshot by 2–3 m/s at grade changes,
+/// because the outer loop could not see the inner loop's state. The gains
+/// come from a discrete LQR on the planar wheel-and-body model
+/// (`sim/carve/lqr_design.py`). That script also checks the closed loop with
+/// the rider's fore/aft spring mode, which this law cannot measure.
+///
+/// The positive speed gain is the non-minimum-phase part of a balancing
+/// vehicle: to slow down it first drives forward, so the body tips back.
+///
+/// The reference slews at `accel_limit_m_s2`, so a step in target speed does
+/// not ask for a lean the motor cannot recover from. While it slews, the law
+/// adds the steady lean and current of that acceleration (feedforward). If
+/// it does not, the integral winds up during every ramp and the board
+/// overshoots by about 1.4 m/s when the ramp ends -- measured on a 20 %
+/// climb, where the overshoot saturated the motor.
+/// Jerk limit of the [`SpeedHoldLqr`] reference, m/s³.
+pub const SPEED_HOLD_JERK_M_S3: f32 = 1.0;
+/// Reference approach gain, 1/s: the reference acceleration is this times
+/// the remaining speed error, before the acceleration limit.
+pub const SPEED_HOLD_APPROACH_PER_S: f32 = 1.0;
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpeedHoldLqr {
+    k_pitch: f32,
+    k_rate: f32,
+    k_speed: f32,
+    k_int: f32,
+    accel_limit_m_s2: f32,
+    integral_limit_m: f32,
+    ff_pitch_rad_per_m_s2: f32,
+    ff_amps_per_m_s2: f32,
+    integral: f32,
+    v_ref: Option<f32>,
+    a_ref: f32,
+    drive_scale: f32,
+}
+
+impl SpeedHoldLqr {
+    /// Gains in A/rad, A/(rad/s), A/(m/s), A/m — all magnitudes.
+    pub const fn new(
+        k_pitch: f32,
+        k_rate: f32,
+        k_speed: f32,
+        k_int: f32,
+        accel_limit_m_s2: f32,
+    ) -> Self {
+        SpeedHoldLqr {
+            k_pitch,
+            k_rate,
+            k_speed,
+            k_int,
+            accel_limit_m_s2,
+            integral_limit_m: 10.0,
+            ff_pitch_rad_per_m_s2: 0.0,
+            ff_amps_per_m_s2: 0.0,
+            integral: 0.0,
+            v_ref: None,
+            a_ref: 0.0,
+            drive_scale: 1.0,
+        }
+    }
+
+    /// Steady lean (rad, nose-up positive) and current (A) per m/s² of
+    /// reference acceleration, from the same linear model as the gains.
+    pub const fn with_feedforward(mut self, pitch_rad_per_m_s2: f32, amps_per_m_s2: f32) -> Self {
+        self.ff_pitch_rad_per_m_s2 = pitch_rad_per_m_s2;
+        self.ff_amps_per_m_s2 = amps_per_m_s2;
+        self
+    }
+
+    pub fn reset(&mut self) {
+        self.integral = 0.0;
+        self.v_ref = None;
+        self.a_ref = 0.0;
+    }
+
+    #[cfg(test)]
+    fn reset_integral_for_test(&mut self) {
+        self.integral = 0.0;
+    }
+
+    /// Scale on forward (speed-increasing) reference acceleration, 0..1:
+    /// [`AuthorityMargin::drive_scale`] for the optional D2 limit. Braking
+    /// is never scaled, so tail braking stays free.
+    pub fn set_drive_scale(&mut self, scale: f32) {
+        self.drive_scale = scale.clamp(0.0, 1.0);
+    }
+
+    /// The slewed speed reference of the last update.
+    pub fn v_ref(&self) -> Option<f32> {
+        self.v_ref
+    }
+
+    /// Requested current in amps, before the envelope clamp, on level
+    /// ground: [`SpeedHoldLqr::update_with_grade`] with no grade load and no
+    /// current budget.
+    pub fn update(
+        &mut self,
+        pitch_rad: f32,
+        pitch_rate_rad_s: f32,
+        v_m_s: f32,
+        v_target_m_s: f32,
+        dt_s: f32,
+        saturated: bool,
+    ) -> f32 {
+        self.update_with_grade(
+            pitch_rad,
+            pitch_rate_rad_s,
+            v_m_s,
+            v_target_m_s,
+            dt_s,
+            saturated,
+            0.0,
+            f32::INFINITY,
+        )
+    }
+
+    /// Requested current in amps, before the envelope clamp.
+    ///
+    /// The reference starts at the measured speed and slews toward
+    /// `v_target_m_s`. `saturated` is the envelope's clamp bit from the last
+    /// cycle: while it is set, the integral does not wind in the direction
+    /// that pushes the demand further past the limit, the reference stops
+    /// accelerating, and it leaks toward the measured speed.
+    ///
+    /// `load_m_s2` is [`GradeAwareAiding::load_m_s2`] (positive on a climb).
+    /// It adds the steady current AND the steady lean of that grade. Without
+    /// them the speed integral alone must find 20-40 A on a vertical curve;
+    /// the board then runs behind the new equilibrium, the pitch loop pays
+    /// the deficit as a burst, and the burst saturates the motor (Monte
+    /// Carlo, 2026-10-04: 30 of 167 runs inside the static envelope fell
+    /// this way). Current alone, without the lean, runs away (`--grade-ff`).
+    ///
+    /// `load / k` is the current the real plant needed at steady speed, so
+    /// it needs no rider mass or Kt. `i_max_a` is the envelope limit: the
+    /// reference acceleration is held inside a current budget and a lean
+    /// budget (see [`SPEED_HOLD_LEAN_BUDGET_RAD`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_with_grade(
+        &mut self,
+        pitch_rad: f32,
+        pitch_rate_rad_s: f32,
+        v_m_s: f32,
+        v_target_m_s: f32,
+        dt_s: f32,
+        saturated: bool,
+        load_m_s2: f32,
+        i_max_a: f32,
+    ) -> f32 {
+        let i_grade = load_m_s2 / SPEED_HOLD_LOAD_M_S2_PER_A;
+        // Reference trajectory: acceleration limited, and jerk limited so
+        // the feedforward lean never steps. A lean step makes the board
+        // first drive backward (non-minimum phase), and the accelerometer
+        // then misreads the pitch: that combination fell at start-up.
+        let v_ref = match self.v_ref {
+            None => v_m_s,
+            Some(r) => {
+                // Governor: the acceleration the grade leaves room for.
+                let grade_rad = libm::asinf((load_m_s2 / 9.81).clamp(-1.0, 1.0));
+                let a_lim_i = if self.ff_amps_per_m_s2 > 0.0 {
+                    ((SPEED_HOLD_CURRENT_BUDGET * i_max_a - libm::fabsf(i_grade))
+                        / self.ff_amps_per_m_s2)
+                        .max(0.0)
+                } else {
+                    f32::INFINITY
+                };
+                let a_lim_th = if self.ff_pitch_rad_per_m_s2 != 0.0 {
+                    ((SPEED_HOLD_LEAN_BUDGET_RAD
+                        - libm::fabsf(grade_rad)
+                        - libm::fabsf(SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2 * load_m_s2))
+                        / libm::fabsf(self.ff_pitch_rad_per_m_s2))
+                    .max(0.0)
+                } else {
+                    f32::INFINITY
+                };
+                let a_lim = self.accel_limit_m_s2.min(a_lim_i).min(a_lim_th);
+                let mut r = r;
+                let a_des = if saturated {
+                    // A board that cannot follow must not be left behind by
+                    // its own reference.
+                    r += (v_m_s - r) * (dt_s / SPEED_HOLD_SATURATED_LEAK_S).min(1.0);
+                    0.0
+                } else {
+                    let a = (SPEED_HOLD_APPROACH_PER_S * (v_target_m_s - r)).clamp(-a_lim, a_lim);
+                    // Speed-increasing (away from zero) is scaled; braking is not.
+                    if a * r > 0.0 || (r == 0.0 && a != 0.0) {
+                        a * self.drive_scale
+                    } else {
+                        a
+                    }
+                };
+                let da = SPEED_HOLD_JERK_M_S3 * dt_s;
+                self.a_ref += (a_des - self.a_ref).clamp(-da, da);
+                r + self.a_ref * dt_s
+            }
+        };
+        let a_ref = self.a_ref;
+        self.v_ref = Some(v_ref);
+        let err = v_m_s - v_ref;
+        let pitch_ff =
+            self.ff_pitch_rad_per_m_s2 * a_ref + SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2 * load_m_s2;
+        let balance = self.ff_amps_per_m_s2 * a_ref + i_grade
+            - self.k_pitch * (pitch_rad - pitch_ff)
+            - self.k_rate * pitch_rate_rad_s;
+        let demand = balance + self.k_speed * err + self.k_int * self.integral;
+        let pushing_further = saturated && demand.is_sign_positive() == err.is_sign_positive();
+        if dt_s > 0.0 && !pushing_further {
+            self.integral =
+                (self.integral + err * dt_s).clamp(-self.integral_limit_m, self.integral_limit_m);
+        }
+        balance + self.k_speed * err + self.k_int * self.integral
+    }
+}
+
+/// Grade compensation for the deployed balance law ([`PitchRegulator`]).
+///
+/// The PD law alone makes a steady wheel torque only by drooping the deck:
+/// theta = L / Kp. A rider stands on the deck, so the droop moves the rider's
+/// centre of mass forward by about l * theta, and with Kp = 140 N.m/rad (below
+/// the rider's gravity stiffness m g l, about 660 N.m/rad) that is more than
+/// the steady state needs: the board must accelerate, which needs more torque
+/// and more droop. Measured: no steady speed beyond about 5 % grade
+/// (fable-oracle review, 2026-10-04). Two terms remove the droop:
+///
+/// 1. Load feedforward: the current the learned grade load needs,
+///    `load / k` ([`GradeAwareAiding::load_m_s2`]), limited to
+///    `FF_LIMIT_A`. No lean is commanded; the rider supplies the small
+///    centre-of-mass offset a steady climb needs.
+/// 2. A slow pitch integral, Ki = 25 N.m/(rad s) (integral time about 5 s),
+///    for the residual (estimator bias, rolling loss); limited to
+///    `I_LIMIT_NM`, and frozen while the drive is saturated in the same
+///    direction.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GradeCompensator {
+    integral_nm: f32,
+}
+
+impl GradeCompensator {
+    pub const KI_NM_PER_RAD_S: f32 = 25.0;
+    pub const I_LIMIT_NM: f32 = 20.0;
+    /// About 45 N.m (a 25 % grade at 110 kg) at Kt 0.7.
+    pub const FF_LIMIT_A: f32 = 64.0;
+
+    pub const fn new() -> Self {
+        GradeCompensator { integral_nm: 0.0 }
+    }
+
+    /// Extra current, A, to add to the regulator's output.
+    /// `pitch_err_rad` = pitch - reference (nose down negative);
+    /// `saturated` = the envelope clamped last cycle.
+    pub fn update(
+        &mut self,
+        pitch_err_rad: f32,
+        load_m_s2: f32,
+        k_m_s2_per_a: f32,
+        kt_nm_per_a: f32,
+        saturated: bool,
+        dt_s: f32,
+    ) -> f32 {
+        let ff_a = if k_m_s2_per_a > 0.0 {
+            (load_m_s2 / k_m_s2_per_a).clamp(-Self::FF_LIMIT_A, Self::FF_LIMIT_A)
+        } else {
+            0.0
+        };
+        // The integral term is a torque: -Ki * integral(pitch error).
+        let step = -Self::KI_NM_PER_RAD_S * pitch_err_rad * dt_s;
+        let pushing_further = saturated && (step > 0.0) == (self.integral_nm > 0.0);
+        if dt_s > 0.0 && !pushing_further {
+            self.integral_nm = (self.integral_nm + step).clamp(-Self::I_LIMIT_NM, Self::I_LIMIT_NM);
+        }
+        ff_a + self.integral_nm / kt_nm_per_a
+    }
+
+    pub fn reset(&mut self) {
+        self.integral_nm = 0.0;
+    }
+}
+
+/// Rider warning level from [`AuthorityMargin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MarginLevel {
+    None,
+    /// Pulsed buzz: the board is near its limit.
+    Pulse,
+    /// Solid buzz: the board is at its limit; the rider must ease off now.
+    Solid,
+}
+
+/// How close the drive is to the end of its authority, as one number:
+///
+/// m = max(|I_filt| / I_max, duty / DUTY_LIMIT, (|load| / k) / I_max)
+///
+/// - |I_filt|: the applied current, low-passed; the climb case.
+/// - duty: the voltage the motor needs over the pack voltage; the speed
+///   case (back-EMF headroom).
+/// - |load| / k: the steady grade current that [`GradeAwareAiding`]
+///   predicts. It sees a climb before the current peak arrives.
+///
+/// The level drives a rider warning (haptic buzz on the motor; D1 in
+/// `docs/research/pushback-and-authority-margins.md`) and, optionally, the
+/// drive scale that limits forward acceleration (D2). Nothing here limits
+/// braking: tail braking stays free.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthorityMargin {
+    i_filt_a: f32,
+    margin: f32,
+    level: MarginLevel,
+}
+
+impl AuthorityMargin {
+    /// Current filter time constant, s.
+    pub const CURRENT_TAU_S: f32 = 0.1;
+    /// Duty at which the duty term reaches 1.0.
+    pub const DUTY_LIMIT: f32 = 0.95;
+    /// Pulsed warning above this margin.
+    pub const PULSE_ON: f32 = 0.70;
+    /// Solid warning above this margin.
+    pub const SOLID_ON: f32 = 0.85;
+    /// Each level clears this far below its threshold.
+    pub const HYSTERESIS: f32 = 0.05;
+    /// Drive scale: full forward acceleration at or below this margin...
+    pub const DRIVE_FULL: f32 = 0.70;
+    /// ...and none at or above this margin.
+    pub const DRIVE_ZERO: f32 = 0.90;
+
+    pub const fn new() -> Self {
+        AuthorityMargin {
+            i_filt_a: 0.0,
+            margin: 0.0,
+            level: MarginLevel::None,
+        }
+    }
+
+    /// One cycle. `duty` is |V_motor| / V_pack, estimated by the caller.
+    /// `load_m_s2` is [`GradeAwareAiding::load_m_s2`]; `k` its scale.
+    pub fn update(
+        &mut self,
+        applied_amps: f32,
+        duty: f32,
+        load_m_s2: f32,
+        k_m_s2_per_a: f32,
+        i_max_a: f32,
+        dt_s: f32,
+    ) -> MarginLevel {
+        let alpha = dt_s / (Self::CURRENT_TAU_S + dt_s);
+        self.i_filt_a += alpha * (libm::fabsf(applied_amps) - self.i_filt_a);
+        let i_max = i_max_a.max(1e-3);
+        let grade_a = if k_m_s2_per_a > 0.0 {
+            libm::fabsf(load_m_s2) / k_m_s2_per_a
+        } else {
+            0.0
+        };
+        self.margin = (self.i_filt_a / i_max)
+            .max(libm::fabsf(duty) / Self::DUTY_LIMIT)
+            .max(grade_a / i_max);
+        let m = self.margin;
+        self.level = match self.level {
+            MarginLevel::Solid if m > Self::SOLID_ON - Self::HYSTERESIS => MarginLevel::Solid,
+            _ if m > Self::SOLID_ON => MarginLevel::Solid,
+            MarginLevel::Solid | MarginLevel::Pulse if m > Self::PULSE_ON - Self::HYSTERESIS => {
+                MarginLevel::Pulse
+            }
+            _ if m > Self::PULSE_ON => MarginLevel::Pulse,
+            _ => MarginLevel::None,
+        };
+        self.level
+    }
+
+    pub fn margin(&self) -> f32 {
+        self.margin
+    }
+
+    pub fn level(&self) -> MarginLevel {
+        self.level
+    }
+
+    /// Forward-acceleration scale for D2: 1 at or below `DRIVE_FULL`, 0 at
+    /// or above `DRIVE_ZERO`, linear between.
+    pub fn drive_scale(&self) -> f32 {
+        ((Self::DRIVE_ZERO - self.margin) / (Self::DRIVE_ZERO - Self::DRIVE_FULL)).clamp(0.0, 1.0)
+    }
+}
+
+impl Default for AuthorityMargin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Grade load per amp, m/s² per A: the same scale [`GradeAwareAiding`] learns
+/// its load in (Kt / (R * 83 kg)), so `load / this` is amps.
+pub const SPEED_HOLD_LOAD_M_S2_PER_A: f32 = 0.0584;
+/// Steady lean per m/s² of grade load, rad: -R / (g L) at 70 kg. It equals
+/// the acceleration lean (-0.1261) less its inertial part (1/g), so the two
+/// feedforwards agree. Small (1 deg at 8 %), so a mass error costs < 0.5 deg.
+pub const SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2: f32 = -0.0234;
+/// Fraction of the current limit the reference may plan to use.
+pub const SPEED_HOLD_CURRENT_BUDGET: f32 = 0.6;
+/// Lean the reference may plan to use against the road, rad: the 18.6 deg
+/// deck strike less 5 deg for the transient on a vertical curve.
+pub const SPEED_HOLD_LEAN_BUDGET_RAD: f32 = 0.237;
+/// Time constant of the reference leak toward the measured speed while the
+/// motor is saturated, s.
+pub const SPEED_HOLD_SATURATED_LEAK_S: f32 = 0.5;
+
+#[cfg(test)]
+mod speed_hold_tests {
+    use super::*;
+
+    fn lqr() -> SpeedHoldLqr {
+        SpeedHoldLqr::new(376.8, 88.4, 28.35, 8.06, 1.0)
+    }
+
+    #[test]
+    fn nose_down_drives_forward() {
+        let mut c = lqr();
+        assert!(c.update(-0.05, 0.0, 0.0, 0.0, 0.002, false) > 0.0);
+    }
+
+    #[test]
+    fn too_fast_first_drives_forward_to_tip_back() {
+        let mut c = lqr();
+        c.update(0.0, 0.0, 3.0, 3.0, 0.002, false);
+        // Reference held at 3 m/s; board now at 3.5 m/s, level.
+        assert!(c.update(0.0, 0.0, 3.5, 3.0, 0.002, false) > 0.0);
+    }
+
+    #[test]
+    fn reference_starts_at_measured_speed_and_never_steps_acceleration() {
+        let mut c = lqr();
+        c.update(0.0, 0.0, 1.0, 5.0, 0.002, false);
+        assert_eq!(c.v_ref(), Some(1.0));
+        let mut prev = 1.0;
+        let mut prev_a = 0.0f32;
+        for _ in 0..5000 {
+            c.update(0.0, 0.0, 1.0, 5.0, 0.002, false);
+            let r = c.v_ref().unwrap();
+            let a = (r - prev) / 0.002;
+            assert!((a - prev_a).abs() <= SPEED_HOLD_JERK_M_S3 * 0.002 + 1e-3);
+            assert!(a <= 1.0 + 1e-3 && r <= 5.0 + 0.05, "a {a} r {r}");
+            prev = r;
+            prev_a = a;
+        }
+        assert!((prev - 5.0).abs() < 0.1, "reference did not arrive: {prev}");
+    }
+
+    #[test]
+    fn integral_does_not_wind_further_while_saturated() {
+        let mut c = lqr();
+        c.update(0.0, 0.0, 3.0, 3.0, 0.002, false);
+        // The reference also leaks toward the measured speed while saturated,
+        // so the output moves; the integral must not.
+        c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
+        let a = c.integral;
+        c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
+        assert!(
+            (a - c.integral).abs() < 1e-6,
+            "integral wound while saturated: {a} -> {}",
+            c.integral
+        );
+    }
+
+    #[test]
+    fn margin_levels_rise_with_hysteresis_and_take_the_largest_term() {
+        let mut m = AuthorityMargin::new();
+        let run = |m: &mut AuthorityMargin, amps: f32, duty: f32, load: f32| {
+            for _ in 0..500 {
+                m.update(amps, duty, load, 0.0584, 40.0, 0.002);
+            }
+            m.level()
+        };
+        assert_eq!(run(&mut m, 20.0, 0.1, 0.0), MarginLevel::None);
+        assert_eq!(run(&mut m, 30.0, 0.1, 0.0), MarginLevel::Pulse); // 0.75
+        assert_eq!(run(&mut m, 36.0, 0.1, 0.0), MarginLevel::Solid); // 0.90
+        assert_eq!(run(&mut m, 33.0, 0.1, 0.0), MarginLevel::Solid); // 0.825, hysteresis
+        assert_eq!(run(&mut m, 27.0, 0.1, 0.0), MarginLevel::Pulse); // 0.675, hysteresis
+        assert_eq!(run(&mut m, 5.0, 0.1, 0.0), MarginLevel::None);
+        // Duty alone (high speed) and the predicted grade current alone.
+        assert_eq!(run(&mut m, 5.0, 0.80, 0.0), MarginLevel::Pulse); // 0.84
+        let load = 0.0584 * 36.0; // predicts 36 A of 40 A
+        assert_eq!(
+            run(&mut AuthorityMargin::new(), 5.0, 0.1, load),
+            MarginLevel::Solid
+        );
+    }
+
+    #[test]
+    fn drive_scale_ramps_from_full_to_zero() {
+        let mut m = AuthorityMargin::new();
+        for _ in 0..1000 {
+            m.update(32.0, 0.0, 0.0, 0.0584, 40.0, 0.002); // margin 0.80
+        }
+        assert!((m.drive_scale() - 0.5).abs() < 0.02, "{}", m.drive_scale());
+    }
+
+    #[test]
+    fn drive_scale_limits_acceleration_but_never_braking() {
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        c.set_drive_scale(0.0);
+        c.update(0.0, 0.0, 3.0, 3.0, 0.002, false);
+        for _ in 0..500 {
+            c.update(0.0, 0.0, 3.0, 5.0, 0.002, false);
+        }
+        assert!(c.a_ref.abs() < 1e-6, "accelerated at scale 0: {}", c.a_ref);
+        for _ in 0..500 {
+            c.update(0.0, 0.0, 3.0, 1.0, 0.002, false);
+        }
+        assert!(c.a_ref < -0.4, "braking was limited: {}", c.a_ref);
+    }
+
+    #[test]
+    fn grade_load_adds_its_current_and_its_lean() {
+        // On the reference, at the grade lean, the demand is the grade current.
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        let load = 0.8;
+        let lean = SPEED_HOLD_GRADE_PITCH_RAD_PER_M_S2 * load;
+        c.update_with_grade(lean, 0.0, 3.0, 3.0, 0.002, false, load, 40.0);
+        let i = c.update_with_grade(lean, 0.0, 3.0, 3.0, 0.002, false, load, 40.0);
+        assert!((i - load / SPEED_HOLD_LOAD_M_S2_PER_A).abs() < 0.05, "{i}");
+    }
+
+    #[test]
+    fn governor_stops_acceleration_when_the_grade_uses_the_current_budget() {
+        // 0.6 * 30 A = 18 A budget; a 1.2 m/s² load needs 20.5 A already.
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        c.update_with_grade(0.0, 0.0, 2.0, 5.0, 0.002, false, 1.2, 30.0);
+        for _ in 0..1000 {
+            c.update_with_grade(0.0, 0.0, 2.0, 5.0, 0.002, false, 1.2, 30.0);
+        }
+        assert!(c.a_ref.abs() < 1e-3, "a_ref {}", c.a_ref);
+    }
+
+    #[test]
+    fn feedforward_holds_a_level_board_at_the_ramp_lean() {
+        // While the reference ramps, a board already at the feedforward lean
+        // and on the reference gets exactly the feedforward current.
+        let mut c = lqr().with_feedforward(-0.1261, 17.82);
+        c.update(0.0, 0.0, 1.0, 9.0, 0.002, false);
+        // Let the reference reach its 1 m/s^2 limit (1 s at 1 m/s^3).
+        for _ in 0..600 {
+            let v = c.v_ref().unwrap();
+            c.update(-0.1261, 0.0, v, 9.0, 0.002, false);
+        }
+        c.reset_integral_for_test();
+        let r = c.v_ref().unwrap();
+        let i = c.update(-0.1261, 0.0, r + 0.002, 9.0, 0.002, false);
+        assert!((i - 17.82).abs() < 0.1, "{i}");
     }
 }
 
@@ -1115,5 +1902,141 @@ mod tests {
         // just large enough to be clearly outside any plausible torque ceiling.
         let r = PitchRegulator::new(KP, KD);
         assert!(r.update(-1.0, 0.0, 0.0) > 40.0);
+    }
+}
+
+#[cfg(test)]
+mod tilt_filter_tests {
+    use super::*;
+    const G: f32 = 9.81;
+
+    fn sample(t_ns: u64, gyro: [f32; 3], accel: [f32; 3]) -> ImuSample {
+        ImuSample {
+            gyro_rad_s: gyro,
+            accel_m_s2: accel,
+            t_sample_ns: t_ns,
+        }
+    }
+
+    /// Specific force and body rates of a board in a steady, balanced turn at
+    /// speed `v`, yaw rate `psi_dot`, bank `phi`, pitch `theta` (FRD).
+    fn banked(v: f32, psi_dot: f32, phi: f32, theta: f32) -> ([f32; 3], [f32; 3]) {
+        let (sp, cp, st, ct) = (
+            libm::sinf(phi),
+            libm::cosf(phi),
+            libm::sinf(theta),
+            libm::cosf(theta),
+        );
+        // Body rates of a constant yaw rate about the world down axis.
+        let gyro = [-psi_dot * st, psi_dot * sp * ct, psi_dot * cp * ct];
+        // Gravity part, plus the centripetal acceleration v*psi_dot rotated in.
+        let a_c = v * psi_dot;
+        let accel = [G * st, -G * sp * ct + a_c * cp, -G * cp * ct + a_c * sp];
+        (gyro, accel)
+    }
+
+    #[test]
+    fn level_and_still_reads_zero() {
+        let mut f = TiltFilter::new(0.5);
+        let mut a = Attitude::default();
+        for k in 0..1000 {
+            a = f.update(&[sample(k * 2_000_000, [0.0; 3], [0.0, 0.0, -G])], 0.0);
+        }
+        assert!(a.pitch_rad.abs() < 1e-5 && f.roll_rad().abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_banked_turn_does_not_leak_into_pitch() {
+        let (v, psi_dot, phi) = (5.0, 0.5, 0.25);
+        let (gyro, accel) = banked(v, psi_dot, phi, 0.0);
+        let mut f = TiltFilter::new(0.5);
+        f.set_speed(v);
+        let mut a = Attitude::default();
+        for k in 0..5000 {
+            a = f.update(&[sample(k * 2_000_000, gyro, accel)], 0.0);
+        }
+        assert!(a.pitch_rad.abs() < 0.01, "pitch {}", a.pitch_rad);
+        assert!(
+            a.pitch_rate_rad_s.abs() < 1e-3,
+            "rate {}",
+            a.pitch_rate_rad_s
+        );
+        assert!((f.roll_rad() - phi).abs() < 0.01, "roll {}", f.roll_rad());
+
+        // The single-axis filter, given the same turn, drifts nose-up: q > 0.
+        let mut c = ComplementaryFilter::new(0.5);
+        let mut b = Attitude::default();
+        for k in 0..5000 {
+            b = c.update(&[sample(k * 2_000_000, gyro, accel)], 0.0);
+        }
+        assert!(b.pitch_rad > 0.05, "single-axis pitch {}", b.pitch_rad);
+    }
+
+    #[test]
+    fn it_matches_the_complementary_filter_with_no_roll() {
+        let mut f = TiltFilter::new(0.5);
+        let mut c = ComplementaryFilter::new(0.5);
+        let (mut a, mut b) = (Attitude::default(), Attitude::default());
+        for k in 0..2000u64 {
+            let th = 0.05 * libm::sinf(k as f32 * 0.01);
+            let s = sample(
+                k * 2_000_000,
+                [0.0, 0.05 * 0.01 / 0.002 * libm::cosf(k as f32 * 0.01), 0.0],
+                [G * libm::sinf(th), 0.0, -G * libm::cosf(th)],
+            );
+            a = f.update(&[s], 0.0);
+            b = c.update(&[s], 0.0);
+        }
+        assert!(
+            (a.pitch_rad - b.pitch_rad).abs() < 1e-3,
+            "{} vs {}",
+            a.pitch_rad,
+            b.pitch_rad
+        );
+    }
+}
+
+#[cfg(test)]
+mod grade_aware_tests {
+    use super::*;
+    const K: f32 = 0.0584;
+
+    #[test]
+    fn holding_speed_on_a_descent_learns_the_grade_and_reports_zero_acceleration() {
+        let mut g = GradeAwareAiding::new(K, 0.3);
+        // 12 % descent: holding speed takes i = -g sin(6.84 deg) / K of brake.
+        let i = -9.81 * 6.84_f32.to_radians().sin() / K;
+        let mut a = 1.0;
+        for _ in 0..2000 {
+            a = g.update(i, 3.0, 9.81, 0.002);
+        }
+        assert!(a.abs() < 0.02, "aid {a}");
+        assert!(
+            (g.grade_rad().to_degrees() - 6.84).abs() < 0.1,
+            "grade {}",
+            g.grade_rad().to_degrees()
+        );
+    }
+
+    #[test]
+    fn an_impact_sample_does_not_move_the_load() {
+        let mut g = GradeAwareAiding::new(K, 0.3);
+        g.update(0.0, 3.0, 9.81, 0.002);
+        // a 20 m/s^2 impact with a wheel spike: gated
+        g.update(0.0, 2.9, 20.0, 0.002);
+        assert_eq!(g.load_m_s2(), 0.0);
+    }
+
+    #[test]
+    fn on_the_flat_the_aid_is_the_command_prediction() {
+        let mut g = GradeAwareAiding::new(K, 0.3);
+        let mut v = 0.0;
+        let mut a = 0.0;
+        for _ in 0..1000 {
+            let acc = K * 10.0;
+            v += acc * 0.002;
+            a = g.update(10.0, v, 9.81, 0.002);
+        }
+        assert!((a - K * 10.0).abs() < 0.02, "aid {a}");
     }
 }
