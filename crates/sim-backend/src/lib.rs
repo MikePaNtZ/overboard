@@ -143,6 +143,10 @@ pub struct SimBackend {
     ankle_qposadr: Option<usize>,
     ankle_dofadr: Option<usize>,
     ankle_target_rad: f32,
+    /// sim-host `--ankle-hinge`: the rider's pitch hinge at deck level and its
+    /// torque motor (`ankle_pitch`), N*m.
+    ankle_pitch_actuator: Option<usize>,
+    ankle_pitch_torque_nm: f64,
     /// Commanded ballast actuator targets, metres -- see
     /// [`SimBackend::set_ballast_targets`]. Zero (centred) until set, and
     /// reset to zero on every `open()`.
@@ -458,6 +462,38 @@ impl SimBackend {
     /// rider's body lean RELATIVE TO THE DECK (+ = body right of the deck
     /// normal). Same buffering as [`SimBackend::set_ballast_targets`]; a
     /// no-op on a model without an `ankle_roll` actuator.
+    /// The rider's pitch hinge angle and rate (rad, rad/s; + tilts the body
+    /// back), or `None` without the hinge.
+    pub fn truth_ankle_pitch(&self) -> Option<(f64, f64)> {
+        let plant = self.plant.as_ref()?;
+        let q = plant.joint_qposadr("ankle_pitch")?;
+        let v = plant.joint_dofadr("ankle_pitch")?;
+        Some((plant.qpos()[q], plant.qvel()[v]))
+    }
+
+    pub fn set_ankle_pitch_torque(&mut self, torque_nm: f64) {
+        self.ankle_pitch_torque_nm = torque_nm;
+    }
+
+    /// sim-host `--ankle-hinge`: the rider's lean against gravity, rad, + =
+    /// forward (toward the board's nose), from the slide carrier above the
+    /// ankle pivot, so the stick's lean intent is not in it. `None` on a model
+    /// without the hinge.
+    pub fn truth_rider_body_lean(&self) -> Option<f64> {
+        let plant = self.plant.as_ref()?;
+        let pivot = plant.body_id("rider_ankle")?;
+        let carrier = plant.body_id("ballast_fa_carrier")?;
+        let frame = plant.body_id("frame")?;
+        let a = plant.body_xpos(pivot);
+        let b = plant.body_xpos(carrier);
+        let r = plant.body_xmat(frame);
+        // Board forward is body -X, flattened to the horizontal.
+        let (fx, fy) = (-r[0], -r[3]);
+        let n = (fx * fx + fy * fy).sqrt().max(1e-9);
+        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        Some(((d[0] * fx + d[1] * fy) / n).atan2(d[2]))
+    }
+
     pub fn set_ankle_target(&mut self, angle_rad: f32) {
         self.ankle_target_rad = angle_rad;
     }
@@ -543,6 +579,7 @@ impl SimBackend {
         self.ballast_fa_target_m = 0.0;
         self.ballast_lateral_target_m = 0.0;
         self.ankle_target_rad = 0.0;
+        self.ankle_pitch_torque_nm = 0.0;
         self.last_wheel_rate_rad_s = 0.0;
     }
 
@@ -799,8 +836,10 @@ impl SimBackend {
         if free {
             let p = plant.body_xpos(ballast);
             let f = plant.body_xpos(frame);
-            let q = plant.body_xquat(frame);
-            let r = plant.body_xmat(frame);
+            // The rider's own orientation (with --ankle-hinge it differs from the
+            // deck's); the angular velocity is still the deck's.
+            let q = plant.body_xquat(ballast);
+            let r = plant.body_xmat(ballast);
             let d = [p[0] - f[0], p[1] - f[1], p[2] - f[2]];
             let v = [
                 linvel[0] + angvel[1] * d[2] - angvel[2] * d[1],
@@ -1024,6 +1063,8 @@ impl BoardObserve for SimBackend {
         self.ballast_fa_qposadr = plant.joint_qposadr("ballast_fa");
         self.ballast_lateral_qposadr = plant.joint_qposadr("ballast_lat");
         self.ankle_actuator = plant.actuator_id("ankle_roll");
+        self.ankle_pitch_actuator = plant.actuator_id("ankle_pitch");
+        self.ankle_pitch_torque_nm = 0.0;
         self.ankle_qposadr = plant.joint_qposadr("ankle_roll");
         self.ankle_dofadr = plant.joint_dofadr("ankle_roll");
         // The board's own free joint -- both models declare it (`frame_free`).
@@ -1129,6 +1170,9 @@ impl BoardObserve for SimBackend {
         }
         if let Some(idx) = self.ankle_actuator {
             ctrl[idx] = self.ankle_target_rad as f64;
+        }
+        if let Some(idx) = self.ankle_pitch_actuator {
+            ctrl[idx] = self.ankle_pitch_torque_nm;
         }
 
         // AC3: sim time comes from mjData::time, read after stepping, never

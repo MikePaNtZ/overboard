@@ -438,6 +438,45 @@ const PAD_MODE_TORQUE_LIMIT_NM: f32 = 12.0;
 /// dropping back to level is not a grade.
 const PAD_MODE_GRADE_HOLD_S: f64 = 1.0;
 
+/// Ankle pivot height above the axle, m (the deck top).
+const ANKLE_PIVOT_Z_M: f64 = 0.06;
+/// Rider centre-of-pressure reach about the ankle, m: the ankle torque limit
+/// is m g times this.
+const ANKLE_COP_M: f32 = 0.12;
+
+/// `--ankle-hinge`: puts the rider's slide carrier on a pitch hinge at deck
+/// level (`rider_ankle`, joint `ankle_pitch`, torque motor `ankle_pitch`).
+fn splice_ankle_hinge(xml: &str, rigid: bool) -> Result<String, HostError> {
+    let bad = |what: &str| HostError::Io(std::io::Error::other(format!("sim-host: --ankle-hinge: {what}")));
+    let open = r#"<body name="ballast_fa_carrier" pos="0 0 0.75">"#;
+    let camera = r#"<camera name="side""#;
+    if xml.matches(open).count() != 1 || xml.matches(camera).count() != 1 || xml.matches("</actuator>").count() != 1 {
+        return Err(bad("rider carrier, side camera or actuator block not found once"));
+    }
+    let carrier_z = 0.75 - ANKLE_PIVOT_Z_M;
+    // The bracket's stiff spring is a joint stiffness, integrated inside the
+    // step: as a host torque held for 2 ms it was unstable (deck-vs-rider mode
+    // about 450 rad/s) and blew up at once.
+    let joint_extra = if rigid { r#"stiffness="1e5" damping="300""# } else { r#"damping="0""# };
+    let mut out = xml.replace(
+        open,
+        &format!(
+            r#"<body name="rider_ankle" pos="0 0 {ANKLE_PIVOT_Z_M}">
+        <joint name="ankle_pitch" type="hinge" axis="0 1 0" pos="0 0 0" {joint_extra}/>
+        <inertial pos="0 0 0" mass="0.05" diaginertia="1e-4 1e-4 1e-4"/>
+      <body name="ballast_fa_carrier" pos="0 0 {carrier_z:.4}">"#
+        ),
+    );
+    // Close the extra body before the side camera (the carrier's sibling).
+    out = out.replace(camera, &format!("</body>\n      {camera}"));
+    out = out.replace(
+        "</actuator>",
+        r#"  <motor name="ankle_pitch" joint="ankle_pitch" gear="1" ctrllimited="false"/>
+  </actuator>"#,
+    );
+    Ok(out)
+}
+
 /// `--tumble`: a free two-part rider (torso and head; legs on a ball hip),
 /// parked 50 m up on a weld until a fall. Low-resolution on purpose: it shows
 /// how a rider leaves the board and slides, not a human body. It does not
@@ -2100,6 +2139,17 @@ pub struct HostConfig {
     /// (it sags under load). Off by default: the Monte Carlo results do not
     /// include it.
     pub motor_limits: bool,
+    /// `--ankle-hinge`: the rider stands on a pitch hinge at deck level (an
+    /// ankle; fable-oracle, 2026-10-04). Its torque is a spring and damper on
+    /// the rider's lean against GRAVITY (not against the deck), K = 1.3 m g h,
+    /// zeta 0.7, limited to m g * 0.12 m (the feet's centre-of-pressure
+    /// reach). The limit lets the body stay near vertical when the deck sits
+    /// on a pad. The slide still carries the stick's lean intent.
+    pub ankle_hinge: bool,
+    /// `--ankle-rigid`: the hinge with a 1e5 N*m/rad spring on the hinge angle
+    /// (against the deck) and no limit: it must reproduce the rigid rider
+    /// (the bracket test).
+    pub ankle_rigid: bool,
     /// `--rider-ankle`: the rider stays upright as the deck pitches (the
     /// slide moves by 0.75 m * sin(pitch)); otherwise the rider is rigid
     /// with the deck. Needs `--rider-reach` (it widens the slide to 0.35 m).
@@ -2517,6 +2567,8 @@ impl Default for HostConfig {
             tumble: false,
             motor_limits: false,
             rider_ankle: false,
+            ankle_hinge: false,
+            ankle_rigid: false,
             pose_out: None,
             stop_after_handoff_s: None,
             hud_out_addr: None,
@@ -2893,6 +2945,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     } else {
         None
     };
+    if cfg.ankle_hinge || cfg.ankle_rigid {
+        let Some(path) = &generated_model else {
+            return Err(HostError::Io(std::io::Error::other("sim-host: --ankle-hinge needs a generated model (use --lean-steer)")));
+        };
+        let xml = std::fs::read_to_string(path)?;
+        std::fs::write(path, splice_ankle_hinge(&xml, cfg.ankle_rigid)?)?;
+    }
     if cfg.tumble {
         let Some(path) = &generated_model else {
             return Err(HostError::Io(std::io::Error::other("sim-host: --tumble needs a generated model (use --lean-steer)")));
@@ -3025,6 +3084,22 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut rider_free = false;
     // Pad rest (see the loop): stopped on a pad, motor off until the deck is level.
     let mut pad_mode = false;
+    // `--ankle-hinge` (see HostConfig::ankle_hinge).
+    let ankle_m = variation.rider_mass_kg.unwrap_or(70.0) as f32;
+    let ankle_h = 0.75 - ANKLE_PIVOT_Z_M as f32;
+    let ankle_mgh = ankle_m * 9.81 * ankle_h;
+    let ankle_j = ankle_m * ankle_h * ankle_h + 0.15 * ankle_m;
+    let ankle_k = 1.3 * ankle_mgh;
+    let ankle_c = 2.0 * 0.7 * (ankle_j * (ankle_k - ankle_mgh)).sqrt();
+    let ankle_cap = ankle_m * 9.81 * ANKLE_COP_M;
+    let mut ankle_lean_prev: Option<f32> = None;
+    let mut ankle_rate_f = 0.0_f32;
+    let mut ankle_peak_nm = 0.0_f32;
+    if cfg.ankle_hinge {
+        eprintln!(
+            "sim-host: --ankle-hinge: K {ankle_k:.0} N*m/rad, C {ankle_c:.0} N*m*s/rad, limit {ankle_cap:.0} N*m"
+        );
+    }
     let mut pad_grade_hold_s = 0.0_f64;
     let mut last_pitch_rad = 0.0_f32;
     let mut target_changed = false;
@@ -3534,6 +3609,25 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         } else {
             0.0
         };
+        if cfg.ankle_hinge || cfg.ankle_rigid {
+            if let Some(lean) = backend.truth_rider_body_lean() {
+                let lean = lean as f32;
+                let rate = ankle_lean_prev.map_or(0.0, |p| (lean - p) / DT_S as f32);
+                ankle_lean_prev = Some(lean);
+                ankle_rate_f += (DT_S as f32 / (0.005 + DT_S as f32)) * (rate - ankle_rate_f);
+                // A positive hinge angle tilts the body back (axis +Y, forward
+                // is -X), so the restoring torque for a forward lean is +.
+                // `--ankle-rigid` (the bracket): a stiff joint spring against
+                // the DECK, which must reproduce the rigid rider.
+                let tau = if cfg.ankle_rigid {
+                    0.0 // the joint's own stiffness (splice_ankle_hinge)
+                } else {
+                    (ankle_k * lean + ankle_c * ankle_rate_f).clamp(-ankle_cap, ankle_cap)
+                };
+                ankle_peak_nm = ankle_peak_nm.max(tau.abs());
+                backend.set_ankle_pitch_torque(tau as f64);
+            }
+        }
         backend.set_ballast_targets(
             corridor_enforced_fore_aft
                 * fore_aft_range_m
@@ -4370,6 +4464,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         );
     }
 
+    if cfg.ankle_hinge || cfg.ankle_rigid {
+        eprintln!("sim-host: ankle torque peak {ankle_peak_nm:.0} N*m");
+    }
     if let Some(path) = &cfg.pose_out {
         let model_note = match &generated_model {
             Some(g) => {

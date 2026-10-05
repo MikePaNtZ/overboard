@@ -116,6 +116,14 @@ fn main() -> ExitCode {
                 cfg.batt_soc0 = x;
                 i += 2;
             }
+            "--ankle-hinge" => {
+                cfg.ankle_hinge = true;
+                i += 1;
+            }
+            "--ankle-rigid" => {
+                cfg.ankle_rigid = true;
+                i += 1;
+            }
             "--rider-ankle" => {
                 cfg.rider_ankle = true;
                 i += 1;
