@@ -116,6 +116,23 @@ fn main() -> ExitCode {
                 cfg.batt_soc0 = x;
                 i += 2;
             }
+            "--sensors" => {
+                if args.get(i + 1).map(String::as_str) != Some("stage0") {
+                    eprintln!("sim-host: --sensors needs stage0");
+                    return ExitCode::FAILURE;
+                }
+                cfg.sensors_stage0 = true;
+                i += 2;
+            }
+            "--noise-scale" | "--extra-delay-ms" => {
+                let flag = args[i].clone();
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: {flag} needs a number");
+                    return ExitCode::FAILURE;
+                };
+                if flag == "--noise-scale" { cfg.noise_scale = x } else { cfg.extra_delay_ms = x }
+                i += 2;
+            }
             "--kp-scale" | "--kd-scale" => {
                 let flag = args[i].clone();
                 let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f32>()) else {

@@ -1060,8 +1060,17 @@ fn write_model_with_kerb(
 // file's header) -- the inner-loop gains and estimator config below are
 // reused unchanged regardless, because they are the closest available
 // precedent for THIS plant's mass/inertia, not for the outer loop's absence.
-const KP_NM_PER_RAD: f32 = 140.0;
-const KD_NM_PER_RAD_S: f32 = 21.0;
+//
+// 2026-10-05: the gains are 3x and 1.73x the shuttle_run values (140, 21).
+// The old Kp was below the rider's gravity stiffness (m g h about 660
+// N*m/rad), so the law made torque only by letting the deck droop, which
+// works only with a rider rigid with the deck. The VESC float package's
+// Angle P (about 20 A/deg, about 800 N*m/rad here) is stiffer still. Rider-law
+// Monte Carlo, X7, 200 runs: x1 191 PASS / 6 FALL; x3 196 PASS / 0 FALL;
+// x3 with stage0 sensors at 2x noise and +5 ms delay 199 PASS / 0 FALL (x1
+// there: 5 nose strikes); x3 with an upright (ankle) rider 0 FALL.
+const KP_NM_PER_RAD: f32 = 420.0;
+const KD_NM_PER_RAD_S: f32 = 36.3;
 const KT_NM_PER_A: f32 = 0.7;
 const MAX_CURRENT_A: f32 = 40.0;
 const ESTIMATOR_TAU_S: f32 = 2.0;
@@ -1335,6 +1344,7 @@ const SPEED_CAP_ONSET_M_S: f32 = MAX_GROUND_SPEED_M_S - SPEED_CAP_MARGIN_M_S;
 /// | pitch reserve vs the 11.46 deg ceiling | 13% | **31%** |
 ///
 /// The ceiling is `MAX_CURRENT_A * KT / KP` = 28/140 = 0.2 rad = 11.46 deg.
+/// (Measured with the old Kp 140; at Kp 420 the ceiling is a third of that.)
 ///
 /// # What it costs, measured
 ///
@@ -2139,8 +2149,14 @@ pub struct HostConfig {
     /// (it sags under load). Off by default: the Monte Carlo results do not
     /// include it.
     pub motor_limits: bool,
+    /// `--sensors stage0`: see the backend construction in `run`.
+    pub sensors_stage0: bool,
+    /// `--noise-scale S`: scales the stage0 noise and bias (1 by default).
+    pub noise_scale: f64,
+    /// `--extra-delay-ms D`: added to the stage0 actuation delay.
+    pub extra_delay_ms: f64,
     /// `--kp-scale S`, `--kd-scale S`: study scales on the deployed balance
-    /// gains (Kp 140 N*m/rad, Kd 21 N*m*s/rad). 1 by default.
+    /// gains (Kp 420 N*m/rad, Kd 36.3 N*m*s/rad). 1 by default.
     pub kp_scale: f32,
     pub kd_scale: f32,
     /// `--ankle-hinge`: the rider stands on a pitch hinge at deck level (an
@@ -2573,6 +2589,9 @@ impl Default for HostConfig {
             rider_ankle: false,
             ankle_hinge: false,
             kp_scale: 1.0,
+            sensors_stage0: false,
+            noise_scale: 1.0,
+            extra_delay_ms: 0.0,
             kd_scale: 1.0,
             ankle_rigid: false,
             pose_out: None,
@@ -2982,6 +3001,26 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // the host's limit, or a larger --max-current is a silent 40 A cap.
     let mut backend = SimBackend::with_model_path(params, model_path)
         .with_current_limit(cfg.max_current_a.unwrap_or(MAX_CURRENT_A) as f64);
+    // `--sensors stage0`: the placeholder sensor and actuation imperfections
+    // (gyro and accelerometer noise and bias, wheel-speed quantisation, 1 ms
+    // delay, 1 ms current loop), with `--noise-scale` and `--extra-delay-ms`.
+    // Without it the run is ideal: no noise, no delay.
+    if cfg.sensors_stage0 {
+        let base = sim_backend::imperfections::STAGE0_PLACEHOLDER;
+        let k = cfg.noise_scale;
+        let profile = sim_backend::imperfections::ImperfectionProfile {
+            gyro_noise_rad_s: base.gyro_noise_rad_s * k,
+            gyro_bias_rad_s: base.gyro_bias_rad_s * k,
+            accel_noise_m_s2: base.accel_noise_m_s2 * k,
+            actuation_delay_s: base.actuation_delay_s + cfg.extra_delay_ms / 1000.0,
+            ..base
+        };
+        eprintln!(
+            "sim-host: sensors stage0 x{k}: gyro noise {:.4} rad/s, accel noise {:.3} m/s^2, delay {:.1} ms",
+            profile.gyro_noise_rad_s, profile.accel_noise_m_s2, profile.actuation_delay_s * 1000.0
+        );
+        backend = backend.with_imperfections(profile);
+    }
     // Before `open()`, which is where the tilt is applied -- see
     // `HostConfig::incline_deg`.
     backend.set_incline_deg(cfg.incline_deg);

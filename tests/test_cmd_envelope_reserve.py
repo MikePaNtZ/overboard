@@ -180,6 +180,10 @@ def test_the_sim_host_binary_is_actually_built():
     )
 
 
+# These tests characterise the pre-2026-10-05 law (Kp 140, Kd 21); the deployed default is now Kp 420, Kd 36.3.
+LEGACY_GAIN_FLAGS = ["--kp-scale", "0.3333333", "--kd-scale", "0.5785124"]
+
+
 def _run(tmp_path: Path, name: str, scenario: str, **kw) -> list[dict]:
     """One deterministic free run; returns the per-cycle trace.
 
@@ -197,6 +201,7 @@ def _run(tmp_path: Path, name: str, scenario: str, **kw) -> list[dict]:
         "--state-out-addr", STATE_OUT,
         "--input-in-addr", INPUT_IN,
         "--trace-csv", str(out),
+        *LEGACY_GAIN_FLAGS,
     ]
     for flag, value in kw.items():
         if value is None:
@@ -303,7 +308,7 @@ def test_the_shipped_constants_are_the_ones_this_file_measured():
     """Guard against the duplication above drifting from `host.rs`."""
     assert _rust_constant("MAX_CURRENT_A") == MAX_CURRENT_A
     assert _rust_constant("KT_NM_PER_A") == KT_NM_PER_A
-    assert _rust_constant("KP_NM_PER_RAD") == KP_NM_PER_RAD
+    assert _rust_constant("KP_NM_PER_RAD") * float(LEGACY_GAIN_FLAGS[1]) == pytest.approx(KP_NM_PER_RAD, rel=1e-6)
 
 
 def test_peak_current_demand_is_linear_in_stick_at_the_documented_slope(tmp_path):

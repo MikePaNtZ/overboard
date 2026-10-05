@@ -82,6 +82,10 @@ SWEEP_LO, SWEEP_HI = 0.5, 2.0
 CLIFF_SCALES = (0.5, 1.0, 1.2, 1.4, 1.5, 1.6, 1.8, 2.0)
 
 
+# These tests characterise the pre-2026-10-05 law (Kp 140, Kd 21); the deployed default is now Kp 420, Kd 36.3.
+LEGACY_GAIN_FLAGS = ["--kp-scale", "0.3333333", "--kd-scale", "0.5785124"]
+
+
 def _run(tmp_path: Path, name: str, scenario: str, **kw) -> list[dict]:
     """One deterministic free run; returns the per-cycle trace.
 
@@ -99,6 +103,7 @@ def _run(tmp_path: Path, name: str, scenario: str, **kw) -> list[dict]:
         "--state-out-addr", STATE_OUT,
         "--input-in-addr", INPUT_IN,
         "--trace-csv", str(out),
+        *LEGACY_GAIN_FLAGS,
     ]
     for flag, value in kw.items():
         if value is None:

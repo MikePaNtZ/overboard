@@ -256,6 +256,14 @@ impl SimBackend {
     /// --max-current`) must pass it here, or the motor is silently capped at
     /// 40 A while the host logs the larger command (found 2026-10-04: every
     /// Monte Carlo run above 40 A ran at 40 A). Call before `open()`.
+    /// Replaces the imperfection profile (sensor noise, delays), keeping the
+    /// current limit already set. Takes effect at `open()`.
+    pub fn with_imperfections(mut self, profile: ImperfectionProfile) -> Self {
+        let limit = self.imperfection_profile.max_current_a;
+        self.imperfection_profile = ImperfectionProfile { max_current_a: limit, ..profile };
+        self
+    }
+
     pub fn with_current_limit(mut self, max_current_a: f64) -> Self {
         self.imperfection_profile.max_current_a = max_current_a;
         self
