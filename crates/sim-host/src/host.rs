@@ -693,7 +693,7 @@ fn splice_obstacles(
         let bits = r#"contype="3" conaffinity="3" condim="3" friction="0.8 0.005 0.0001""#;
         // The box centre z: on the terrain by default, else at z_m (the box
         // BOTTOM before rotation) plus half the height.
-        let pos_z = z_bottom.map_or(z0, |zb| zb) + lz / 2.0;
+        let pos_z = z_bottom.unwrap_or(z0) + lz / 2.0;
         // Intrinsic yaw (Z), pitch (Y) then roll (X), about the box centre, as
         // a MuJoCo quat so the result does not depend on the model's euler
         // sequence default.
