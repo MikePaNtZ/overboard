@@ -3327,6 +3327,21 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             armed_seen = true;
             eprintln!("sim-host: armed at sim_t={t_known_s:.3}s -- the board is released");
         }
+        // `--hold-until-arm`: the host puts the held board back every step, so
+        // a controller that runs meanwhile winds up against it (the game saw
+        // +310 A of demand and a SOLID warning after 50 s held, and a nose
+        // strike 1.6 s after a late arm). While held: no current, and the
+        // loops and filters start from zero at release. The attitude
+        // estimator runs on, so it is settled at release.
+        if !armed_seen {
+            grade_aid.reset();
+            grade_comp.reset();
+            speed_loop.reset();
+            speed_lqr.reset();
+            utilisation_filtered = 0.0;
+            margin = control_core::AuthorityMargin::new();
+            last_amps = 0.0;
+        }
         let input_reset_bit = !stale && latest_input.reset_bit;
         if input_reset_bit && !prev_reset_bit {
             // ADR-0012 gave this bit its first real job: it is the ONLY way
@@ -3821,7 +3836,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // out of authority" signal existed, was computed every cycle, and was
         // dropped on the floor, while `FALLEN` -- which trips about a second
         // AFTER the outcome is decided -- was the only thing anyone was told.
-        if motor_cut {
+        if motor_cut || !armed_seen {
             proposed_amps = 0.0;
         }
         // `--motor-limits`: what the motor and the pack can give at this speed.
