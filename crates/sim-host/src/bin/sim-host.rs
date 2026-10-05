@@ -210,6 +210,14 @@ fn main() -> ExitCode {
                 cfg.stop_after_handoff_s = Some(x);
                 i += 2;
             }
+            "--rider-lean-lag" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --rider-lean-lag needs a number (s)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_lean_lag_s = Some(x);
+                i += 2;
+            }
             "--rider-reach" => {
                 let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
                     eprintln!("sim-host: --rider-reach needs a number (m)");

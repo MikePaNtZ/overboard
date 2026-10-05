@@ -579,6 +579,21 @@ fn splice_tumble_rider(xml: &str) -> Result<String, HostError> {
     Ok(xml.replace("</worldbody>", &format!("{body}</worldbody>\n  {tail}")))
 }
 
+/// `--rider-lean-lag`: the fore/aft weight-shift servo's time constant, s (the
+/// model's is 0.05 s: 95 kg moved 10 cm in about 0.1 s, faster than a body).
+fn splice_rider_lean_lag(xml: &str, lag: f64) -> Result<String, HostError> {
+    let bad = |what: &str| HostError::Io(std::io::Error::other(format!("sim-host: --rider-lean-lag: {what}")));
+    if !(0.01..=1.0).contains(&lag) {
+        return Err(bad("lag must be 0.01..1.0 s"));
+    }
+    let at = xml.find(r#"<position name="ballast_fa""#).ok_or_else(|| bad("fore/aft servo not found"))?;
+    let end = at + xml[at..].find("/>").ok_or_else(|| bad("fore/aft servo not closed"))?;
+    let tag = &xml[at..end];
+    let t0 = tag.find("timeconst=\"").ok_or_else(|| bad("fore/aft servo has no timeconst"))? + 11;
+    let t1 = t0 + tag[t0..].find('"').ok_or_else(|| bad("bad timeconst"))?;
+    Ok(format!("{}{lag}{}", &xml[..at + t0], &xml[at + t1..]))
+}
+
 /// `--rider-reach`: widens the fore/aft slide joint and its servo range to
 /// +-`reach` m. The servo gains do not change.
 fn splice_rider_reach(xml: &str, reach: f64) -> Result<String, HostError> {
@@ -879,6 +894,9 @@ fn write_model_with_kerb(
     }
     if let Some(reach) = variation.rider_reach_m {
         xml = splice_rider_reach(&xml, reach)?;
+    }
+    if let Some(lag) = variation.rider_lean_lag_s {
+        xml = splice_rider_lean_lag(&xml, lag)?;
     }
     if let Some(amps) = max_current_a {
         // Sizing studies: the motor torque limit follows the current limit.
@@ -2195,6 +2213,8 @@ pub struct HostConfig {
     pub rider_target_change: Option<(f64, f32)>,
     /// `--rider-reach M`: see `PlantVariation::rider_reach_m`.
     pub rider_reach_m: Option<f64>,
+    /// `--rider-lean-lag S`: see `PlantVariation::rider_lean_lag_s`.
+    pub rider_lean_lag_s: Option<f64>,
     /// `--tumble`: at a fall (the ADR-0012 handoff) the rider comes off as a
     /// free two-part body (torso, legs on a ball hip) and MuJoCo goes on
     /// computing the board and the rider sliding on the road; the motor is
@@ -2424,6 +2444,8 @@ pub struct PlantVariation {
     /// m (model 0.05). A real rider moves the body over the feet with the
     /// ankles and knees, well past 5 cm; the stick maps onto +-M.
     pub rider_reach_m: Option<f64>,
+    /// `--rider-lean-lag S`: the weight-shift servo's time constant, s.
+    pub rider_lean_lag_s: Option<f64>,
 }
 
 impl PlantVariation {
@@ -2459,6 +2481,7 @@ pub fn plant_x7() -> PlantVariation {
         x7_geometry: true,
         pad_z_m: None,
         rider_reach_m: None,
+        rider_lean_lag_s: None,
     }
 }
 
@@ -2663,6 +2686,7 @@ impl Default for HostConfig {
             rider_reacts: false,
             rider_speed_m_s: None,
             rider_reach_m: None,
+            rider_lean_lag_s: None,
             rider_target_change: None,
             tumble: false,
             motor_limits: false,
@@ -3033,6 +3057,7 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         kt_scale: cfg.kt_scale.or(base.kt_scale),
         tail_friction: cfg.tail_friction.or(base.tail_friction),
         rider_reach_m: cfg.rider_reach_m.or(base.rider_reach_m),
+        rider_lean_lag_s: cfg.rider_lean_lag_s.or(base.rider_lean_lag_s),
         ..base
     };
     let generated_model = if cfg.kerb.is_some()
