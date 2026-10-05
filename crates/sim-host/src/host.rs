@@ -3812,6 +3812,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if cfg.grade_feedforward {
             proposed_amps += grade_aid.load_m_s2() / ACCEL_FF_GAIN_M_S2_PER_A;
         }
+        // Resting on a pad (a tail stop): the deck is far from level and the
+        // board is stopped, so the pad, not a grade, holds the board. The
+        // grade-load estimate and the compensation integral would learn the
+        // pad's support as a load and dump it nose-down at the pull-away (the
+        // game saw a nose strike 3-6 s after every tail-down stop). Both use
+        // only pitch and speed, so a real controller can do the same. 14 deg
+        // is above the deck angle on a 25 % grade.
+        if regulated_pitch_rad.abs() > 0.25 && forward_speed_m_s.abs() < 0.5 {
+            grade_aid.reset();
+            grade_comp.reset();
+        }
         // `--balance-comp`: grade compensation for the deployed law.
         if cfg.balance_comp && cfg.speed_hold_m_s.is_none() {
             proposed_amps += grade_comp.update(
