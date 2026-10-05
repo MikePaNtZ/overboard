@@ -427,6 +427,9 @@ const PAD_MODE_ENTER_RAD: f32 = 17.0 * std::f32::consts::PI / 180.0;
 /// drag at speed keeps full motor braking (damping only there removed the
 /// braking, and the board ran on and nose-struck after the exit).
 const PAD_MODE_SPEED_M_S: f32 = 1.0;
+/// Pad mode also ends when the rider leans forward past this stick: the
+/// rider asks to go, and the full law lifts the nose off the pad.
+const PAD_MODE_GO_STICK: f32 = 0.2;
 /// Pad mode ends below this pitch (hysteresis). Raise it toward 15 deg if a
 /// pull-away nose-strikes, before any gain changes.
 const PAD_MODE_EXIT_RAD: f32 = 15.0 * std::f32::consts::PI / 180.0;
@@ -443,6 +446,13 @@ const ANKLE_PIVOT_Z_M: f64 = 0.06;
 /// Rider centre-of-pressure reach about the ankle, m: the ankle torque limit
 /// is m g times this.
 const ANKLE_COP_M: f32 = 0.12;
+
+/// `--rider-reach-back`: the full back reach applies at or above this speed.
+const BACK_REACH_FULL_SPEED_M_S: f32 = 2.0;
+
+/// `--foot-torque`: share of the feet's torque limit that full fore/aft
+/// stick asks for as heel or toe pressure (the rest balances the body).
+const FOOT_TORQUE_SHARE: f32 = 0.8;
 
 /// `--ankle-hinge`: puts the rider's slide carrier on a pitch hinge at deck
 /// level (`rider_ankle`, joint `ankle_pitch`, torque motor `ankle_pitch`).
@@ -475,6 +485,57 @@ fn splice_ankle_hinge(xml: &str, rigid: bool) -> Result<String, HostError> {
   </actuator>"#,
     );
     Ok(out)
+}
+
+/// `--obstacles`: fixed obstacle geoms from the CSV (type,id,x,y,lx,ly,lz,
+/// yaw_deg; full sizes), standing on the terrain (or z = 0 without one).
+/// Collision bits 1 and 2: the wheel and pads (bit 2) and the bumpers and
+/// rider (bit 1) all hit them.
+fn splice_obstacles(
+    xml: &str,
+    csv: &Path,
+    surface: Option<&crate::ground::GroundSurface>,
+) -> Result<String, HostError> {
+    let bad = |what: String| HostError::Io(std::io::Error::other(format!("sim-host: --obstacles: {what}")));
+    if xml.matches("</worldbody>").count() != 1 {
+        return Err(bad("no single </worldbody>".into()));
+    }
+    let text = std::fs::read_to_string(csv)?;
+    let mut geoms = String::new();
+    let mut n = 0;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        if f.len() != 8 {
+            return Err(bad(format!("expected 8 fields: {line}")));
+        }
+        let num = |i: usize| f[i].parse::<f64>().map_err(|_| bad(format!("bad number '{}' in: {line}", f[i])));
+        let (x, y, lx, ly, lz, yaw) = (num(2)?, num(3)?, num(4)?, num(5)?, num(6)?, num(7)?);
+        let z0 = surface.map_or(0.0, |g| g.height(x, y));
+        let id = if f[1].is_empty() { format!("obstacle{n}") } else { f[1].to_string() };
+        let bits = r#"contype="3" conaffinity="3" condim="3" friction="0.8 0.005 0.0001""#;
+        match f[0] {
+            "cone" => {
+                // A square base and a tapered body as a cylinder of the mean radius.
+                let base = 0.03;
+                geoms.push_str(&format!(
+                    r#"<geom name="{id}_base" type="box" pos="{x} {y} {:.4}" size="{:.4} {:.4} {:.4}" rgba="0.95 0.45 0.1 1" {bits}/>
+    <geom name="{id}" type="cylinder" pos="{x} {y} {:.4}" size="{:.4} {:.4}" rgba="0.95 0.45 0.1 1" {bits}/>
+    "#,
+                    z0 + base / 2.0, lx / 2.0, ly / 2.0, base / 2.0,
+                    z0 + base + (lz - base) / 2.0, lx * 0.3, (lz - base) / 2.0,
+                ));
+            }
+            "debris" => geoms.push_str(&format!(
+                r#"<geom name="{id}" type="box" pos="{x} {y} {:.4}" euler="0 0 {yaw}" size="{:.4} {:.4} {:.4}" rgba="0.35 0.3 0.25 1" {bits}/>
+    "#,
+                z0 + lz / 2.0, lx / 2.0, ly / 2.0, lz / 2.0,
+            )),
+            other => return Err(bad(format!("unknown type '{other}'"))),
+        }
+        n += 1;
+    }
+    eprintln!("sim-host: --obstacles: {n} fixed obstacles from {}", csv.display());
+    Ok(xml.replace("</worldbody>", &format!("{geoms}</worldbody>")))
 }
 
 /// `--tumble`: a free two-part rider (torso and head; legs on a ball hip),
@@ -2166,6 +2227,20 @@ pub struct HostConfig {
     /// reach). The limit lets the body stay near vertical when the deck sits
     /// on a pad. The slide still carries the stick's lean intent.
     pub ankle_hinge: bool,
+    /// `--obstacles CSV`: fixed obstacles on the road, from the game's course
+    /// elements (sim/carve/obstacles.py): cones and debris, placed on the
+    /// terrain surface. They are hard posts (they do not move); the game draws
+    /// them at the same place.
+    pub obstacles: Option<PathBuf>,
+    /// `--rider-reach-back M`: the backward stick range, m (default: the
+    /// reach). Needs `--rider-reach` (the slide allows 0.35 m). The rider
+    /// model in the Monte Carlo does not use it.
+    pub rider_reach_back_m: Option<f64>,
+    /// `--foot-torque` (with `--ankle-hinge`): fore/aft stick also presses the
+    /// heels or toes, a torque on the deck up to 80 % of the feet's limit.
+    /// A real rider tilts a stiff board mostly this way; it is what drags the
+    /// tail under a hard lean back.
+    pub foot_torque: bool,
     /// `--ankle-rigid`: the hinge with a 1e5 N*m/rad spring on the hinge angle
     /// (against the deck) and no limit: it must reproduce the rigid rider
     /// (the bracket test).
@@ -2589,6 +2664,9 @@ impl Default for HostConfig {
             rider_ankle: false,
             ankle_hinge: false,
             kp_scale: 1.0,
+            foot_torque: false,
+            rider_reach_back_m: None,
+            obstacles: None,
             sensors_stage0: false,
             noise_scale: 1.0,
             extra_delay_ms: 0.0,
@@ -2977,6 +3055,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let xml = std::fs::read_to_string(path)?;
         std::fs::write(path, splice_ankle_hinge(&xml, cfg.ankle_rigid)?)?;
     }
+    if let Some(csv) = &cfg.obstacles {
+        let Some(path) = &generated_model else {
+            return Err(HostError::Io(std::io::Error::other("sim-host: --obstacles needs a generated model (use --lean-steer)")));
+        };
+        let surface = match &terrain {
+            Some(t) => Some(crate::ground::GroundSurface::from_hfield_bin(&t.hfield_path, t.half_extent_m)?),
+            None => None,
+        };
+        let xml = std::fs::read_to_string(path)?;
+        std::fs::write(path, splice_obstacles(&xml, csv, surface.as_ref())?)?;
+    }
     if cfg.tumble {
         let Some(path) = &generated_model else {
             return Err(HostError::Io(std::io::Error::other("sim-host: --tumble needs a generated model (use --lean-steer)")));
@@ -3160,6 +3249,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // `--rider-reach`: the stick spans the rider's reach, and the rider model
     // uses the same share of it (60 %) as of the model's 5 cm.
     let fore_aft_range_m = variation.rider_reach_m.map_or(BALLAST_RANGE_M, |r| r as f32);
+    // `--rider-reach-back M`: how far back the stick takes the rider. A rider
+    // who stops hard bends the knees and leans back with the deck, far past
+    // the forward lean: stopping from 6.5 m/s in 7 m needs the centre of
+    // mass about 0.28 m behind the wheel; 0.10 m allows about 1.1 m/s^2.
+    let fore_aft_back_range_m = cfg.rider_reach_back_m.map_or(fore_aft_range_m, |r| r as f32);
     rider_model.bound = RiderSpeedModel::LEAN_BOUND * fore_aft_range_m / BALLAST_RANGE_M;
     let mut grade_comp = control_core::GradeCompensator::new();
     let mut battery = crate::hud::BatteryModel::new(cfg.batt_soc0);
@@ -3673,7 +3767,17 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 let tau = if cfg.ankle_rigid {
                     0.0 // the joint's own stiffness (splice_ankle_hinge)
                 } else {
-                    (ankle_k * lean + ankle_c * ankle_rate_f).clamp(-ankle_cap, ankle_cap)
+                    // `--foot-torque`: heel and toe pressure. Fore/aft stick s also
+                    // pushes the deck through the feet: s = -1 (heels down)
+                    // tips the deck nose-up, and the stiff law brakes to the
+                    // tail. A positive hinge torque pushes the deck nose-up
+                    // (measured: the other sign sped the board up).
+                    let foot = if cfg.foot_torque {
+                        -corridor_enforced_fore_aft * FOOT_TORQUE_SHARE * ankle_cap
+                    } else {
+                        0.0
+                    };
+                    (ankle_k * lean + ankle_c * ankle_rate_f + foot).clamp(-ankle_cap, ankle_cap)
                 };
                 ankle_peak_nm = ankle_peak_nm.max(tau.abs());
                 backend.set_ankle_pitch_torque(tau as f64);
@@ -3681,7 +3785,16 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         }
         backend.set_ballast_targets(
             corridor_enforced_fore_aft
-                * fore_aft_range_m
+                * if corridor_enforced_fore_aft < 0.0 {
+                    // The back lean fades out below 2 m/s: a rider stands up as
+                    // the board stops on its tail. Held at a standstill, even a
+                    // 0.10 m lean-back put the (deck-rigid) rider's mass at the
+                    // tail pad's tipping edge and the board went over.
+                    let k = (last_forward_speed_m_s.abs() / BACK_REACH_FULL_SPEED_M_S).min(1.0);
+                    k * fore_aft_back_range_m
+                } else {
+                    fore_aft_range_m
+                }
                 + upright_m,
             lateral_target_m,
         );
@@ -4014,7 +4127,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if !pad_mode && regulated_pitch_rad >= PAD_MODE_ENTER_RAD && forward_speed_m_s.abs() < PAD_MODE_SPEED_M_S {
             pad_mode = true;
             eprintln!("sim-host: pad mode at sim_t={t_known_s:.3}s (tail pad down)");
-        } else if pad_mode && regulated_pitch_rad <= PAD_MODE_EXIT_RAD {
+        } else if pad_mode
+            && (regulated_pitch_rad <= PAD_MODE_EXIT_RAD || corridor_enforced_fore_aft > PAD_MODE_GO_STICK)
+        {
             pad_mode = false;
             pad_grade_hold_s = PAD_MODE_GRADE_HOLD_S;
             eprintln!("sim-host: pad mode ends at sim_t={t_known_s:.3}s -- full balance");

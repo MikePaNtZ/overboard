@@ -142,6 +142,26 @@ fn main() -> ExitCode {
                 if flag == "--kp-scale" { cfg.kp_scale = x } else { cfg.kd_scale = x }
                 i += 2;
             }
+            "--obstacles" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --obstacles needs a CSV path");
+                    return ExitCode::FAILURE;
+                };
+                cfg.obstacles = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
+            "--rider-reach-back" => {
+                let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
+                    eprintln!("sim-host: --rider-reach-back needs a number (m)");
+                    return ExitCode::FAILURE;
+                };
+                cfg.rider_reach_back_m = Some(x);
+                i += 2;
+            }
+            "--foot-torque" => {
+                cfg.foot_torque = true;
+                i += 1;
+            }
             "--ankle-hinge" => {
                 cfg.ankle_hinge = true;
                 i += 1;
