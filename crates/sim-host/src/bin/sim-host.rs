@@ -130,7 +130,11 @@ fn main() -> ExitCode {
                     eprintln!("sim-host: {flag} needs a number");
                     return ExitCode::FAILURE;
                 };
-                if flag == "--noise-scale" { cfg.noise_scale = x } else { cfg.extra_delay_ms = x }
+                if flag == "--noise-scale" {
+                    cfg.noise_scale = x
+                } else {
+                    cfg.extra_delay_ms = x
+                }
                 i += 2;
             }
             "--kp-scale" | "--kd-scale" => {
@@ -139,7 +143,11 @@ fn main() -> ExitCode {
                     eprintln!("sim-host: {flag} needs a number");
                     return ExitCode::FAILURE;
                 };
-                if flag == "--kp-scale" { cfg.kp_scale = x } else { cfg.kd_scale = x }
+                if flag == "--kp-scale" {
+                    cfg.kp_scale = x
+                } else {
+                    cfg.kd_scale = x
+                }
                 i += 2;
             }
             "--obstacles" => {

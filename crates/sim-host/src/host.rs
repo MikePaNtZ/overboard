@@ -462,17 +462,30 @@ const FOOT_TORQUE_SHARE: f32 = 0.8;
 /// `--ankle-hinge`: puts the rider's slide carrier on a pitch hinge at deck
 /// level (`rider_ankle`, joint `ankle_pitch`, torque motor `ankle_pitch`).
 fn splice_ankle_hinge(xml: &str, rigid: bool) -> Result<String, HostError> {
-    let bad = |what: &str| HostError::Io(std::io::Error::other(format!("sim-host: --ankle-hinge: {what}")));
+    let bad = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --ankle-hinge: {what}"
+        )))
+    };
     let open = r#"<body name="ballast_fa_carrier" pos="0 0 0.75">"#;
     let camera = r#"<camera name="side""#;
-    if xml.matches(open).count() != 1 || xml.matches(camera).count() != 1 || xml.matches("</actuator>").count() != 1 {
-        return Err(bad("rider carrier, side camera or actuator block not found once"));
+    if xml.matches(open).count() != 1
+        || xml.matches(camera).count() != 1
+        || xml.matches("</actuator>").count() != 1
+    {
+        return Err(bad(
+            "rider carrier, side camera or actuator block not found once",
+        ));
     }
     let carrier_z = 0.75 - ANKLE_PIVOT_Z_M;
     // The bracket's stiff spring is a joint stiffness, integrated inside the
     // step: as a host torque held for 2 ms it was unstable (deck-vs-rider mode
     // about 450 rad/s) and blew up at once.
-    let joint_extra = if rigid { r#"stiffness="1e5" damping="300""# } else { r#"damping="0""# };
+    let joint_extra = if rigid {
+        r#"stiffness="1e5" damping="300""#
+    } else {
+        r#"damping="0""#
+    };
     let mut out = xml.replace(
         open,
         &format!(
@@ -501,22 +514,37 @@ fn splice_obstacles(
     csv: &Path,
     surface: Option<&crate::ground::GroundSurface>,
 ) -> Result<String, HostError> {
-    let bad = |what: String| HostError::Io(std::io::Error::other(format!("sim-host: --obstacles: {what}")));
+    let bad = |what: String| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --obstacles: {what}"
+        )))
+    };
     if xml.matches("</worldbody>").count() != 1 {
         return Err(bad("no single </worldbody>".into()));
     }
     let text = std::fs::read_to_string(csv)?;
     let mut geoms = String::new();
     let mut n = 0;
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
         let f: Vec<&str> = line.split(',').map(str::trim).collect();
         if f.len() != 8 {
             return Err(bad(format!("expected 8 fields: {line}")));
         }
-        let num = |i: usize| f[i].parse::<f64>().map_err(|_| bad(format!("bad number '{}' in: {line}", f[i])));
+        let num = |i: usize| {
+            f[i].parse::<f64>()
+                .map_err(|_| bad(format!("bad number '{}' in: {line}", f[i])))
+        };
         let (x, y, lx, ly, lz, yaw) = (num(2)?, num(3)?, num(4)?, num(5)?, num(6)?, num(7)?);
         let z0 = surface.map_or(0.0, |g| g.height(x, y));
-        let id = if f[1].is_empty() { format!("obstacle{n}") } else { f[1].to_string() };
+        let id = if f[1].is_empty() {
+            format!("obstacle{n}")
+        } else {
+            f[1].to_string()
+        };
         let bits = r#"contype="3" conaffinity="3" condim="3" friction="0.8 0.005 0.0001""#;
         match f[0] {
             "cone" => {
@@ -539,7 +567,10 @@ fn splice_obstacles(
         }
         n += 1;
     }
-    eprintln!("sim-host: --obstacles: {n} fixed obstacles from {}", csv.display());
+    eprintln!(
+        "sim-host: --obstacles: {n} fixed obstacles from {}",
+        csv.display()
+    );
     Ok(xml.replace("</worldbody>", &format!("{geoms}</worldbody>")))
 }
 
@@ -549,7 +580,9 @@ fn splice_obstacles(
 /// touch the board (contact excluded), only the road.
 fn splice_tumble_rider(xml: &str) -> Result<String, HostError> {
     if xml.matches("</worldbody>").count() != 1 {
-        return Err(HostError::Io(std::io::Error::other("sim-host: --tumble: no single </worldbody>")));
+        return Err(HostError::Io(std::io::Error::other(
+            "sim-host: --tumble: no single </worldbody>",
+        )));
     }
     // Skin on asphalt, about 0.6.
     let f = r#"friction="0.6 0.005 0.0001" condim="3" material="rider_mat" group="0""#;
@@ -582,14 +615,26 @@ fn splice_tumble_rider(xml: &str) -> Result<String, HostError> {
 /// `--rider-lean-lag`: the fore/aft weight-shift servo's time constant, s (the
 /// model's is 0.05 s: 95 kg moved 10 cm in about 0.1 s, faster than a body).
 fn splice_rider_lean_lag(xml: &str, lag: f64) -> Result<String, HostError> {
-    let bad = |what: &str| HostError::Io(std::io::Error::other(format!("sim-host: --rider-lean-lag: {what}")));
+    let bad = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --rider-lean-lag: {what}"
+        )))
+    };
     if !(0.01..=1.0).contains(&lag) {
         return Err(bad("lag must be 0.01..1.0 s"));
     }
-    let at = xml.find(r#"<position name="ballast_fa""#).ok_or_else(|| bad("fore/aft servo not found"))?;
-    let end = at + xml[at..].find("/>").ok_or_else(|| bad("fore/aft servo not closed"))?;
+    let at = xml
+        .find(r#"<position name="ballast_fa""#)
+        .ok_or_else(|| bad("fore/aft servo not found"))?;
+    let end = at
+        + xml[at..]
+            .find("/>")
+            .ok_or_else(|| bad("fore/aft servo not closed"))?;
     let tag = &xml[at..end];
-    let t0 = tag.find("timeconst=\"").ok_or_else(|| bad("fore/aft servo has no timeconst"))? + 11;
+    let t0 = tag
+        .find("timeconst=\"")
+        .ok_or_else(|| bad("fore/aft servo has no timeconst"))?
+        + 11;
     let t1 = t0 + tag[t0..].find('"').ok_or_else(|| bad("bad timeconst"))?;
     Ok(format!("{}{lag}{}", &xml[..at + t0], &xml[at + t1..]))
 }
@@ -597,7 +642,11 @@ fn splice_rider_lean_lag(xml: &str, lag: f64) -> Result<String, HostError> {
 /// `--rider-reach`: widens the fore/aft slide joint and its servo range to
 /// +-`reach` m. The servo gains do not change.
 fn splice_rider_reach(xml: &str, reach: f64) -> Result<String, HostError> {
-    let bad = |what: &str| HostError::Io(std::io::Error::other(format!("sim-host: --rider-reach: {what}")));
+    let bad = |what: &str| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --rider-reach: {what}"
+        )))
+    };
     if !(0.01..=0.25).contains(&reach) {
         return Err(bad("reach must be 0.01..0.25 m"));
     }
@@ -609,10 +658,20 @@ fn splice_rider_reach(xml: &str, reach: f64) -> Result<String, HostError> {
     if xml.matches(joint).count() != 1 {
         return Err(bad("fore/aft slide joint not found"));
     }
-    let mut out = xml.replace(joint, &joint.replace("-0.05 0.05", &format!("-{range} {range}")));
-    let at = out.find(r#"<position name="ballast_fa""#).ok_or_else(|| bad("fore/aft servo not found"))?;
-    let rel = out[at..].find(r#"ctrlrange="-0.05 0.05""#).ok_or_else(|| bad("fore/aft servo range not found"))?;
-    out.replace_range(at + rel..at + rel + 22, &format!(r#"ctrlrange="-{range} {range}""#));
+    let mut out = xml.replace(
+        joint,
+        &joint.replace("-0.05 0.05", &format!("-{range} {range}")),
+    );
+    let at = out
+        .find(r#"<position name="ballast_fa""#)
+        .ok_or_else(|| bad("fore/aft servo not found"))?;
+    let rel = out[at..]
+        .find(r#"ctrlrange="-0.05 0.05""#)
+        .ok_or_else(|| bad("fore/aft servo range not found"))?;
+    out.replace_range(
+        at + rel..at + rel + 22,
+        &format!(r#"ctrlrange="-{range} {range}""#),
+    );
     Ok(out)
 }
 
@@ -657,8 +716,12 @@ fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
         if keep_cylinder && from.contains("wheel_geom") {
             continue;
         }
-        if std::env::var("OVERBOARD_TIRE").as_deref() == Ok("sphere") && from.contains("wheel_geom") {
-            out = out.replace(from, r#"<geom name="wheel_geom" type="sphere" size="0.1454""#);
+        if std::env::var("OVERBOARD_TIRE").as_deref() == Ok("sphere") && from.contains("wheel_geom")
+        {
+            out = out.replace(
+                from,
+                r#"<geom name="wheel_geom" type="sphere" size="0.1454""#,
+            );
             continue;
         }
         if out.matches(from).count() != 1 {
@@ -685,7 +748,11 @@ fn splice_lean_steer(xml: &str) -> Result<String, HostError> {
 ///   0.346 m from the axle and 0.027 m below it, strikes first, at 20.4 deg.
 ///   `pad_z` raises or lowers all four.
 /// - The nose and tail strike sensors grow to cover the new contact points.
-fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -> Result<String, HostError> {
+fn splice_x7_geometry(
+    mut xml: String,
+    pad_z: f64,
+    tail_friction: Option<f64>,
+) -> Result<String, HostError> {
     let fail = |what: &str| {
         HostError::Io(std::io::Error::other(format!(
             "sim-host: --plant x7 could not find {what} to splice -- the shared model has changed"
@@ -698,7 +765,10 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
     let frag = std::fs::read_to_string(&frag_path).map_err(|e| {
         HostError::Io(std::io::Error::new(
             e.kind(),
-            format!("sim-host: --plant x7 needs {} (run sim/carve/x7_look.py): {e}", frag_path.display()),
+            format!(
+                "sim-host: --plant x7 needs {} (run sim/carve/x7_look.py): {e}",
+                frag_path.display()
+            ),
         ))
     })?;
     let part = |tag: &str| -> Result<String, HostError> {
@@ -706,8 +776,11 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
         let b = frag[a..].find("<!-- X7 ").map_or(frag.len(), |i| a + i);
         Ok(frag[a..b].trim().to_string())
     };
-    let (assets, frame_geoms, wheel_geoms) =
-        (part("<!-- X7 ASSETS -->")?, part("<!-- X7 FRAME -->")?, part("<!-- X7 WHEEL -->")?);
+    let (assets, frame_geoms, wheel_geoms) = (
+        part("<!-- X7 ASSETS -->")?,
+        part("<!-- X7 FRAME -->")?,
+        part("<!-- X7 WHEEL -->")?,
+    );
     if xml.matches("</asset>").count() != 1 {
         return Err(fail("</asset>"));
     }
@@ -724,7 +797,10 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
         if xml.matches(&from).count() != 1 {
             return Err(fail(name));
         }
-        xml = xml.replace(&from, &format!(r#"<geom name="{name}" class="visual" group="5""#));
+        xml = xml.replace(
+            &from,
+            &format!(r#"<geom name="{name}" class="visual" group="5""#),
+        );
     }
     let from = r#"<geom name="wheel_geom" "#;
     if xml.matches(from).count() != 1 {
@@ -733,12 +809,22 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
     xml = xml.replace(from, r#"<geom name="wheel_geom" group="5" "#);
     // The new visuals.
     let from = r#"<geom name="electronics_platform_geom""#;
-    let at = xml.find(from).ok_or_else(|| fail("electronics_platform_geom"))?;
-    let end = at + xml[at..].find("/>").ok_or_else(|| fail("electronics_platform_geom end"))? + 2;
+    let at = xml
+        .find(from)
+        .ok_or_else(|| fail("electronics_platform_geom"))?;
+    let end = at
+        + xml[at..]
+            .find("/>")
+            .ok_or_else(|| fail("electronics_platform_geom end"))?
+        + 2;
     xml.insert_str(end, &format!("\n      {frame_geoms}"));
     let from = r#"<joint name="wheel_hinge""#;
     let at = xml.find(from).ok_or_else(|| fail("wheel_hinge"))?;
-    let end = at + xml[at..].find("/>").ok_or_else(|| fail("wheel_hinge end"))? + 2;
+    let end = at
+        + xml[at..]
+            .find("/>")
+            .ok_or_else(|| fail("wheel_hinge end"))?
+        + 2;
     xml.insert_str(end, &format!("\n        {wheel_geoms}"));
     // Pads: replace each bumper mesh geom with a box and a bumper bar.
     // Proxy boxes (ground frame, +X = nose): box x 0.1658-0.3463, y +-0.120,
@@ -748,7 +834,11 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
         .map(|m| format!(r#"priority="1" friction="{m:.3} 0.005 0.0001""#))
         .unwrap_or_else(|| r#"friction="0.6 0.005 0.0001""#.to_string());
     for (end_name, sign, mu) in [
-        ("front", -1.0f64, r#"friction="0.6 0.005 0.0001""#.to_string()),
+        (
+            "front",
+            -1.0f64,
+            r#"friction="0.6 0.005 0.0001""#.to_string(),
+        ),
         ("rear", 1.0, mu_rear),
     ] {
         let tag = format!(r#"<geom name="{end_name}_bumper_geom""#);
@@ -783,7 +873,10 @@ fn splice_x7_geometry(mut xml: String, pad_z: f64, tail_friction: Option<f64>) -
         }
         xml = xml.replace(
             from,
-            &format!(r#"<site name="{site}" pos="{x:.3} 0 {:.4}" size="0.095 0.165 0.075""#, 0.005 + pad_z),
+            &format!(
+                r#"<site name="{site}" pos="{x:.3} 0 {:.4}" size="0.095 0.165 0.075""#,
+                0.005 + pad_z
+            ),
         );
     }
     Ok(xml)
@@ -874,7 +967,10 @@ fn write_model_with_kerb(
         }
         xml = xml.replace(
             &spawn_from,
-            &format!("<body name=\"frame\" pos=\"{:.6} 0 {spawn_z:.6}\">", t.spawn_x_m),
+            &format!(
+                "<body name=\"frame\" pos=\"{:.6} 0 {spawn_z:.6}\">",
+                t.spawn_x_m
+            ),
         );
 
         xml = xml.replace(
@@ -909,7 +1005,9 @@ fn write_model_with_kerb(
         let nm = amps * KT_NM_PER_A;
         xml = xml.replace(
             from,
-            &format!(r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-{nm} {nm}""#),
+            &format!(
+                r#"<motor name="wheel_motor" joint="wheel_hinge" gear="1" ctrlrange="-{nm} {nm}""#
+            ),
         );
     }
 
@@ -987,7 +1085,10 @@ fn write_model_with_kerb(
         // the axle height. (On terrain the spawn splice above uses the radius.)
         let plane_spawn = format!(r#"<body name="frame" pos="0 0 {FRAME_SPAWN_Z_M}">"#);
         if xml.contains(&plane_spawn) {
-            xml = xml.replace(&plane_spawn, &format!(r#"<body name="frame" pos="0 0 {r:.4}">"#));
+            xml = xml.replace(
+                &plane_spawn,
+                &format!(r#"<body name="frame" pos="0 0 {r:.4}">"#),
+            );
         }
     }
     if let Some(m) = variation.rider_mass_kg {
@@ -1026,7 +1127,11 @@ fn write_model_with_kerb(
         );
     }
     if variation.x7_geometry {
-        xml = splice_x7_geometry(xml, variation.pad_z_m.unwrap_or(0.0), variation.tail_friction)?;
+        xml = splice_x7_geometry(
+            xml,
+            variation.pad_z_m.unwrap_or(0.0),
+            variation.tail_friction,
+        )?;
     }
     if let Some(k) = variation.kt_scale {
         // The true torque per commanded amp. ctrl stays the commanded current
@@ -1053,14 +1158,22 @@ fn write_model_with_kerb(
                 "sim-host: smooth wheel contact could not find the wheel geom to splice",
             )));
         }
-        xml = xml.replace(from, r#"<geom name="wheel_geom" contype="2" conaffinity="2" "#);
+        xml = xml.replace(
+            from,
+            r#"<geom name="wheel_geom" contype="2" conaffinity="2" "#,
+        );
         // The nose and tail pads ride the same plate. On the heightfield a
         // dragged pad caught every grid seam: touch, jump, touch, with 10 kN
         // spikes under a 100 kg rider. The pads sit 0.41 m from the axle, and
         // on a 60 m vertical curve the plate is within 1.3 mm of the road
         // there. Cost: the pads no longer hit kerbs; --hfield-wheel-contact
         // restores both for kerb studies.
-        for pad in ["front_bumper_geom", "rear_bumper_geom", "front_box_geom", "rear_box_geom"] {
+        for pad in [
+            "front_bumper_geom",
+            "rear_bumper_geom",
+            "front_box_geom",
+            "rear_box_geom",
+        ] {
             let from = format!(r#"<geom name="{pad}" "#);
             if pad.ends_with("_box_geom") && !xml.contains(&from) {
                 continue; // only the X7 pads have boxes
@@ -1076,7 +1189,9 @@ fn write_model_with_kerb(
             // pad (spikes 4 kN). The stopping distance is the same for both.
             xml = xml.replace(
                 &from,
-                &format!(r#"<geom name="{pad}" contype="2" conaffinity="2" solref="{pad_solref_s} 1" "#),
+                &format!(
+                    r#"<geom name="{pad}" contype="2" conaffinity="2" solref="{pad_solref_s} 1" "#
+                ),
             );
         }
         let th = crate::ground::PLATE_HALF_THICKNESS_M;
@@ -2316,7 +2431,11 @@ impl GradeCourse {
         let g = self.grade_pct / 100.0;
         let half = 0.5 * self.radius_m * g.abs();
         let frac = if half <= 0.0 {
-            if s_m >= self.run_in_m { 1.0 } else { 0.0 }
+            if s_m >= self.run_in_m {
+                1.0
+            } else {
+                0.0
+            }
         } else {
             // Cosine blend, not linear: the grade RATE must start and end at
             // zero. The plane model turns gravity, so a board held vertical
@@ -2375,7 +2494,10 @@ impl RiderSpeedModel {
     }
 
     pub fn reset(&mut self) {
-        *self = Self { bound: self.bound, ..Self::default() };
+        *self = Self {
+            bound: self.bound,
+            ..Self::default()
+        };
     }
 
     /// A sudden change of mind: the target jumps to `v` now, without the
@@ -2387,7 +2509,13 @@ impl RiderSpeedModel {
 
 impl Default for RiderSpeedModel {
     fn default() -> Self {
-        Self { bound: Self::LEAN_BOUND, v_ref: None, integral: 0.0, acc_f: 0.0, v_prev: None }
+        Self {
+            bound: Self::LEAN_BOUND,
+            v_ref: None,
+            integral: 0.0,
+            acc_f: 0.0,
+            v_prev: None,
+        }
     }
 }
 
@@ -2490,7 +2618,12 @@ pub fn plant_x7() -> PlantVariation {
 /// kt). A spec without `x7` overrides the shared model's values.
 pub fn parse_plant_spec(spec: &str) -> Result<PlantVariation, String> {
     let mut v = PlantVariation::default();
-    for (i, part) in spec.split(',').map(str::trim).filter(|p| !p.is_empty()).enumerate() {
+    for (i, part) in spec
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .enumerate()
+    {
         if part == "x7" {
             if i != 0 {
                 return Err("--plant: 'x7' must come first".into());
@@ -2498,8 +2631,12 @@ pub fn parse_plant_spec(spec: &str) -> Result<PlantVariation, String> {
             v = plant_x7();
             continue;
         }
-        let (k, val) = part.split_once('=').ok_or(format!("--plant: '{part}' is not key=value"))?;
-        let x: f64 = val.parse().map_err(|_| format!("--plant: '{val}' is not a number"))?;
+        let (k, val) = part
+            .split_once('=')
+            .ok_or(format!("--plant: '{part}' is not key=value"))?;
+        let x: f64 = val
+            .parse()
+            .map_err(|_| format!("--plant: '{val}' is not a number"))?;
         match k {
             "board_kg" => v.board_mass_kg = Some(x),
             "wheel_kg" => v.wheel_rot_kg = Some(x),
@@ -3080,17 +3217,24 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     };
     if cfg.ankle_hinge || cfg.ankle_rigid {
         let Some(path) = &generated_model else {
-            return Err(HostError::Io(std::io::Error::other("sim-host: --ankle-hinge needs a generated model (use --lean-steer)")));
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --ankle-hinge needs a generated model (use --lean-steer)",
+            )));
         };
         let xml = std::fs::read_to_string(path)?;
         std::fs::write(path, splice_ankle_hinge(&xml, cfg.ankle_rigid)?)?;
     }
     if let Some(csv) = &cfg.obstacles {
         let Some(path) = &generated_model else {
-            return Err(HostError::Io(std::io::Error::other("sim-host: --obstacles needs a generated model (use --lean-steer)")));
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --obstacles needs a generated model (use --lean-steer)",
+            )));
         };
         let surface = match &terrain {
-            Some(t) => Some(crate::ground::GroundSurface::from_hfield_bin(&t.hfield_path, t.half_extent_m)?),
+            Some(t) => Some(crate::ground::GroundSurface::from_hfield_bin(
+                &t.hfield_path,
+                t.half_extent_m,
+            )?),
             None => None,
         };
         let xml = std::fs::read_to_string(path)?;
@@ -3098,7 +3242,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     }
     if cfg.tumble {
         let Some(path) = &generated_model else {
-            return Err(HostError::Io(std::io::Error::other("sim-host: --tumble needs a generated model (use --lean-steer)")));
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --tumble needs a generated model (use --lean-steer)",
+            )));
         };
         let xml = std::fs::read_to_string(path)?;
         std::fs::write(path, splice_tumble_rider(&xml)?)?;
@@ -3186,11 +3332,15 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut envelope = Envelope::new(params);
     envelope.arm();
 
-    let regulator = PitchRegulator::new(KP_NM_PER_RAD * cfg.kp_scale, KD_NM_PER_RAD_S * cfg.kd_scale);
+    let regulator =
+        PitchRegulator::new(KP_NM_PER_RAD * cfg.kp_scale, KD_NM_PER_RAD_S * cfg.kd_scale);
     if cfg.kp_scale != 1.0 || cfg.kd_scale != 1.0 {
         eprintln!(
             "sim-host: balance gains Kp {:.0} N*m/rad, Kd {:.1} N*m*s/rad (study scales {} and {})",
-            KP_NM_PER_RAD * cfg.kp_scale, KD_NM_PER_RAD_S * cfg.kd_scale, cfg.kp_scale, cfg.kd_scale
+            KP_NM_PER_RAD * cfg.kp_scale,
+            KD_NM_PER_RAD_S * cfg.kd_scale,
+            cfg.kp_scale,
+            cfg.kd_scale
         );
     }
     let mut estimator = ComplementaryFilter::with_trust_band(ESTIMATOR_TAU_S, 0.0);
@@ -3208,7 +3358,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     // `control-ffi`'s doc recommends for hardware). One cycle old by
     // construction, same as `control-ffi::ObController::last_amps`.
     let mut last_amps: f32 = 0.0;
-    let mut grade_aid = control_core::GradeAwareAiding::new(ACCEL_FF_GAIN_M_S2_PER_A, GRADE_LOAD_TAU_S);
+    let mut grade_aid =
+        control_core::GradeAwareAiding::new(ACCEL_FF_GAIN_M_S2_PER_A, GRADE_LOAD_TAU_S);
     // Same gains as hill.py / shuttle_run.py's outer loop.
     // Tuning only: OVERBOARD_SPEED_LOOP="kp,ki,max_ref_deg".
     let (sl_kp, sl_ki, sl_max_deg) = std::env::var("OVERBOARD_SPEED_LOOP")
@@ -3234,9 +3385,15 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         })
         .unwrap_or((376.8, 88.4, 28.35, 8.06, 0.5));
     let new_speed_lqr = || {
-        control_core::SpeedHoldLqr::new(lqr_gains.0, lqr_gains.1, lqr_gains.2, lqr_gains.3, lqr_gains.4)
-            // Steady lean and current per m/s^2, from lqr_design.py's linear model.
-            .with_feedforward(-0.1261, 17.82)
+        control_core::SpeedHoldLqr::new(
+            lqr_gains.0,
+            lqr_gains.1,
+            lqr_gains.2,
+            lqr_gains.3,
+            lqr_gains.4,
+        )
+        // Steady lean and current per m/s^2, from lqr_design.py's linear model.
+        .with_feedforward(-0.1261, 17.82)
     };
     let mut speed_lqr = new_speed_lqr();
     // OVERBOARD_SPEED_HOLD_BASELINE: the law without grade feedforward or
@@ -3278,18 +3435,23 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
     let mut pose_rows: Vec<String> = Vec::new();
     // `--rider-reach`: the stick spans the rider's reach, and the rider model
     // uses the same share of it (60 %) as of the model's 5 cm.
-    let fore_aft_range_m = variation.rider_reach_m.map_or(BALLAST_RANGE_M, |r| r as f32);
+    let fore_aft_range_m = variation
+        .rider_reach_m
+        .map_or(BALLAST_RANGE_M, |r| r as f32);
     // `--rider-reach-back M`: how far back the stick takes the rider. A rider
     // who stops hard bends the knees and leans back with the deck, far past
     // the forward lean: stopping from 6.5 m/s in 7 m needs the centre of
     // mass about 0.28 m behind the wheel; 0.10 m allows about 1.1 m/s^2.
-    let fore_aft_back_range_m = cfg.rider_reach_back_m.map_or(fore_aft_range_m, |r| r as f32);
+    let fore_aft_back_range_m = cfg
+        .rider_reach_back_m
+        .map_or(fore_aft_range_m, |r| r as f32);
     rider_model.bound = RiderSpeedModel::LEAN_BOUND * fore_aft_range_m / BALLAST_RANGE_M;
     let mut grade_comp = control_core::GradeCompensator::new();
     let mut battery = crate::hud::BatteryModel::new(cfg.batt_soc0);
     let mut hud_seq: u64 = 0;
     let hud_kt = KT_NM_PER_A as f64 * variation.kt_scale.unwrap_or(1.0);
-    let hud_mass = variation.board_mass_kg.unwrap_or(13.0) + variation.rider_mass_kg.unwrap_or(70.0);
+    let hud_mass =
+        variation.board_mass_kg.unwrap_or(13.0) + variation.rider_mass_kg.unwrap_or(70.0);
     let hud_i_limit = cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
     let mut margin_level = control_core::MarginLevel::None;
     let mut margin_level_since_s = 0.0f64;
@@ -3756,7 +3918,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 roll_rad: lean_roll_rad,
                 roll_rate_rad_s: lean_roll_rate_rad_s,
             };
-            let cmd = rider.command(&lean_params, steer, last_forward_speed_m_s, &obs, DT_S as f32);
+            let cmd = rider.command(
+                &lean_params,
+                steer,
+                last_forward_speed_m_s,
+                &obs,
+                DT_S as f32,
+            );
             lean_balance_torque_nm = cmd.roll_torque_nm;
             lean_balance_peak_nm = lean_balance_peak_nm.max(cmd.roll_torque_nm.abs());
             if lean_debug && ticks.is_multiple_of(125) {
@@ -3876,7 +4044,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             // body -X, and + rolls the board right (top towards body +Y),
             // which is a rotation about body -X.
             let xm = backend.truth_frame_xmat();
-            let tau = if rider_free { 0.0 } else { lean_balance_torque_nm as f64 };
+            let tau = if rider_free {
+                0.0
+            } else {
+                lean_balance_torque_nm as f64
+            };
             torque[0] -= tau * xm[0];
             torque[1] -= tau * xm[3];
             torque[2] -= tau * xm[6];
@@ -3949,8 +4121,12 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             eprintln!(
                 "IMU t={t_known_s:6.2} f=({:+.3},{:+.3},{:+.3}) aid={aiding:+.3} \
                  accel_pitch={:+.2}deg gyro_y={:+.4}",
-                f[0], f[1], f[2],
-                (f[0] - aiding).atan2((f[1] * f[1] + f[2] * f[2]).sqrt()).to_degrees(),
+                f[0],
+                f[1],
+                f[2],
+                (f[0] - aiding)
+                    .atan2((f[1] * f[1] + f[2] * f[2]).sqrt())
+                    .to_degrees(),
                 sample.gyro_rad_s[1]
             );
         }
@@ -4025,7 +4201,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Rider warning (D1) and drive limit (D2), from LAST cycle's applied
         // current, the wheel speed and the learned grade load.
         if cfg.authority_margin != MarginMode::Off {
-            let duty = (MARGIN_KE_V_S * wheel_rate_rad_s.abs() + MARGIN_R_PHASE_OHM * last_amps.abs())
+            let duty = (MARGIN_KE_V_S * wheel_rate_rad_s.abs()
+                + MARGIN_R_PHASE_OHM * last_amps.abs())
                 / MARGIN_PACK_V;
             let i_max = cfg.max_current_a.unwrap_or(MAX_CURRENT_A);
             let level = margin.update(
@@ -4065,7 +4242,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                     && level >= control_core::MarginLevel::Pulse
                     && last_amps > 0.0;
                 if dismount_at_s.is_none()
-                    && (stopped_on_climb || (level == control_core::MarginLevel::Solid && held && last_amps > 0.0))
+                    && (stopped_on_climb
+                        || (level == control_core::MarginLevel::Solid && held && last_amps > 0.0))
                 {
                     dismount_at_s = Some(t_known_s);
                     if cfg.tumble && backend.release_rider(false) {
@@ -4077,7 +4255,13 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             }
         }
         if handoff_state.is_none() {
-            battery.step(last_amps as f64, wheel_rate_rad_s as f64, hud_kt, hud_mass, DT_S);
+            battery.step(
+                last_amps as f64,
+                wheel_rate_rad_s as f64,
+                hud_kt,
+                hud_mass,
+                DT_S,
+            );
         }
         if let Some(addr) = cfg.hud_out_addr {
             if ticks.is_multiple_of(10) {
@@ -4102,8 +4286,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             Some(v_ref) => speed_loop.update(forward_speed_m_s, v_ref, DT_S as f32, last_saturated),
             None => 0.0,
         };
-        let proposed_torque_nm =
-            regulator.update(regulated_pitch_rad, regulated_pitch_rate_rad_s, pitch_ref_rad);
+        let proposed_torque_nm = regulator.update(
+            regulated_pitch_rad,
+            regulated_pitch_rate_rad_s,
+            pitch_ref_rad,
+        );
         // The single kt division -- the actuation boundary (issue #137).
         let mut proposed_amps = proposed_torque_nm / KT_NM_PER_A;
         // `--speed-hold` uses ONE full-state law for balance and speed (the
@@ -4112,7 +4299,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         if let Some(v_ref) = cfg.speed_hold_m_s {
             if std::env::var_os("OVERBOARD_SPEED_LOOP").is_none() {
                 // Stand still until `--start-speed` is applied.
-                let target = if start_speed_pending.is_some() || rider_eased { 0.0 } else { v_ref };
+                let target = if start_speed_pending.is_some() || rider_eased {
+                    0.0
+                } else {
+                    v_ref
+                };
                 proposed_amps = if speed_hold_baseline {
                     speed_lqr.update(
                         regulated_pitch_rad,
@@ -4165,7 +4356,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             pad_mode = true;
             eprintln!("sim-host: pad mode at sim_t={t_known_s:.3}s (tail pad down)");
         } else if pad_mode
-            && (regulated_pitch_rad <= PAD_MODE_EXIT_RAD || corridor_enforced_fore_aft > PAD_MODE_GO_STICK)
+            && (regulated_pitch_rad <= PAD_MODE_EXIT_RAD
+                || corridor_enforced_fore_aft > PAD_MODE_GO_STICK)
         {
             pad_mode = false;
             pad_grade_hold_s = PAD_MODE_GRADE_HOLD_S;
@@ -4327,7 +4519,8 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // With `--tail-brake`, a nose-up drag on the tail pad is a brake, not a
         // fall: the tail pad touches at about 20 deg, the same angle as this
         // limit, so every wanted tail stop used to set FALLEN.
-        let tail_dragging = cfg.tail_brake && pitch_rad > 0.0 && backend.truth_tail_strike_n() > 0.0;
+        let tail_dragging =
+            cfg.tail_brake && pitch_rad > 0.0 && backend.truth_tail_strike_n() > 0.0;
         let fallen = pitch_rad.abs() > FALLEN_PITCH_RAD && !tail_dragging;
         if fallen {
             flags |= wire::STATE_FLAG_FALLEN;
@@ -4377,7 +4570,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         // Armed by EITHER an authored kerb or real terrain. Terrain was
         // missing from this condition at first, which meant the whole point of
         // loading City Park -- striking its real kerbs -- could not fire.
-        if (cfg.kerb.is_some() || cfg.terrain.is_some() || cfg.grade_course.is_some()) && !handoff_latched {
+        if (cfg.kerb.is_some() || cfg.terrain.is_some() || cfg.grade_course.is_some())
+            && !handoff_latched
+        {
             let by_strike = strike_n > STRIKE_FORCE_N;
             let by_tilt = tilt_rad > HANDOFF_TILT_RAD;
             if by_strike || by_tilt {
@@ -4420,13 +4615,18 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             let rider = if rider_free {
                 backend.truth_body_pose("rider_free")
             } else {
-                match (backend.truth_body_pose("ballast"), backend.truth_body_pose("frame")) {
+                match (
+                    backend.truth_body_pose("ballast"),
+                    backend.truth_body_pose("frame"),
+                ) {
                     (Some((p, _)), Some((_, q))) => Some((p, q)),
                     _ => None,
                 }
             };
             let (rp, rq) = rider.unwrap_or(([0.0; 3], [1.0, 0.0, 0.0, 0.0]));
-            let ev = (rider_free as u8) | ((dismount_at_s.is_some() as u8) << 1) | ((handoff_latched as u8) << 2);
+            let ev = (rider_free as u8)
+                | ((dismount_at_s.is_some() as u8) << 1)
+                | ((handoff_latched as u8) << 2);
             let mut row = format!(
                 "{t_known_s:.4},{ev},{:.3},{:.4},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
                 forward_speed_m_s, last_amps, rp[0], rp[1], rp[2], rq[0], rq[1], rq[2], rq[3]
@@ -4678,7 +4878,9 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
                 std::fs::copy(g, &keep)?;
                 std::fs::canonicalize(&keep)?.display().to_string()
             }
-            None => std::fs::canonicalize(rider_model_path())?.display().to_string(),
+            None => std::fs::canonicalize(rider_model_path())?
+                .display()
+                .to_string(),
         };
         let mut out = format!(
             "# model={model_note}\n# t,event(bit0 rider free, bit1 dismount, bit2 handoff),speed,amps,rider_x,rider_y,rider_z,rider_qw,rider_qx,rider_qy,rider_qz,qpos...\n"
@@ -4688,7 +4890,11 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
             out.push('\n');
         }
         std::fs::write(path, out)?;
-        eprintln!("sim-host: wrote {} pose rows to {}", pose_rows.len(), path.display());
+        eprintln!(
+            "sim-host: wrote {} pose rows to {}",
+            pose_rows.len(),
+            path.display()
+        );
     }
     let _ = backend.close();
     // The spliced model is a per-process scratch file; leaving it behind

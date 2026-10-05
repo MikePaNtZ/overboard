@@ -576,7 +576,11 @@ pub fn from_csv_str(text: &str) -> Result<Schedule, String> {
         }
         let f: Vec<&str> = line.splitn(6, ',').map(str::trim).collect();
         if f.len() < 5 {
-            return Err(format!("line {}: want 5 or 6 fields, got {}", n + 1, f.len()));
+            return Err(format!(
+                "line {}: want 5 or 6 fields, got {}",
+                n + 1,
+                f.len()
+            ));
         }
         let num = |i: usize| -> Result<f64, String> {
             f[i].parse::<f64>()
@@ -589,15 +593,27 @@ pub fn from_csv_str(text: &str) -> Result<Schedule, String> {
         }
         if let Some(prev) = rows.last() {
             if t0 < prev.1 {
-                return Err(format!("line {}: starts at {t0}, before the last row ends", n + 1));
+                return Err(format!(
+                    "line {}: starts at {t0}, before the last row ends",
+                    n + 1
+                ));
             }
         }
         for v in [fa, lat, steer] {
             if !(-1.0..=1.0).contains(&v) {
-                return Err(format!("line {}: stick value {v} is outside [-1, 1]", n + 1));
+                return Err(format!(
+                    "line {}: stick value {v} is outside [-1, 1]",
+                    n + 1
+                ));
             }
         }
-        let label: &'static str = Box::leak(f.get(5).copied().unwrap_or("csv row").to_string().into_boxed_str());
+        let label: &'static str = Box::leak(
+            f.get(5)
+                .copied()
+                .unwrap_or("csv row")
+                .to_string()
+                .into_boxed_str(),
+        );
         rows.push((t0, t1, fa as f32, lat as f32, steer as f32, label));
     }
     if rows.is_empty() {
@@ -612,7 +628,8 @@ mod csv_tests {
 
     #[test]
     fn parses_rows_and_skips_comments() {
-        let s = from_csv_str("# t0,t1,fa,lat,steer\n0,1,0,0,0,settle\n\n1,3,0.3,-0.5,0.5\n").unwrap();
+        let s =
+            from_csv_str("# t0,t1,fa,lat,steer\n0,1,0,0,0,settle\n\n1,3,0.3,-0.5,0.5\n").unwrap();
         assert_eq!(s.len(), 2);
         assert_eq!(s[1], (1.0, 3.0, 0.3, -0.5, 0.5, "csv row"));
     }

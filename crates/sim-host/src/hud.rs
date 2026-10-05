@@ -77,15 +77,28 @@ impl BatteryModel {
     const OCV_PTS: [f64; 9] = [3.00, 3.30, 3.45, 3.58, 3.72, 3.87, 4.02, 4.10, 4.20];
 
     pub fn new(soc0: f64) -> Self {
-        let mut b = BatteryModel { soc: soc0.clamp(0.0, 1.0), v: 0.0, i: 0.0 };
+        let mut b = BatteryModel {
+            soc: soc0.clamp(0.0, 1.0),
+            v: 0.0,
+            i: 0.0,
+        };
         b.v = b.ocv();
         b
     }
 
     fn ocv(&self) -> f64 {
         let s = self.soc;
-        let k = Self::SOC_PTS.iter().rposition(|&p| p <= s).unwrap_or(0).min(7);
-        let (s0, s1, v0, v1) = (Self::SOC_PTS[k], Self::SOC_PTS[k + 1], Self::OCV_PTS[k], Self::OCV_PTS[k + 1]);
+        let k = Self::SOC_PTS
+            .iter()
+            .rposition(|&p| p <= s)
+            .unwrap_or(0)
+            .min(7);
+        let (s0, s1, v0, v1) = (
+            Self::SOC_PTS[k],
+            Self::SOC_PTS[k + 1],
+            Self::OCV_PTS[k],
+            Self::OCV_PTS[k + 1],
+        );
         Self::SERIES * (v0 + (v1 - v0) * ((s - s0) / (s1 - s0)).clamp(0.0, 1.0))
     }
 
@@ -113,7 +126,12 @@ mod tests {
 
     #[test]
     fn packet_is_56_bytes_with_magic_first() {
-        let b = HudOut { seq: 7, batt_soc: 0.9, ..Default::default() }.to_bytes();
+        let b = HudOut {
+            seq: 7,
+            batt_soc: 0.9,
+            ..Default::default()
+        }
+        .to_bytes();
         assert_eq!(b.len(), 56);
         assert_eq!(&b[0..4], b"OBHD");
         assert_eq!(u64::from_le_bytes(b[8..16].try_into().unwrap()), 7);

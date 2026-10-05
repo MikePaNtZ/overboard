@@ -67,7 +67,12 @@ extern "C" {
     fn plant_mujoco_set_qpos_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_set_qvel_range(data: *mut c_void, adr: c_int, src: *const f64, n: c_int);
     fn plant_mujoco_body_mocapid(model: *mut c_void, body_id: c_int) -> c_int;
-    fn plant_mujoco_set_mocap(data: *mut c_void, mocap_id: c_int, pos: *const f64, quat: *const f64);
+    fn plant_mujoco_set_mocap(
+        data: *mut c_void,
+        mocap_id: c_int,
+        pos: *const f64,
+        quat: *const f64,
+    );
     fn plant_mujoco_eq_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_set_eq_active(data: *mut c_void, eq_id: c_int, on: c_int);
     fn plant_mujoco_body_mass(model: *mut c_void, body_id: c_int) -> f64;
@@ -483,7 +488,15 @@ impl Plant {
     /// recomputes the model constants.
     pub fn set_body_mass(&mut self, body_id: usize, mass: f64, inertia: [f64; 3]) {
         // SAFETY: `body_id` came from `body_id()`; `inertia` is 3 doubles.
-        unsafe { plant_mujoco_set_body_mass(self.model, self.data, body_id as c_int, mass, inertia.as_ptr()) };
+        unsafe {
+            plant_mujoco_set_body_mass(
+                self.model,
+                self.data,
+                body_id as c_int,
+                mass,
+                inertia.as_ptr(),
+            )
+        };
     }
 
     /// The mocap index of body `name`, or `None` if there is no such body or
@@ -500,7 +513,9 @@ impl Plant {
     pub fn set_mocap_pose(&mut self, mocap_id: usize, pos: [f64; 3], quat: [f64; 4]) {
         // SAFETY: `self.data` is owned; `mocap_id` came from `mocap_id()` on
         // this model, and the shim only reads 3 + 4 doubles.
-        unsafe { plant_mujoco_set_mocap(self.data, mocap_id as c_int, pos.as_ptr(), quat.as_ptr()) };
+        unsafe {
+            plant_mujoco_set_mocap(self.data, mocap_id as c_int, pos.as_ptr(), quat.as_ptr())
+        };
     }
 
     /// `mjModel`'s actuator id for `name`, or `None` if there is no such

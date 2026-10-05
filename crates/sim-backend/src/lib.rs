@@ -260,7 +260,10 @@ impl SimBackend {
     /// current limit already set. Takes effect at `open()`.
     pub fn with_imperfections(mut self, profile: ImperfectionProfile) -> Self {
         let limit = self.imperfection_profile.max_current_a;
-        self.imperfection_profile = ImperfectionProfile { max_current_a: limit, ..profile };
+        self.imperfection_profile = ImperfectionProfile {
+            max_current_a: limit,
+            ..profile
+        };
         self
     }
 
@@ -512,9 +515,18 @@ impl SimBackend {
     /// # Panics
     /// If called before `open()`.
     pub fn truth_ankle(&self) -> (f32, f32) {
-        let plant = self.plant.as_ref().expect("truth_ankle: backend is not open");
-        let a = self.ankle_qposadr.map(|i| plant.qpos()[i] as f32).unwrap_or(0.0);
-        let r = self.ankle_dofadr.map(|i| plant.qvel()[i] as f32).unwrap_or(0.0);
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("truth_ankle: backend is not open");
+        let a = self
+            .ankle_qposadr
+            .map(|i| plant.qpos()[i] as f32)
+            .unwrap_or(0.0);
+        let r = self
+            .ankle_dofadr
+            .map(|i| plant.qvel()[i] as f32)
+            .unwrap_or(0.0);
         (a, r)
     }
 
@@ -792,7 +804,10 @@ impl SimBackend {
     /// # Panics
     /// If called before `open()`.
     pub fn set_grade_deg(&mut self, grade_deg: f64) {
-        let plant = self.plant.as_mut().expect("set_grade_deg: backend is not open");
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("set_grade_deg: backend is not open");
         let (s, c) = grade_deg.to_radians().sin_cos();
         plant.set_gravity_profiled([9.81 * s, 0.0, -9.81 * c]);
     }
@@ -816,8 +831,19 @@ impl SimBackend {
     pub fn release_rider(&mut self, free: bool) -> bool {
         let linvel = self.truth_frame_linvel();
         let angvel = self.truth_frame_angvel();
-        let plant = self.plant.as_mut().expect("release_rider: backend is not open");
-        let (Some(ballast), Some(frame), Some(upper), Some(legs), Some(park), Some(free_q), Some(hip_q)) = (
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("release_rider: backend is not open");
+        let (
+            Some(ballast),
+            Some(frame),
+            Some(upper),
+            Some(legs),
+            Some(park),
+            Some(free_q),
+            Some(hip_q),
+        ) = (
             plant.body_id("ballast"),
             plant.body_id("frame"),
             plant.body_id("rider_free"),
@@ -825,10 +851,14 @@ impl SimBackend {
             plant.eq_id("rider_park"),
             plant.joint_qposadr("rider_free_j"),
             plant.joint_qposadr("rider_hip"),
-        ) else {
+        )
+        else {
             return false;
         };
-        let (Some(free_v), Some(hip_v)) = (plant.joint_dofadr("rider_free_j"), plant.joint_dofadr("rider_hip")) else {
+        let (Some(free_v), Some(hip_v)) = (
+            plant.joint_dofadr("rider_free_j"),
+            plant.joint_dofadr("rider_hip"),
+        ) else {
             return false;
         };
         // 5 kg stays on the ballast slide: its joint damping (600 N*s/m) on a
@@ -891,7 +921,10 @@ impl SimBackend {
     /// # Panics
     /// If called before `open()`.
     pub fn set_wheel_ground(&mut self, pos: [f64; 3], quat: [f64; 4]) {
-        let plant = self.plant.as_mut().expect("set_wheel_ground: backend is not open");
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("set_wheel_ground: backend is not open");
         if let Some(id) = plant.mocap_id("wheel_ground") {
             plant.set_mocap_pose(id, pos, quat);
         }
@@ -905,7 +938,10 @@ impl SimBackend {
     /// # Panics
     /// If called before `open()`.
     pub fn set_forward_speed(&mut self, v_m_s: f64, r_wheel_m: f64) {
-        let plant = self.plant.as_mut().expect("set_forward_speed: backend is not open");
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("set_forward_speed: backend is not open");
         let (Some(vadr), Some(wadr)) = (self.frame_free_dofadr, plant.joint_dofadr("wheel_hinge"))
         else {
             return;

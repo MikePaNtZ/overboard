@@ -133,7 +133,9 @@ impl LeanSteerParams {
         let mut p = Self::default();
         if let Ok(spec) = std::env::var("OVERBOARD_LEAN") {
             for kv in spec.split(',').filter(|s| !s.trim().is_empty()) {
-                let Some((k, v)) = kv.split_once('=') else { continue };
+                let Some((k, v)) = kv.split_once('=') else {
+                    continue;
+                };
                 let Ok(v) = v.trim().parse::<f32>() else {
                     eprintln!("sim-host: OVERBOARD_LEAN: '{kv}' is not key=number");
                     continue;
@@ -278,7 +280,10 @@ impl Rider {
         let tau = (-p.balance_kp_nm_per_rad * (o.roll_rad - phi_ref)
             - p.balance_kd_nms_per_rad * o.roll_rate_rad_s)
             .clamp(-p.balance_torque_limit_nm, p.balance_torque_limit_nm);
-        RiderCmd { offset_m: d_ref.clamp(-p.hip_reach_m, p.hip_reach_m), roll_torque_nm: tau }
+        RiderCmd {
+            offset_m: d_ref.clamp(-p.hip_reach_m, p.hip_reach_m),
+            roll_torque_nm: tau,
+        }
     }
 }
 
@@ -351,7 +356,10 @@ mod tests {
     fn upright_and_still_with_no_intent_commands_nothing() {
         let p = LeanSteerParams::default();
         let mut r = Rider::default();
-        assert_eq!(r.command(&p, 0.0, 3.0, &RiderObs::default(), 0.002), RiderCmd::default());
+        assert_eq!(
+            r.command(&p, 0.0, 3.0, &RiderObs::default(), 0.002),
+            RiderCmd::default()
+        );
     }
 
     #[test]
@@ -365,7 +373,10 @@ mod tests {
             }
             let k = r.kappa_intent_per_m;
             let d = steady_turn_offset(&p, v, k, roll_reference_at(&p, k, v));
-            assert!(d.abs() <= p.feasible_reach_fraction * p.hip_reach_m + 1e-3, "v {v}: {d}");
+            assert!(
+                d.abs() <= p.feasible_reach_fraction * p.hip_reach_m + 1e-3,
+                "v {v}: {d}"
+            );
         }
     }
 
@@ -387,7 +398,10 @@ mod tests {
     fn the_balance_torque_rolls_the_board_towards_the_reference() {
         let p = LeanSteerParams::default();
         let mut r = Rider::default();
-        let o = RiderObs { roll_rad: 0.1, ..Default::default() };
+        let o = RiderObs {
+            roll_rad: 0.1,
+            ..Default::default()
+        };
         assert!(r.command(&p, 0.0, 3.0, &o, 0.002).roll_torque_nm < 0.0);
     }
 

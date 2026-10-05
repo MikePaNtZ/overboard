@@ -333,7 +333,12 @@ impl GradeAwareAiding {
     pub const MAX_ODOMETRY_ACCEL_M_S2: f32 = 6.0;
 
     pub const fn new(k_m_s2_per_a: f32, tau_b_s: f32) -> Self {
-        GradeAwareAiding { k_m_s2_per_a, tau_b_s, load_m_s2: 0.0, last_v: None }
+        GradeAwareAiding {
+            k_m_s2_per_a,
+            tau_b_s,
+            load_m_s2: 0.0,
+            last_v: None,
+        }
     }
 
     /// Grade load, m/s^2 (negative downhill).
@@ -436,7 +441,12 @@ impl TiltFilter {
 
     /// Tilt implied by one accelerometer sample after removing the known
     /// accelerations. `None` if what is left is too small to have a direction.
-    fn accel_tilt(&self, s: &ImuSample, forward_accel_m_s2: f32, yaw_rate: f32) -> Option<(f32, f32)> {
+    fn accel_tilt(
+        &self,
+        s: &ImuSample,
+        forward_accel_m_s2: f32,
+        yaw_rate: f32,
+    ) -> Option<(f32, f32)> {
         let (sp, cp) = (libm::sinf(self.roll_rad), libm::cosf(self.roll_rad));
         let a_c = self.speed_m_s * yaw_rate; // centripetal, + towards the right
         let fx = s.accel_m_s2[0] - forward_accel_m_s2;
@@ -834,7 +844,13 @@ pub struct SpeedHoldLqr {
 
 impl SpeedHoldLqr {
     /// Gains in A/rad, A/(rad/s), A/(m/s), A/m — all magnitudes.
-    pub const fn new(k_pitch: f32, k_rate: f32, k_speed: f32, k_int: f32, accel_limit_m_s2: f32) -> Self {
+    pub const fn new(
+        k_pitch: f32,
+        k_rate: f32,
+        k_speed: f32,
+        k_int: f32,
+        accel_limit_m_s2: f32,
+    ) -> Self {
         SpeedHoldLqr {
             k_pitch,
             k_rate,
@@ -974,7 +990,11 @@ impl SpeedHoldLqr {
                 } else {
                     let a = (SPEED_HOLD_APPROACH_PER_S * (v_target_m_s - r)).clamp(-a_lim, a_lim);
                     // Speed-increasing (away from zero) is scaled; braking is not.
-                    if a * r > 0.0 || (r == 0.0 && a != 0.0) { a * self.drive_scale } else { a }
+                    if a * r > 0.0 || (r == 0.0 && a != 0.0) {
+                        a * self.drive_scale
+                    } else {
+                        a
+                    }
                 };
                 let da = SPEED_HOLD_JERK_M_S3 * dt_s;
                 self.a_ref += (a_des - self.a_ref).clamp(-da, da);
@@ -1111,7 +1131,11 @@ impl AuthorityMargin {
     pub const DRIVE_ZERO: f32 = 0.90;
 
     pub const fn new() -> Self {
-        AuthorityMargin { i_filt_a: 0.0, margin: 0.0, level: MarginLevel::None }
+        AuthorityMargin {
+            i_filt_a: 0.0,
+            margin: 0.0,
+            level: MarginLevel::None,
+        }
     }
 
     /// One cycle. `duty` is |V_motor| / V_pack, estimated by the caller.
@@ -1128,7 +1152,11 @@ impl AuthorityMargin {
         let alpha = dt_s / (Self::CURRENT_TAU_S + dt_s);
         self.i_filt_a += alpha * (libm::fabsf(applied_amps) - self.i_filt_a);
         let i_max = i_max_a.max(1e-3);
-        let grade_a = if k_m_s2_per_a > 0.0 { libm::fabsf(load_m_s2) / k_m_s2_per_a } else { 0.0 };
+        let grade_a = if k_m_s2_per_a > 0.0 {
+            libm::fabsf(load_m_s2) / k_m_s2_per_a
+        } else {
+            0.0
+        };
         self.margin = (self.i_filt_a / i_max)
             .max(libm::fabsf(duty) / Self::DUTY_LIMIT)
             .max(grade_a / i_max);
@@ -1232,7 +1260,11 @@ mod speed_hold_tests {
         c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
         let a = c.integral;
         c.update(0.0, 0.0, 4.0, 3.0, 0.1, true);
-        assert!((a - c.integral).abs() < 1e-6, "integral wound while saturated: {a} -> {}", c.integral);
+        assert!(
+            (a - c.integral).abs() < 1e-6,
+            "integral wound while saturated: {a} -> {}",
+            c.integral
+        );
     }
 
     #[test]
@@ -1253,7 +1285,10 @@ mod speed_hold_tests {
         // Duty alone (high speed) and the predicted grade current alone.
         assert_eq!(run(&mut m, 5.0, 0.80, 0.0), MarginLevel::Pulse); // 0.84
         let load = 0.0584 * 36.0; // predicts 36 A of 40 A
-        assert_eq!(run(&mut AuthorityMargin::new(), 5.0, 0.1, load), MarginLevel::Solid);
+        assert_eq!(
+            run(&mut AuthorityMargin::new(), 5.0, 0.1, load),
+            MarginLevel::Solid
+        );
     }
 
     #[test]
@@ -1876,22 +1911,27 @@ mod tilt_filter_tests {
     const G: f32 = 9.81;
 
     fn sample(t_ns: u64, gyro: [f32; 3], accel: [f32; 3]) -> ImuSample {
-        ImuSample { gyro_rad_s: gyro, accel_m_s2: accel, t_sample_ns: t_ns }
+        ImuSample {
+            gyro_rad_s: gyro,
+            accel_m_s2: accel,
+            t_sample_ns: t_ns,
+        }
     }
 
     /// Specific force and body rates of a board in a steady, balanced turn at
     /// speed `v`, yaw rate `psi_dot`, bank `phi`, pitch `theta` (FRD).
     fn banked(v: f32, psi_dot: f32, phi: f32, theta: f32) -> ([f32; 3], [f32; 3]) {
-        let (sp, cp, st, ct) = (libm::sinf(phi), libm::cosf(phi), libm::sinf(theta), libm::cosf(theta));
+        let (sp, cp, st, ct) = (
+            libm::sinf(phi),
+            libm::cosf(phi),
+            libm::sinf(theta),
+            libm::cosf(theta),
+        );
         // Body rates of a constant yaw rate about the world down axis.
         let gyro = [-psi_dot * st, psi_dot * sp * ct, psi_dot * cp * ct];
         // Gravity part, plus the centripetal acceleration v*psi_dot rotated in.
         let a_c = v * psi_dot;
-        let accel = [
-            G * st,
-            -G * sp * ct + a_c * cp,
-            -G * cp * ct + a_c * sp,
-        ];
+        let accel = [G * st, -G * sp * ct + a_c * cp, -G * cp * ct + a_c * sp];
         (gyro, accel)
     }
 
@@ -1916,7 +1956,11 @@ mod tilt_filter_tests {
             a = f.update(&[sample(k * 2_000_000, gyro, accel)], 0.0);
         }
         assert!(a.pitch_rad.abs() < 0.01, "pitch {}", a.pitch_rad);
-        assert!(a.pitch_rate_rad_s.abs() < 1e-3, "rate {}", a.pitch_rate_rad_s);
+        assert!(
+            a.pitch_rate_rad_s.abs() < 1e-3,
+            "rate {}",
+            a.pitch_rate_rad_s
+        );
         assert!((f.roll_rad() - phi).abs() < 0.01, "roll {}", f.roll_rad());
 
         // The single-axis filter, given the same turn, drifts nose-up: q > 0.
@@ -1935,12 +1979,20 @@ mod tilt_filter_tests {
         let (mut a, mut b) = (Attitude::default(), Attitude::default());
         for k in 0..2000u64 {
             let th = 0.05 * libm::sinf(k as f32 * 0.01);
-            let s = sample(k * 2_000_000, [0.0, 0.05 * 0.01 / 0.002 * libm::cosf(k as f32 * 0.01), 0.0],
-                [G * libm::sinf(th), 0.0, -G * libm::cosf(th)]);
+            let s = sample(
+                k * 2_000_000,
+                [0.0, 0.05 * 0.01 / 0.002 * libm::cosf(k as f32 * 0.01), 0.0],
+                [G * libm::sinf(th), 0.0, -G * libm::cosf(th)],
+            );
             a = f.update(&[s], 0.0);
             b = c.update(&[s], 0.0);
         }
-        assert!((a.pitch_rad - b.pitch_rad).abs() < 1e-3, "{} vs {}", a.pitch_rad, b.pitch_rad);
+        assert!(
+            (a.pitch_rad - b.pitch_rad).abs() < 1e-3,
+            "{} vs {}",
+            a.pitch_rad,
+            b.pitch_rad
+        );
     }
 }
 
@@ -1959,7 +2011,11 @@ mod grade_aware_tests {
             a = g.update(i, 3.0, 9.81, 0.002);
         }
         assert!(a.abs() < 0.02, "aid {a}");
-        assert!((g.grade_rad().to_degrees() - 6.84).abs() < 0.1, "grade {}", g.grade_rad().to_degrees());
+        assert!(
+            (g.grade_rad().to_degrees() - 6.84).abs() < 0.1,
+            "grade {}",
+            g.grade_rad().to_degrees()
+        );
     }
 
     #[test]

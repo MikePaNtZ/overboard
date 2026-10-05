@@ -49,7 +49,9 @@ impl GroundSurface {
         let nrow = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
         let ncol = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
         if raw.len() != 8 + nrow * ncol * 4 || nrow < 2 || ncol < 2 {
-            return Err(std::io::Error::other("hfield binary size does not match its header"));
+            return Err(std::io::Error::other(
+                "hfield binary size does not match its header",
+            ));
         }
         let heights = raw[8..]
             .chunks_exact(4)
@@ -60,7 +62,13 @@ impl GroundSurface {
 
     pub fn from_heights(heights: Vec<f32>, nrow: usize, ncol: usize, half_extent_m: f64) -> Self {
         let spacing_m = 2.0 * half_extent_m / (ncol as f64 - 1.0);
-        GroundSurface { heights, nrow, ncol, half_extent_m, spacing_m }
+        GroundSurface {
+            heights,
+            nrow,
+            ncol,
+            half_extent_m,
+            spacing_m,
+        }
     }
 
     fn post(&self, row: usize, col: usize) -> f64 {
@@ -71,7 +79,10 @@ impl GroundSurface {
     pub fn height(&self, x: f64, y: f64) -> f64 {
         let fc = ((x + self.half_extent_m) / self.spacing_m).clamp(0.0, (self.ncol - 1) as f64);
         let fr = ((y + self.half_extent_m) / self.spacing_m).clamp(0.0, (self.nrow - 1) as f64);
-        let (c0, r0) = ((fc as usize).min(self.ncol - 2), (fr as usize).min(self.nrow - 2));
+        let (c0, r0) = (
+            (fc as usize).min(self.ncol - 2),
+            (fr as usize).min(self.nrow - 2),
+        );
         let (tc, tr) = (fc - c0 as f64, fr - r0 as f64);
         let a = self.post(r0, c0) * (1.0 - tc) + self.post(r0, c0 + 1) * tc;
         let b = self.post(r0 + 1, c0) * (1.0 - tc) + self.post(r0 + 1, c0 + 1) * tc;
@@ -152,7 +163,10 @@ mod tests {
         assert!(q[2] < 0.0 && q[1].abs() < 1e-12);
         // The top face centre is on the road.
         let n = s.normal(0.0, 0.0);
-        let top = [p[0] + PLATE_HALF_THICKNESS_M * n[0], p[2] + PLATE_HALF_THICKNESS_M * n[2]];
+        let top = [
+            p[0] + PLATE_HALF_THICKNESS_M * n[0],
+            p[2] + PLATE_HALF_THICKNESS_M * n[2],
+        ];
         assert!((top[1] - g * top[0]).abs() < 1e-6, "{top:?}");
     }
 
