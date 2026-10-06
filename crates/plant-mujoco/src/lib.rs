@@ -73,6 +73,10 @@ extern "C" {
         pos: *const f64,
         quat: *const f64,
     );
+    fn plant_mujoco_geom_id(model: *mut c_void, name: *const c_char) -> c_int;
+    fn plant_mujoco_geom_bodyid(model: *mut c_void, geom_id: c_int) -> c_int;
+    fn plant_mujoco_ncon(data: *mut c_void) -> c_int;
+    fn plant_mujoco_contact_geoms(data: *mut c_void, i: c_int, out2: *mut c_int);
     fn plant_mujoco_eq_id(model: *mut c_void, name: *const c_char) -> c_int;
     fn plant_mujoco_set_eq_active(data: *mut c_void, eq_id: c_int, on: c_int);
     fn plant_mujoco_body_mass(model: *mut c_void, body_id: c_int) -> f64;
@@ -461,6 +465,36 @@ impl Plant {
         } else {
             Some(id as usize)
         }
+    }
+
+    /// `mjModel`'s geom id for `name`, or `None` if there is no such geom.
+    /// sim-host resolves each moving object's geom here for the contact flag.
+    pub fn geom_id(&self, name: &str) -> Option<usize> {
+        let name_c = CString::new(name).expect("geom name must not contain a NUL byte");
+        // SAFETY: see `sensor_adr_dim`.
+        let id = unsafe { plant_mujoco_geom_id(self.model, name_c.as_ptr()) };
+        (id >= 0).then_some(id as usize)
+    }
+
+    /// The body a geom belongs to (`mjModel::geom_bodyid`).
+    pub fn geom_body(&self, geom_id: usize) -> usize {
+        // SAFETY: `geom_id` came from `geom_id()`, so it is in range.
+        unsafe { plant_mujoco_geom_bodyid(self.model, geom_id as c_int) as usize }
+    }
+
+    /// The active contacts this step as geom-id pairs (`mjData::contact`).
+    /// Valid only after a step, when `mj_step` has filled the contact array.
+    pub fn contact_geom_pairs(&self) -> Vec<(usize, usize)> {
+        // SAFETY: `self.data` is owned; `ncon` bounds the index, and the shim
+        // writes exactly two ints per call.
+        let n = unsafe { plant_mujoco_ncon(self.data) };
+        let mut pairs = Vec::with_capacity(n.max(0) as usize);
+        for i in 0..n {
+            let mut g = [0 as c_int; 2];
+            unsafe { plant_mujoco_contact_geoms(self.data, i, g.as_mut_ptr()) };
+            pairs.push((g[0] as usize, g[1] as usize));
+        }
+        pairs
     }
 
     /// The index of equality constraint `name`, or `None`.

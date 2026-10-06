@@ -1,0 +1,29 @@
+{
+  "objects": [
+    {
+      "id": 1,
+      "kind": "car",
+      "size": [4.6, 1.9, 1.5],
+      "path": [[-20.0, -10.0], [20.0, -10.0], [20.0, -2.0], [-20.0, -2.0]],
+      "closed": true,
+      "speed_mps": 8.0,
+      "t0_s": 0.0,
+      "pause": [[30.0, 2.0]]
+    },
+    {
+      "id": 2,
+      "kind": "pedestrian",
+      "path": [[-15.0, -8.0], [-15.0, 2.0]],
+      "closed": false,
+      "speed_mps": 1.4,
+      "t0_s": 1.0
+    },
+    {
+      "id": 3,
+      "kind": "cyclist",
+      "path": [[18.0, -6.0], [-18.0, -6.0]],
+      "closed": false,
+      "speed_mps": 5.0
+    }
+  ]
+}

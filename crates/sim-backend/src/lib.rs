@@ -812,6 +812,69 @@ impl SimBackend {
         plant.set_gravity_profiled([9.81 * s, 0.0, -9.81 * c]);
     }
 
+    /// Puts the mocap body `name` at `pos` with orientation `quat`
+    /// (w, x, y, z). sim-host drives each moving object's mocap pose this way,
+    /// the same path `set_wheel_ground` uses. A no-op on a model without that
+    /// body or whose body is not a mocap body.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn set_mocap_pose(&mut self, name: &str, pos: [f64; 3], quat: [f64; 4]) {
+        let plant = self
+            .plant
+            .as_mut()
+            .expect("set_mocap_pose: backend is not open");
+        if let Some(id) = plant.mocap_id(name) {
+            plant.set_mocap_pose(id, pos, quat);
+        }
+    }
+
+    /// The geom id of `name`, or `None`. sim-host resolves each moving
+    /// object's geom here for the contact flag.
+    pub fn geom_id(&self, name: &str) -> Option<usize> {
+        self.plant.as_ref()?.geom_id(name)
+    }
+
+    /// The body id of `name`, or `None`. sim-host resolves the board-side
+    /// bodies (frame, wheel, rider ballast, tumble rider) for the contact
+    /// flag here.
+    pub fn body_id(&self, name: &str) -> Option<usize> {
+        self.plant.as_ref()?.body_id(name)
+    }
+
+    /// For each geom id in `object_geoms`, whether that geom shares an active
+    /// contact this tick with any geom whose body is in `board_bodies`.
+    /// sim-host reports this as the moving-object packet's contact flag. Reads
+    /// the contacts `mj_step` computed, so it is valid only after a step.
+    ///
+    /// # Panics
+    /// If called before `open()`.
+    pub fn objects_in_contact(
+        &self,
+        object_geoms: &[Option<usize>],
+        board_bodies: &[usize],
+    ) -> Vec<bool> {
+        let plant = self
+            .plant
+            .as_ref()
+            .expect("objects_in_contact: backend is not open");
+        let mut hit = vec![false; object_geoms.len()];
+        for (g1, g2) in plant.contact_geom_pairs() {
+            let (b1, b2) = (plant.geom_body(g1), plant.geom_body(g2));
+            // A contact flags an object only when its geom is one side and a
+            // board body is the other.
+            for (k, obj) in object_geoms.iter().enumerate() {
+                let Some(obj) = obj else { continue };
+                let touches = (g1 == *obj && board_bodies.contains(&b2))
+                    || (g2 == *obj && board_bodies.contains(&b1));
+                if touches {
+                    hit[k] = true;
+                }
+            }
+        }
+        hit
+    }
+
     /// World position and orientation of body `name`, or `None`.
     pub fn truth_body_pose(&self, name: &str) -> Option<([f64; 3], [f64; 4])> {
         let plant = self.plant.as_ref()?;

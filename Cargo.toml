@@ -37,5 +37,6 @@ safety = { path = "crates/safety" }
 sim-backend = { path = "crates/sim-backend" }
 plant-mujoco = { path = "crates/plant-mujoco" }
 serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = "1"
 socketcan = "3.6"
 libc = "0.2"

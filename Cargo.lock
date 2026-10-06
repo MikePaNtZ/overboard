@@ -402,6 +402,8 @@ dependencies = [
  "hal",
  "hal-actuate",
  "safety",
+ "serde",
+ "serde_json",
  "sim-backend",
 ]
 

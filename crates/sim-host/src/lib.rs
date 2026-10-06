@@ -22,6 +22,7 @@ pub mod ground;
 pub mod host;
 pub mod hud;
 pub mod lean_steer;
+pub mod objects;
 pub mod pacer;
 pub mod scenario;
 pub mod wire;

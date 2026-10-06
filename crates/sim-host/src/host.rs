@@ -734,6 +734,45 @@ fn splice_obstacles(
     Ok(xml.replace("</worldbody>", &format!("{geoms}</worldbody>")))
 }
 
+/// `--objects`: splices each moving scripted object as a MOCAP body with one
+/// geom (box or capsule), like `splice_obstacles` but mocap-driven so the
+/// host moves each one every tick from `crate::objects` kinematics. Each body
+/// starts at its path start (t = 0), on the terrain (or z = 0 without one).
+fn splice_objects(
+    xml: &str,
+    objects: &[crate::objects::ScriptedObject],
+    surface: Option<&crate::ground::GroundSurface>,
+) -> Result<String, HostError> {
+    let bad = |what: String| {
+        HostError::Io(std::io::Error::other(format!(
+            "sim-host: --objects: {what}"
+        )))
+    };
+    if xml.matches("</worldbody>").count() != 1 {
+        return Err(bad("no single </worldbody>".into()));
+    }
+    let mut bodies = String::new();
+    for o in objects {
+        let (x0, y0, yaw0) = o.pose_at(0.0);
+        let z0 = surface.map_or(0.0, |g| g.height(x0, y0)) + o.half_height();
+        let q = zyx_intrinsic_quat(yaw0, 0.0, 0.0);
+        bodies.push_str(&format!(
+            r#"<body name="{}" mocap="true" pos="{x0:.4} {y0:.4} {z0:.4}" quat="{:.9} {:.9} {:.9} {:.9}">
+      {}
+    </body>
+    "#,
+            o.body_name(),
+            q[0],
+            q[1],
+            q[2],
+            q[3],
+            o.geom_xml(),
+        ));
+    }
+    eprintln!("sim-host: --objects: {} moving objects", objects.len());
+    Ok(xml.replace("</worldbody>", &format!("{bodies}</worldbody>")))
+}
+
 /// `--tumble`: a free two-part rider (torso and head; legs on a ball hip),
 /// parked 50 m up on a weld until a fall. Low-resolution on purpose: it shows
 /// how a rider leaves the board and slides, not a human body. It does not
@@ -2557,6 +2596,30 @@ pub struct HostConfig {
     /// terrain surface. They are hard posts (they do not move); the game draws
     /// them at the same place.
     pub obstacles: Option<PathBuf>,
+    /// `--objects PATH`: moving scripted objects (cars, pedestrians,
+    /// cyclists) from an objects.json file, computed here and spliced as
+    /// mocap bodies. Needs a generated model (`--lean-steer`). The file shape:
+    ///
+    /// ```json
+    /// {"objects":[{"id":1,"kind":"car","size":[4.6,1.9,1.5],
+    ///   "path":[[x,y],...],"closed":true,"speed_mps":8.0,"t0_s":0.0,
+    ///   "pause":[[s_m,seconds],...]}]}
+    /// ```
+    ///
+    /// `kind` is `car`, `pedestrian` or `cyclist`. `size`, `closed`, `t0_s`
+    /// and `pause` are optional; `path` (world frame, metres) needs at least
+    /// two points. A `pause` is `[arc length s_m, wait seconds]`. On an OPEN
+    /// path the pauses run once, then the object stops at the end. On a
+    /// CLOSED loop the pauses are arc lengths within one lap (0 <= s_m < loop
+    /// length) and repeat every lap, so a car stops at the same crosswalks
+    /// each time round. See `crate::objects` and
+    /// `sim/carve/objects_example.json`.
+    pub objects: Option<PathBuf>,
+    /// `--objects-out-addr ADDR`: also send the moving-objects packet
+    /// (`crate::objects::ObjectsOut`) to this UDP address, every 10th tick
+    /// (50 Hz). Without it the objects still move and collide; only the
+    /// packet is off.
+    pub objects_out_addr: Option<SocketAddr>,
     /// `--rider-reach-back M`: the backward stick range, m (default: the
     /// reach). Needs `--rider-reach` (the slide allows 0.35 m). The rider
     /// model in the Monte Carlo does not use it.
@@ -3020,6 +3083,8 @@ impl Default for HostConfig {
             foot_torque: false,
             rider_reach_back_m: None,
             obstacles: None,
+            objects: None,
+            objects_out_addr: None,
             sensors_stage0: false,
             noise_scale: 1.0,
             extra_delay_ms: 0.0,
@@ -3433,6 +3498,34 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         let xml = std::fs::read_to_string(path)?;
         std::fs::write(path, splice_obstacles(&xml, csv, surface.as_ref())?)?;
     }
+    // `--objects`: parse the file, then splice one mocap body per object.
+    let scripted_objects = if let Some(path) = &cfg.objects {
+        let Some(model) = &generated_model else {
+            return Err(HostError::Io(std::io::Error::other(
+                "sim-host: --objects needs a generated model (use --lean-steer)",
+            )));
+        };
+        let text = std::fs::read_to_string(path)?;
+        let objects = crate::objects::parse_objects(&text).map_err(|e| {
+            HostError::Io(std::io::Error::other(format!(
+                "sim-host: --objects {}: {e}",
+                path.display()
+            )))
+        })?;
+        let surface = match &terrain {
+            Some(t) => Some(crate::ground::GroundSurface::from_hfield_bin(
+                &t.hfield_path,
+                t.half_extent_x_m,
+                t.half_extent_y_m,
+            )?),
+            None => None,
+        };
+        let xml = std::fs::read_to_string(model)?;
+        std::fs::write(model, splice_objects(&xml, &objects, surface.as_ref())?)?;
+        objects
+    } else {
+        Vec::new()
+    };
     if cfg.tumble {
         let Some(path) = &generated_model else {
             return Err(HostError::Io(std::io::Error::other(
@@ -3504,6 +3597,30 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         }
     };
     place_wheel_ground(&mut backend);
+    // `--objects` runtime state: the terrain surface the objects stand on,
+    // each object's geom id (for the contact flag), and the board-side body
+    // ids a contact counts against (board, wheel, rider ballast, tumble
+    // rider). A geom or body that the model does not have is skipped.
+    let object_ground = match &terrain {
+        Some(t) => Some(
+            crate::ground::GroundSurface::from_hfield_bin(
+                &t.hfield_path,
+                t.half_extent_x_m,
+                t.half_extent_y_m,
+            )
+            .map_err(HostError::Io)?,
+        ),
+        None => None,
+    };
+    let object_geom_ids: Vec<Option<usize>> = scripted_objects
+        .iter()
+        .map(|o| backend.geom_id(&o.geom_name()))
+        .collect();
+    let board_body_ids: Vec<usize> = ["frame", "wheel", "ballast", "rider_free", "rider_legs"]
+        .iter()
+        .filter_map(|n| backend.body_id(n))
+        .collect();
+    let mut objects_seq: u64 = 0;
     // `--hold-until-arm`: the spawn pose to hold, and whether a player has armed.
     let spawn_qpos = backend.truth_qpos();
     let mut armed_seen = !cfg.hold_until_arm;
@@ -4312,6 +4429,40 @@ pub fn run(cfg: HostConfig) -> Result<RunSummary, HostError> {
         }
         let obs = backend.wait_observe().map_err(HostError::Backend)?;
         t_known_s = obs.t_recv_ns as f64 * 1e-9;
+
+        // `--objects`: move each scripted object to its kinematic pose at the
+        // sim time StateOut reports, so a reset (which rewinds the plant
+        // clock) rewinds the objects too. The mocap pose takes effect at the
+        // next step, the same one-tick relationship `place_wheel_ground`
+        // carries. The contact flag reads the step just taken.
+        if !scripted_objects.is_empty() {
+            let contacts = backend.objects_in_contact(&object_geom_ids, &board_body_ids);
+            let mut states = Vec::with_capacity(scripted_objects.len());
+            for (k, o) in scripted_objects.iter().enumerate() {
+                let (x, y, yaw) = o.pose_at(t_known_s);
+                let z = object_ground.as_ref().map_or(0.0, |g| g.height(x, y)) + o.half_height();
+                let (sy, cy) = (0.5 * yaw).sin_cos();
+                backend.set_mocap_pose(&o.body_name(), [x, y, z], [cy, 0.0, 0.0, sy]);
+                states.push(crate::objects::ObjectState {
+                    id: o.id,
+                    kind: o.kind.wire(),
+                    flags: contacts.get(k).copied().unwrap_or(false) as u8,
+                    pos: [x as f32, y as f32, z as f32],
+                    yaw: yaw as f32,
+                });
+            }
+            if let Some(addr) = cfg.objects_out_addr {
+                if ticks.is_multiple_of(10) {
+                    let pkt = crate::objects::ObjectsOut {
+                        seq: objects_seq,
+                        sim_time_s: t_known_s,
+                        objects: states,
+                    };
+                    let _ = out_socket.send_to(&pkt.to_bytes(), addr);
+                    objects_seq += 1;
+                }
+            }
+        }
 
         // Controller: raw IMU -> estimate -> regulate -> envelope. Aiding
         // mode is `cfg.estimator_aiding` (default: command feedforward,
