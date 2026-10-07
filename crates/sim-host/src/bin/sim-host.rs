@@ -175,6 +175,22 @@ fn main() -> ExitCode {
                 cfg.obstacles = Some(std::path::PathBuf::from(v));
                 i += 2;
             }
+            "--objects" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("sim-host: --objects needs an objects.json path");
+                    return ExitCode::FAILURE;
+                };
+                cfg.objects = Some(std::path::PathBuf::from(v));
+                i += 2;
+            }
+            "--objects-out-addr" => {
+                let Some(Ok(a)) = args.get(i + 1).map(|v| v.parse::<SocketAddr>()) else {
+                    eprintln!("sim-host: --objects-out-addr needs ADDR:PORT");
+                    return ExitCode::FAILURE;
+                };
+                cfg.objects_out_addr = Some(a);
+                i += 2;
+            }
             "--rider-reach-back" => {
                 let Some(Ok(x)) = args.get(i + 1).map(|v| v.parse::<f64>()) else {
                     eprintln!("sim-host: --rider-reach-back needs a number (m)");

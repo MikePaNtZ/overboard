@@ -32,3 +32,5 @@ hal-actuate = { workspace = true }
 control-core = { workspace = true }
 safety = { workspace = true }
 sim-backend = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

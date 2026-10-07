@@ -272,6 +272,35 @@ void plant_mujoco_set_mocap(void* data, int mocap_id, const double* pos, const d
   memcpy(((mjData*)data)->mocap_quat + 4 * mocap_id, quat, 4 * sizeof(double));
 }
 
+// --- sim-host `--objects`: moving scripted objects, contact flag ----------
+// Geom lookup by NAME, for sim-host's moving objects: each scripted object
+// has one named geom, and the contact flag reports whether it touches the
+// board. Same by-name-not-offset reasoning as plant_mujoco_sensor_id.
+int plant_mujoco_geom_id(void* model, const char* name) {
+  return mj_name2id((const mjModel*)model, mjOBJ_GEOM, name);
+}
+
+// The body a geom belongs to (`mjModel::geom_bodyid`), so the Rust side can
+// map a contact's two geoms back to the bodies and test "object geom touches
+// a board body".
+int plant_mujoco_geom_bodyid(void* model, int geom_id) {
+  return ((const mjModel*)model)->geom_bodyid[geom_id];
+}
+
+// The number of active contacts this step (`mjData::ncon`). Call AFTER
+// plant_mujoco_step, when the contacts are computed.
+int plant_mujoco_ncon(void* data) {
+  return ((mjData*)data)->ncon;
+}
+
+// Ownership: `out2` must point to 2 writable ints. The two geom ids of the
+// i-th active contact (`mjData::contact[i].geom`), for sim-host's moving-
+// object contact flag. Call AFTER plant_mujoco_step, same rule as ncon.
+void plant_mujoco_contact_geoms(void* data, int i, int* out2) {
+  out2[0] = ((mjData*)data)->contact[i].geom[0];
+  out2[1] = ((mjData*)data)->contact[i].geom[1];
+}
+
 // --- sim-host `--tumble`: release the rider as a free body after a fall ----
 int plant_mujoco_eq_id(void* model, const char* name) {
   return mj_name2id((const mjModel*)model, mjOBJ_EQUALITY, name);
